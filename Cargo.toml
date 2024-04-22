@@ -1,0 +1,18 @@
+[package]
+name = "worldtraintimes"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-compression = { version = "0.4.0", features = ["gzip", "tokio"] }
+async-trait = "0.1.68"
+chrono = "0.4.26"
+chrono-tz = "0.8.2"
+config-file = "0.2.3"
+futures = "0.3.28"
+reqwest = { version = "0.11.18", features = ["stream"] }
+serde = { version = "1.0.164", features = ["derive"] }
+tokio = { version = "1.28.2", features = ["rt-multi-thread", "macros"] }
+tokio-util = { version = "0.7.8", features = ["compat"] }
