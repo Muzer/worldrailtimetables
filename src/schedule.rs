@@ -2,6 +2,7 @@ use chrono::{DateTime, NaiveTime, Weekday};
 use chrono_tz::Tz;
 use std::collections::HashMap;
 
+#[derive(Clone, Debug)]
 pub struct Schedule {
     pub locations: HashMap<String, Location>,
     pub trains: HashMap<String, Vec<Train>>, // one ID could have multiple permanent schedules on
@@ -27,6 +28,7 @@ impl Schedule {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Location {
     pub id: String,
     pub name: String,
@@ -34,13 +36,13 @@ pub struct Location {
                                    // ID for retail; we should expose the public one.
 }
 
+#[derive(Clone, Debug)]
 pub struct TrainValidityPeriod {
     pub valid_begin: DateTime::<Tz>,
     pub valid_end: DateTime::<Tz>,
 }
 
-#[derive(PartialEq)]
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DaysOfWeek {
     pub monday: bool,
     pub tuesday: bool,
@@ -74,6 +76,7 @@ impl IntoIterator for &DaysOfWeek {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TrainType {
     OrdinaryBus,
     ReplacementBus,
@@ -130,13 +133,14 @@ pub enum TrainType {
     Trip,
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TrainSource {
     LongTerm,
     ShortTerm,
     VeryShortTerm,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TrainPower {
     DieselLocomotive,
     DieselElectricMultipleUnit,
@@ -152,18 +156,21 @@ pub enum TrainPower {
     SteamRailcar,
 }
 
+#[derive(Clone, Debug)]
 pub struct TrainVehicle {
     pub id: String,
     pub description: String,
     // TODO more here, types etc.?
 }
 
+#[derive(Clone, Debug)]
 pub struct TrainAllocation {
     pub id: String,
     pub description: String,
     pub vehicles: Option<Vec<TrainVehicle>>
 }
 
+#[derive(Clone, Debug)]
 pub struct OperatingCharacteristics {
     pub vacuum_braked: bool,
     pub one_hundred_mph: bool,
@@ -178,6 +185,7 @@ pub struct OperatingCharacteristics {
     pub sb1c_gauge: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ReservationField {
     Possible,
     Mandatory,
@@ -186,6 +194,7 @@ pub enum ReservationField {
     NotMandatory, // some railways might not have possible/impossible distinction
 }
 
+#[derive(Clone, Debug)]
 pub struct Reservations {
     pub seats: ReservationField,
     pub bicycles: ReservationField,
@@ -194,6 +203,7 @@ pub struct Reservations {
     pub wheelchairs: ReservationField,
 }
 
+#[derive(Clone, Debug)]
 pub struct Catering {
     pub buffet: bool,
     pub first_class_restaurant: bool,
@@ -203,6 +213,7 @@ pub struct Catering {
     pub trolley: bool,
 }
 
+#[derive(Clone, Debug)]
 pub struct Activities {
     pub detach: bool,
     pub attach: bool,
@@ -240,6 +251,7 @@ pub struct Activities {
     pub stops_to_cross: bool,
 }
 
+#[derive(Clone, Debug)]
 pub struct AssociationNode {
     pub other_train_id: String,
     pub other_train_location_id_suffix: Option<String>,
@@ -252,6 +264,7 @@ pub struct AssociationNode {
     pub source: TrainSource,
 }
 
+#[derive(Clone, Debug)]
 pub struct TrainLocation {
     pub timezone: Tz,
     pub id: String,
@@ -283,6 +296,7 @@ pub struct TrainLocation {
     pub forms_from: Option<AssociationNode>,
 }
 
+#[derive(Clone, Debug)]
 pub struct VariableTrain {
     pub train_type: TrainType,
     pub public_id: Option<String>,
@@ -306,6 +320,7 @@ pub struct VariableTrain {
     pub operator: String,
 }
 
+#[derive(Clone, Debug)]
 pub struct Train {
     pub id: String,
     pub validity: Vec<TrainValidityPeriod>,
