@@ -40,6 +40,7 @@ pub struct TrainValidityPeriod {
 }
 
 #[derive(PartialEq)]
+#[derive(Clone)]
 pub struct DaysOfWeek {
     pub monday: bool,
     pub tuesday: bool,

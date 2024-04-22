@@ -3,15 +3,13 @@ use crate::importer::Importer;
 use crate::error::Error;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, TimeZone};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone};
 use chrono::format::ParseError;
-use chrono::naive::Days;
 use chrono_tz::Tz;
 use chrono_tz::Europe::London;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::ops::Add;
 use tokio::io::AsyncBufReadExt;
 
 #[derive(Default)]
@@ -92,7 +90,7 @@ impl CifImporter {
                 ModificationType::Amend => assoc.validity[0].valid_begin != *begin, // for deleted amendments we delete the actual replacement along with cleaning up the replacement list in the original
                 ModificationType::Delete => true, // for deleted cancellations we never delete an item here
             } || other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix);
-            assoc.cancellations.retain(|validity| match &stp_modification_type {
+            assoc.cancellations.retain(|(validity, _days_of_week)| match &stp_modification_type {
                 ModificationType::Insert => true, // never delete from here for insertions
                 ModificationType::Amend => true,
                 ModificationType::Delete => validity.valid_begin != *begin,
@@ -105,34 +103,6 @@ impl CifImporter {
             if !(other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix) {
                 // check for no overlapping days at all
                 if days_of_week.into_iter().zip(assoc.days.into_iter()).find(|(new_day, assoc_day)| *new_day && *assoc_day).is_none() {
-                    continue;
-                }
-                if *days_of_week != assoc.days && begin != end {
-                    let mut cur_day = begin.clone();
-                    let mut start_of_range = begin.clone();
-                    let mut in_range = true;
-                    while cur_day != *end {
-                        if in_range && assoc.days.get_by_weekday(cur_day.weekday()) && !days_of_week.get_by_weekday(cur_day.weekday()) {
-                            in_range = false;
-                            let new_cancel = TrainValidityPeriod {
-                                valid_begin: start_of_range.clone(),
-                                valid_end: cur_day - Days::new(1)
-                            };
-                            assoc.cancellations.push(new_cancel);
-                        }
-                        if !in_range && days_of_week.get_by_weekday(cur_day.weekday()) {
-                            in_range = true;
-                            start_of_range = cur_day.clone();
-                        }
-                        cur_day = cur_day.add(Days::new(1));
-                    }
-                    if in_range {
-                        let new_cancel = TrainValidityPeriod {
-                            valid_begin: start_of_range.clone(),
-                            valid_end: cur_day
-                        };
-                        assoc.cancellations.push(new_cancel);
-                    }
                     continue;
                 }
                 let new_begin = if begin > &assoc.validity.iter().min_by(|x, y| x.valid_begin.cmp(&y.valid_begin)).unwrap().valid_begin {
@@ -154,7 +124,7 @@ impl CifImporter {
                     valid_begin: new_begin,
                     valid_end: new_end
                 };
-                assoc.cancellations.push(new_cancel)
+                assoc.cancellations.push((new_cancel, days_of_week.clone()))
             }
         }
     }
@@ -184,7 +154,7 @@ impl CifImporter {
                             ModificationType::Amend => assoc.validity[0].valid_begin != *begin, // for deleted amendments we delete the actual replacement along with cleaning up the replacement list in the original
                             ModificationType::Delete => true, // for deleted cancellations we never delete an item here
                         } || other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix);
-                        assoc.cancellations.retain(|validity| match &stp_modification_type {
+                        assoc.cancellations.retain(|(validity, _days_of_week)| match &stp_modification_type {
                             ModificationType::Insert => true, // never delete from here for insertions
                             ModificationType::Amend => true,
                             ModificationType::Delete => validity.valid_begin != *begin,
@@ -220,7 +190,7 @@ impl CifImporter {
                             ModificationType::Amend => assoc.validity[0].valid_begin != *begin, // for deleted amendments we delete the actual replacement along with cleaning up the replacement list in the original
                             ModificationType::Delete => true, // for deleted cancellations we never delete an item here
                         } || other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix);
-                        assoc.cancellations.retain(|validity| match &stp_modification_type {
+                        assoc.cancellations.retain(|(validity, _days_of_week)| match &stp_modification_type {
                             ModificationType::Insert => true, // never delete from here for insertions
                             ModificationType::Amend => true,
                             ModificationType::Delete => validity.valid_begin != *begin,
@@ -246,34 +216,6 @@ impl CifImporter {
                             if days_of_week.into_iter().zip(assoc.days.into_iter()).find(|(new_day, assoc_day)| *new_day && *assoc_day).is_none() {
                                 continue;
                             }
-                            if *days_of_week != assoc.days && begin != end {
-                                let mut cur_day = begin.clone();
-                                let mut start_of_range = begin.clone();
-                                let mut in_range = true;
-                                while cur_day != *end {
-                                    if in_range && assoc.days.get_by_weekday(cur_day.weekday()) && !days_of_week.get_by_weekday(cur_day.weekday()) {
-                                        in_range = false;
-                                        let new_cancel = TrainValidityPeriod {
-                                            valid_begin: start_of_range.clone(),
-                                            valid_end: cur_day - Days::new(1)
-                                        };
-                                        assoc.cancellations.push(new_cancel);
-                                    }
-                                    if !in_range && days_of_week.get_by_weekday(cur_day.weekday()) {
-                                        in_range = true;
-                                        start_of_range = cur_day.clone();
-                                    }
-                                    cur_day = cur_day.add(Days::new(1));
-                                }
-                                if in_range {
-                                    let new_cancel = TrainValidityPeriod {
-                                        valid_begin: start_of_range.clone(),
-                                        valid_end: cur_day
-                                    };
-                                    assoc.cancellations.push(new_cancel);
-                                }
-                                continue;
-                            }
                             let new_begin = if begin > &assoc.validity.iter().min_by(|x, y| x.valid_begin.cmp(&y.valid_begin)).unwrap().valid_begin {
                                 begin.clone()
                             }
@@ -293,7 +235,7 @@ impl CifImporter {
                                 valid_begin: new_begin,
                                 valid_end: new_end
                             };
-                            assoc.cancellations.push(new_cancel)
+                            assoc.cancellations.push((new_cancel, days_of_week.clone()))
                         }
                     }
                 }
@@ -316,34 +258,6 @@ impl CifImporter {
                             if days_of_week.into_iter().zip(assoc.days.into_iter()).find(|(new_day, assoc_day)| *new_day && *assoc_day).is_none() {
                                 continue;
                             }
-                            if *days_of_week != assoc.days && begin != end {
-                                let mut cur_day = begin.clone();
-                                let mut start_of_range = begin.clone();
-                                let mut in_range = true;
-                                while cur_day != *end {
-                                    if in_range && assoc.days.get_by_weekday(cur_day.weekday()) && !days_of_week.get_by_weekday(cur_day.weekday()) {
-                                        in_range = false;
-                                        let new_cancel = TrainValidityPeriod {
-                                            valid_begin: start_of_range.clone(),
-                                            valid_end: cur_day - Days::new(1)
-                                        };
-                                        assoc.cancellations.push(new_cancel);
-                                    }
-                                    if !in_range && days_of_week.get_by_weekday(cur_day.weekday()) {
-                                        in_range = true;
-                                        start_of_range = cur_day.clone();
-                                    }
-                                    cur_day = cur_day.add(Days::new(1));
-                                }
-                                if in_range {
-                                    let new_cancel = TrainValidityPeriod {
-                                        valid_begin: start_of_range.clone(),
-                                        valid_end: cur_day
-                                    };
-                                    assoc.cancellations.push(new_cancel);
-                                }
-                                continue;
-                            }
                             let new_begin = if begin > &assoc.validity.iter().min_by(|x, y| x.valid_begin.cmp(&y.valid_begin)).unwrap().valid_begin {
                                 begin.clone()
                             }
@@ -363,7 +277,7 @@ impl CifImporter {
                                 valid_begin: new_begin,
                                 valid_end: new_end
                             };
-                            assoc.cancellations.push(new_cancel)
+                            assoc.cancellations.push((new_cancel, days_of_week.clone()))
                         }
                     }
                 }
@@ -452,7 +366,7 @@ impl CifImporter {
                         match stp_modification_type {
                             ModificationType::Insert => panic!("Insert found where Amend or Cancel expected"),
                             ModificationType::Amend => assoc.replacements.retain(|replacement| replacement.validity[0].valid_begin != begin),
-                            ModificationType::Delete => assoc.cancellations.retain(|cancellation| cancellation.valid_begin != begin),
+                            ModificationType::Delete => assoc.cancellations.retain(|(cancellation, _days_of_week)| cancellation.valid_begin != begin),
                         }
                     }
                 }
@@ -500,34 +414,6 @@ impl CifImporter {
                     if days_of_week.into_iter().zip(assoc.days.into_iter()).find(|(new_day, assoc_day)| *new_day && *assoc_day).is_none() {
                         continue;
                     }
-                    if days_of_week != assoc.days && begin != end {
-                        let mut cur_day = begin.clone();
-                        let mut start_of_range = begin.clone();
-                        let mut in_range = true;
-                        while cur_day != end {
-                            if in_range && assoc.days.get_by_weekday(cur_day.weekday()) && !days_of_week.get_by_weekday(cur_day.weekday()) {
-                                in_range = false;
-                                let new_cancel = TrainValidityPeriod {
-                                    valid_begin: start_of_range.clone(),
-                                    valid_end: cur_day - Days::new(1)
-                                };
-                                assoc.cancellations.push(new_cancel);
-                            }
-                            if !in_range && days_of_week.get_by_weekday(cur_day.weekday()) {
-                                in_range = true;
-                                start_of_range = cur_day.clone();
-                            }
-                            cur_day = cur_day.add(Days::new(1));
-                        }
-                        if in_range {
-                            let new_cancel = TrainValidityPeriod {
-                                valid_begin: start_of_range.clone(),
-                                valid_end: cur_day
-                            };
-                            assoc.cancellations.push(new_cancel);
-                        }
-                        continue;
-                    }
                     let new_begin = if begin > assoc.validity.iter().min_by(|x, y| x.valid_begin.cmp(&y.valid_begin)).unwrap().valid_begin {
                         begin.clone()
                     }
@@ -547,7 +433,7 @@ impl CifImporter {
                         valid_begin: new_begin,
                         valid_end: new_end
                     };
-                    assoc.cancellations.push(new_cancel)
+                    assoc.cancellations.push((new_cancel, days_of_week.clone()))
                 }
             }
 
@@ -636,7 +522,7 @@ impl CifImporter {
                         match stp_modification_type {
                             ModificationType::Insert => panic!("Insert found where Amend or Cancel expected"),
                             ModificationType::Amend => assoc.replacements.retain(|replacement| replacement.validity[0].valid_begin != begin),
-                            ModificationType::Delete => assoc.cancellations.retain(|cancellation| cancellation.valid_begin != begin),
+                            ModificationType::Delete => assoc.cancellations.retain(|(cancellation, _days_of_week)| cancellation.valid_begin != begin),
                         }
                     }
                 }
