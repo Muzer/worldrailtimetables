@@ -78,7 +78,8 @@ impl IntoIterator for &DaysOfWeek {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TrainType {
-    OrdinaryBus,
+    Bus,
+    ServiceBus,
     ReplacementBus,
     Freight,
     FreightDepartmental,
@@ -109,7 +110,8 @@ pub enum TrainType {
     FreightMetals,
     FreightAggregates,
     FreightWaste,
-    FreightTrainloadBuilding,
+    FreightTrainloadBuildingMaterials,
+    FreightPetroleum,
     LocomotiveBrakeVan,
     Locomotive,
     OrdinaryPassenger,
@@ -129,6 +131,7 @@ pub enum TrainType {
     Post,
     Parcels,
     EmptyNonPassenger,
+    PassengerParcels,
     Ship,
     Trip,
 }
@@ -170,7 +173,7 @@ pub struct TrainAllocation {
     pub vehicles: Option<Vec<TrainVehicle>>
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct OperatingCharacteristics {
     pub vacuum_braked: bool,
     pub one_hundred_mph: bool,
@@ -192,6 +195,7 @@ pub enum ReservationField {
     Recommended,
     Impossible,
     NotMandatory, // some railways might not have possible/impossible distinction
+    NotApplicable,
 }
 
 #[derive(Clone, Debug)]
@@ -203,7 +207,7 @@ pub struct Reservations {
     pub wheelchairs: ReservationField,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Catering {
     pub buffet: bool,
     pub first_class_restaurant: bool,
@@ -261,7 +265,7 @@ pub struct AssociationNode {
     pub days: DaysOfWeek,
     pub day_diff: i8,
     pub for_passengers: bool,
-    pub source: TrainSource,
+    pub source: Option<TrainSource>,
 }
 
 #[derive(Clone, Debug)]
