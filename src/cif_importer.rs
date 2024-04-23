@@ -1,4 +1,4 @@
-use crate::schedule::{AssociationNode, Catering, DaysOfWeek, Location, OperatingCharacteristics, ReservationField, Reservations, Schedule, Train, TrainAllocation, TrainSource, TrainType, TrainPower, TrainValidityPeriod, VariableTrain};
+use crate::schedule::{AssociationNode, Catering, DaysOfWeek, Location, OperatingCharacteristics, ReservationField, Reservations, Schedule, Train, TrainAllocation, TrainOperator, TrainSource, TrainType, TrainPower, TrainValidityPeriod, VariableTrain};
 use crate::importer::Importer;
 use crate::error::Error;
 
@@ -16,7 +16,7 @@ use tokio::io::AsyncBufReadExt;
 
 #[derive(Default)]
 pub struct CifImporter {
-    last_train: Option<String>,
+    last_train: Option<(String, DateTime::<Tz>, ModificationType, bool)>,
     unwritten_assocs: HashMap<(String, String, Option<String>), Vec<(AssociationNode, AssociationCategory)>>,
 }
 
@@ -41,6 +41,9 @@ pub enum CifErrorType {
     InvalidReservationType(String),
     InvalidCatering(String),
     InvalidBrand(String),
+    UnexpectedRecordType(String),
+    InvalidTrainOperator(String),
+    InvalidAtsCode(String),
 }
 
 impl fmt::Display for CifErrorType {
@@ -65,6 +68,9 @@ impl fmt::Display for CifErrorType {
             CifErrorType::InvalidReservationType(x) => write!(f, "Invalid reservation type {}", x),
             CifErrorType::InvalidCatering(x) => write!(f, "Invalid catering code {}", x),
             CifErrorType::InvalidBrand(x) => write!(f, "Invalid brand code {}", x),
+            CifErrorType::UnexpectedRecordType(x) => write!(f, "Unexpected record type {} — no preceding BS", x),
+            CifErrorType::InvalidTrainOperator(x) => write!(f, "Invalid train operator {}", x),
+            CifErrorType::InvalidAtsCode(x) => write!(f, "Invalid ATS Code {}", x),
         }
     }
 }
@@ -310,6 +316,17 @@ fn replace_single_vec_assocs(assocs: &mut Vec<AssociationNode>, other_train_id: 
             assoc.replacements.push(new_assoc_fixed_date);
         }
     }
+}
+
+fn find_replacement_train<'a>(trains: &'a mut Vec<Train>, begin: &DateTime::<Tz>) -> Option<&'a mut Train> {
+    for train in trains.iter_mut() {
+        for replacement_train in train.replacements.iter_mut() {
+            if replacement_train.validity[0].valid_begin == *begin {
+                return Some(replacement_train);
+            }
+        }
+    }
+    None
 }
 
 impl CifImporter {
@@ -879,7 +896,7 @@ impl CifImporter {
                 days: days_of_week,
                 day_diff,
                 for_passengers,
-                source: Some(if is_stp { TrainSource::LongTerm } else { TrainSource::ShortTerm }),
+                source: Some(if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }),
             };
 
             self.unwritten_assocs.entry((main_train_id.to_string(), location.to_string(), location_suffix)).or_insert(vec![]).push((new_assoc, category));
@@ -1050,7 +1067,6 @@ impl CifImporter {
     }
 
     fn read_basic_schedule(&mut self, line: &str, mut schedule: Schedule, number: u64) -> Result<Schedule, CifError> {
-        print!("{}\n", line);
         let modification_type = match &line[2..3] {
             "N" => ModificationType::Insert,
             "D" => ModificationType::Delete,
@@ -1478,7 +1494,7 @@ impl CifImporter {
 
         if matches!(modification_type, ModificationType::Insert) && matches!(stp_modification_type, ModificationType::Insert) {
             // we can write a (partial) train now, and continue updating it later.
-            self.last_train = Some(main_train_id.to_string());
+            self.last_train = Some((main_train_id.to_string(), begin, stp_modification_type, is_stp));
 
             let new_train = Train {
                 id: main_train_id.to_string(),
@@ -1516,9 +1532,9 @@ impl CifImporter {
                     brand,
                     name: None,
                     uic_code: None,
-                    operator: "".to_string(),
+                    operator: None,
                 },
-                source: Some(if is_stp { TrainSource::LongTerm } else { TrainSource::ShortTerm }),
+                source: Some(if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }),
                 runs_as_required,
                 performance_monitoring: None,
                 route: vec![],
@@ -1531,7 +1547,7 @@ impl CifImporter {
         
         if matches!(modification_type, ModificationType::Amend) {
             // we can write a (partial) train now, and continue updating it later.
-            self.last_train = Some(main_train_id.to_string());
+            self.last_train = Some((main_train_id.to_string(), begin, stp_modification_type, is_stp));
 
             let old_trains = schedule.trains.remove(main_train_id);
             let mut old_trains = match old_trains {
@@ -1582,7 +1598,7 @@ impl CifImporter {
                         brand: brand.clone(),
                         name: None,
                         uic_code: None,
-                        operator: "".to_string(),
+                        operator: None,
                     };
                 }
             }
@@ -1628,7 +1644,7 @@ impl CifImporter {
                                     brand: brand.clone(),
                                     name: None,
                                     uic_code: None,
-                                    operator: "".to_string(),
+                                    operator: None,
                                 };
                             }
                         }
@@ -1657,7 +1673,7 @@ impl CifImporter {
 
         if matches!(stp_modification_type, ModificationType::Amend) {
             // we can write a (partial) train now, and continue updating it later.
-            self.last_train = Some(main_train_id.to_string());
+            self.last_train = Some((main_train_id.to_string(), begin, stp_modification_type, is_stp));
 
             let old_trains = schedule.trains.remove(main_train_id);
             let mut old_trains = match old_trains {
@@ -1722,9 +1738,9 @@ impl CifImporter {
                         brand: brand.clone(),
                         name: None,
                         uic_code: None,
-                        operator: "".to_string(),
+                        operator: None,
                     },
-                    source: Some(if is_stp { TrainSource::LongTerm } else { TrainSource::ShortTerm }),
+                    source: Some(if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }),
                     runs_as_required,
                     performance_monitoring: None,
                     route: vec![],
@@ -1737,6 +1753,105 @@ impl CifImporter {
 
             return Ok(schedule);
         }
+
+        Ok(schedule)
+    }
+
+    fn read_extended_schedule(&mut self, line: &str, mut schedule: Schedule, number: u64) -> Result<Schedule, CifError> {
+        // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
+        // we find the train we are inserting or amending.
+
+        let (main_train_id, begin, stp_modification_type, is_stp) = match &self.last_train {
+            Some(x) => x,
+            None => return Err(CifError { error_type: CifErrorType::UnexpectedRecordType("BX".to_string()), line: number, column: 0 } ),
+        };
+
+        let ref mut trains = match schedule.trains.get_mut(main_train_id) {
+            Some(x) => x,
+            None => panic!("Unable to find last-written train"),
+        };
+
+        let ref mut train = match (&stp_modification_type, &is_stp) {
+            (ModificationType::Insert, false) => trains.iter_mut().find(|train| train.source.unwrap() == TrainSource::LongTerm && train.validity[0].valid_begin == *begin),
+            (ModificationType::Insert, true) => trains.iter_mut().find(|train| train.source.unwrap() == TrainSource::ShortTerm && train.validity[0].valid_begin == *begin),
+            (ModificationType::Amend, _) => find_replacement_train(trains, begin),
+            (ModificationType::Delete, _) => panic!("Unexpected train modification type"),
+        };
+
+        let train = match train {
+            Some(x) => x,
+            None => panic!("Unable to find last-written train"),
+        };
+
+        let uic_code = match &line[6..11] {
+            "     " => None,
+            x => Some(x.to_string()),
+        };
+
+        let atoc_code = &line[11..13];
+
+        let train_operator_desc = match atoc_code {
+            "EU" => Some("Virtual European Path".to_string()),
+            "AR" => Some("Alliance Rail".to_string()),
+            "NT" => Some("Northern".to_string()),
+            "AW" => Some("Transport for Wales".to_string()),
+            "CC" => Some("c2c".to_string()),
+            "CS" => Some("Caledonian Sleeper".to_string()),
+            "CH" => Some("Chiltern Railways".to_string()),
+            "XC" => Some("CrossCountry".to_string()),
+            "EM" => Some("East Midlands Railway".to_string()),
+            "ES" => Some("Eurostar".to_string()),
+            "FC" => Some("First Capital Connect".to_string()),
+            "HT" => Some("Hull Trains".to_string()),
+            "GX" => Some("Gatwick Express".to_string()),
+            "GN" => Some("Great Northern".to_string()),
+            "TL" => Some("Thameslink".to_string()),
+            "GC" => Some("Grand Central".to_string()),
+            "GW" => Some("Great Western Railway".to_string()),
+            "LE" => Some("Greater Anglia".to_string()),
+            "HC" => Some("Heathrow Connect".to_string()),
+            "HX" => Some("Heathrow Express".to_string()),
+            "IL" => Some("Island Line".to_string()),
+            "LS" => Some("Locomotive Services".to_string()),
+            "LM" => Some("West Midlands Trains".to_string()),
+            "LO" => Some("London Overground".to_string()),
+            "LT" => Some("London Underground".to_string()),
+            "ME" => Some("Merseyrail".to_string()),
+            "LR" => Some("Network Rail".to_string()),
+            "TW" => Some("Tyne & Wear Metro".to_string()),
+            "NY" => Some("North Yorkshire Moors Railway".to_string()),
+            "SR" => Some("ScotRail".to_string()),
+            "SW" => Some("South Western Railway".to_string()),
+            "SJ" => Some("South Yorkshire Supertram".to_string()),
+            "SE" => Some("Southeastern".to_string()),
+            "SN" => Some("Southern".to_string()),
+            "SP" => Some("Swanage Railway".to_string()),
+            "XR" => Some("Elizabeth line".to_string()),
+            "TP" => Some("TransPennine Express".to_string()),
+            "VT" => Some("Avanti West Coast".to_string()),
+            "GR" => Some("LNER".to_string()),
+            "WR" => Some("West Coast Railway Company".to_string()),
+            "WS" => Some("Wrexham and Shropshire".to_string()),
+            "TY" => Some("Vintage Trains".to_string()),
+            "LD" => Some("Lumo".to_string()),
+            "SO" => Some("SLC Operations".to_string()),
+            "LF" => Some("Grand Union Trains".to_string()),
+            "ZZ" => None,
+            x => return Err(CifError { error_type: CifErrorType::InvalidTrainOperator(x.to_string()), line: number, column: 11 } ),
+        };
+
+        let performance_monitoring = match &line[13..14] {
+            "Y" => true,
+            "N" => false,
+            x => return Err(CifError { error_type: CifErrorType::InvalidAtsCode(x.to_string()), line: number, column: 13 } ),
+        };
+
+        train.variable_train.uic_code = uic_code;
+        train.variable_train.operator = Some(TrainOperator {
+            id: atoc_code.to_string(),
+            description: train_operator_desc,
+        });
+        train.performance_monitoring = Some(performance_monitoring);
 
         Ok(schedule)
     }
@@ -1815,6 +1930,7 @@ impl CifImporter {
             "TD" => Ok(self.read_tiploc(&line, schedule, number, ModificationType::Delete)?),
             "AA" => Ok(self.read_association(&line, schedule, number)?),
             "BS" => Ok(self.read_basic_schedule(&line, schedule, number)?),
+            "BX" => Ok(self.read_extended_schedule(&line, schedule, number)?),
 
             x => Err(CifError { error_type: CifErrorType::InvalidRecordType(x.to_string()), line: number, column: 0}),
         }

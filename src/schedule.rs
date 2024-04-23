@@ -173,6 +173,12 @@ pub struct TrainAllocation {
     pub vehicles: Option<Vec<TrainVehicle>>
 }
 
+#[derive(Clone, Debug)]
+pub struct TrainOperator {
+    pub id: String,
+    pub description: Option<String>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct OperatingCharacteristics {
     pub vacuum_braked: bool,
@@ -321,7 +327,7 @@ pub struct VariableTrain {
     pub brand: Option<String>,
     pub name: Option<String>,
     pub uic_code: Option<String>,
-    pub operator: String,
+    pub operator: Option<TrainOperator>,
 }
 
 #[derive(Clone, Debug)]
