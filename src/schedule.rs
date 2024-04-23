@@ -223,15 +223,15 @@ pub struct Catering {
     pub trolley: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Activities {
     pub detach: bool,
     pub attach: bool,
-    pub stops_to_pass: bool,
+    pub other_trains_pass: bool,
     pub attach_or_detach_assisting_loco: bool,
     pub x_on_arrival: bool,
-    pub stops_for_banking_loco: bool,
-    pub stops_for_crew_change: bool,
+    pub banking_loco: bool,
+    pub crew_change: bool,
     pub set_down_only: bool,
     pub examination: bool,
     pub gbprtt: bool,
@@ -242,7 +242,7 @@ pub struct Activities {
     pub ticket_examination: bool,
     pub first_class_ticket_examination: bool,
     pub selective_ticket_examination: bool,
-    pub stops_to_change_loco: bool,
+    pub change_loco: bool,
     pub unadvertised_stop: bool,
     pub operational_stop: bool,
     pub train_locomotive_on_rear: bool,
@@ -255,10 +255,10 @@ pub struct Activities {
     pub train_begins: bool,
     pub train_finishes: bool,
     pub tops_reporting: bool,
-    pub stops_for_token_etc: bool,
+    pub token_etc: bool,
     pub pick_up_only: bool,
     pub watering_stock: bool,
-    pub stops_to_cross: bool,
+    pub cross_at_passing_point: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -293,9 +293,9 @@ pub struct TrainLocation {
     pub platform: Option<String>,
     pub line: Option<String>,
     pub path: Option<String>,
-    pub engineering_allowance_s: Option<f64>,
-    pub pathing_allowance_s: Option<f64>,
-    pub performance_allowance_s: Option<f64>,
+    pub engineering_allowance_s: Option<u32>,
+    pub pathing_allowance_s: Option<u32>,
+    pub performance_allowance_s: Option<u32>,
     pub activities: Activities,
     pub change_en_route: Option<VariableTrain>,
     pub divides_to_form: Vec<AssociationNode>,

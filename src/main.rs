@@ -27,6 +27,7 @@ async fn main() -> Result<(), error::Error> {
 
     let mut reader = nr_fetcher.fetch().await?;
     schedule = cif_importer.overlay(&mut reader, schedule).await?;
-    println!("namespace {}", schedule.namespace);
+    print!("{:#?}\n", schedule.trains.get("Y01160"));
+    print!("{:#?}\n", schedule.trains.get("Y04271"));
     Ok(())
 }

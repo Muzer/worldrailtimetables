@@ -12,6 +12,7 @@ chrono = "0.4.26"
 chrono-tz = "0.8.2"
 config-file = "0.2.3"
 futures = "0.3.28"
+itertools = "0.12.1"
 reqwest = { version = "0.11.18", features = ["stream"] }
 serde = { version = "1.0.164", features = ["derive"] }
 tokio = { version = "1.28.2", features = ["rt-multi-thread", "macros"] }
