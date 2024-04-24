@@ -195,184 +195,144 @@ fn write_assocs_to_trains(trains: &mut Vec<Train>, train_id: &str, location: &st
         write_assocs_to_trains(&mut train.replacements, &train_id, &location, &location_suffix, &assocs);
 
         for ref mut train_location in train.route.iter_mut() {
-            if train_location.id == location {
+            if train_location.id == location && train_location.id_suffix == *location_suffix {
                 for (assoc, category) in assocs {
-                    if train_location.id_suffix == *location_suffix {
-                        if !check_date_applicability(&train.validity[0], &train.days_of_week, assoc.validity[0].valid_begin, assoc.validity[0].valid_end, &assoc.days) {
-                            continue;
-                        }
-                        // we now know this is applicable to this train, so add it
-                        match category {
-                            AssociationCategory::Join => train_location.joins_to.push(assoc.clone()),
-                            AssociationCategory::Divide => train_location.divides_to_form.push(assoc.clone()),
-                            AssociationCategory::Next => train_location.becomes = Some(assoc.clone()),
-                            AssociationCategory::IsJoinedToBy => train_location.is_joined_to_by.push(assoc.clone()),
-                            AssociationCategory::DividesFrom => train_location.divides_from.push(assoc.clone()),
-                            AssociationCategory::FormsFrom => train_location.forms_from = Some(assoc.clone()),
-                        };
+                    if !check_date_applicability(&train.validity[0], &train.days_of_week, assoc.validity[0].valid_begin, assoc.validity[0].valid_end, &assoc.days) {
+                        continue;
                     }
+                    // we now know this is applicable to this train, so add it
+                    match category {
+                        AssociationCategory::Join => train_location.joins_to.push(assoc.clone()),
+                        AssociationCategory::Divide => train_location.divides_to_form.push(assoc.clone()),
+                        AssociationCategory::Next => train_location.becomes = Some(assoc.clone()),
+                        AssociationCategory::IsJoinedToBy => train_location.is_joined_to_by.push(assoc.clone()),
+                        AssociationCategory::DividesFrom => train_location.divides_from.push(assoc.clone()),
+                        AssociationCategory::FormsFrom => train_location.forms_from = Some(assoc.clone()),
+                    };
                 }
             }
         }
     }
 }
 
+fn is_matching_assoc_for_modify_insertion(assoc: &AssociationNode, other_train_id: &str, begin: &DateTime::<Tz>, other_train_location_suffix: &Option<String>, is_stp: bool, use_rev: bool) -> bool {
+    return match is_stp {
+        false => assoc.source.unwrap() == TrainSource::LongTerm, // match the entire association for deleted or modified inserts
+        true => assoc.source.unwrap() == TrainSource::ShortTerm,
+    } &&
+        assoc.validity[0].valid_begin == if use_rev { rev_date(begin, assoc.day_diff) } else { *begin } &&
+        other_train_id == assoc.other_train_id &&
+        *other_train_location_suffix == assoc.other_train_location_id_suffix;
+}
+
+fn is_matching_assoc_for_modify_replacement_or_cancel(validity: &TrainValidityPeriod, begin: &DateTime::<Tz>, day_diff: i8, use_rev: bool) -> bool {
+    validity.valid_begin == if use_rev { rev_date(begin, day_diff) } else { *begin }
+}
+
+fn delete_single_assoc_replacements_cancellations(assoc: &mut AssociationNode, other_train_id: &str, begin: &DateTime::<Tz>, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, use_rev: bool) {
+    if other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix {
+        return;
+    }
+    if *stp_modification_type == ModificationType::Amend {
+        assoc.replacements.retain(|assoc| !is_matching_assoc_for_modify_replacement_or_cancel(&assoc.validity[0], begin, assoc.day_diff, use_rev));
+    }
+    else if *stp_modification_type == ModificationType::Delete {
+        assoc.cancellations.retain(|(validity, _days_of_week)| !is_matching_assoc_for_modify_replacement_or_cancel(validity, begin, assoc.day_diff, use_rev));
+    }
+}
+
 fn delete_single_vec_assocs(assocs: &mut Vec<AssociationNode>, other_train_id: &str, begin: &DateTime::<Tz>, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool, use_rev: bool) {
-    assocs.retain(|assoc| match (&stp_modification_type, &is_stp) {
-        (ModificationType::Insert, false) => assoc.source.unwrap() != TrainSource::LongTerm || assoc.validity[0].valid_begin != if use_rev { rev_date(begin, assoc.day_diff) } else { *begin }, // delete the entire association for deleted inserts
-        (ModificationType::Insert, true) => assoc.source.unwrap() != TrainSource::ShortTerm || assoc.validity[0].valid_begin != if use_rev { rev_date(begin, assoc.day_diff) } else { *begin },
-        (ModificationType::Amend, _) => true, // for deleted amendments we never delete an item here
-        (ModificationType::Delete, _) => true, // for deleted cancellations we never delete an item here
-    } || other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix);
-    for ref mut assoc in assocs.iter_mut() {
-        let rev_begin = if use_rev {
-            rev_date(&begin, assoc.day_diff)
+    if *stp_modification_type == ModificationType::Insert {
+        assocs.retain(|assoc| !is_matching_assoc_for_modify_insertion(assoc, other_train_id, begin, other_train_location_suffix, is_stp, use_rev));
+    }
+    else {
+        for ref mut assoc in assocs.iter_mut() {
+            delete_single_assoc_replacements_cancellations(assoc, other_train_id, begin, other_train_location_suffix, stp_modification_type, use_rev);
         }
-        else {
-            *begin
-        };
-        assoc.replacements.retain(|assoc| match &stp_modification_type {
-            ModificationType::Insert => true, // never delete from here for insertions
-            ModificationType::Amend => assoc.validity[0].valid_begin != rev_begin, // for deleted amendments we delete the actual replacement along with cleaning up the replacement list in the original
-            ModificationType::Delete => true, // for deleted cancellations we never delete an item here
-        } || other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix);
-        assoc.cancellations.retain(|(validity, _days_of_week)| match &stp_modification_type {
-            ModificationType::Insert => true, // never delete from here for insertions
-            ModificationType::Amend => true,
-            ModificationType::Delete => validity.valid_begin != rev_begin,
-        } || other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix)
+    }
+}
+
+fn amend_individual_assoc(assoc: &mut AssociationNode, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, day_diff: i8, for_passengers: bool) {
+    assoc.validity = vec![TrainValidityPeriod {
+        valid_begin: begin.clone(),
+        valid_end: end.clone(),
+    }];
+    assoc.days = days_of_week.clone();
+    assoc.day_diff = day_diff;
+    assoc.for_passengers = for_passengers;
+}
+
+fn amend_single_assoc_replacements_cancellations(assoc: &mut AssociationNode, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, day_diff: i8, for_passengers: bool) {
+    if assoc.other_train_id != other_train_id || assoc.other_train_location_id_suffix != *other_train_location_suffix {
+        return;
+    }
+    if *stp_modification_type == ModificationType::Amend {
+        for replacement in assoc.replacements.iter_mut() {
+            if replacement.validity[0].valid_begin == *begin {
+                amend_individual_assoc(replacement, begin, end, days_of_week, day_diff, for_passengers);
+            }
+        }
+    }
+    else if *stp_modification_type == ModificationType::Delete {
+        for (cancellation, old_days_of_week) in assoc.cancellations.iter_mut() {
+            if cancellation.valid_begin == *begin {
+                *cancellation = TrainValidityPeriod {
+                    valid_begin: begin.clone(),
+                    valid_end: end.clone(),
+                };
+                *old_days_of_week = days_of_week.clone();
+            }
+        }
     }
 }
 
 fn amend_single_vec_assocs(assocs: &mut Vec<AssociationNode>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool, day_diff: i8, for_passengers: bool) {
     for ref mut assoc in assocs.iter_mut() {
-        if !(match (&stp_modification_type, &is_stp) {
-                (ModificationType::Insert, false) => assoc.source.unwrap() != TrainSource::LongTerm || assoc.validity[0].valid_begin != *begin, // delete the entire association for deleted inserts
-                (ModificationType::Insert, true) => assoc.source.unwrap() != TrainSource::ShortTerm || assoc.validity[0].valid_begin != *begin,
-                (ModificationType::Amend, _) => true, // for deleted amendments we never delete an item here
-                (ModificationType::Delete, _) => true, // for deleted cancellations we never delete an item here
-            } || other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix) {
-            assoc.validity = vec![TrainValidityPeriod {
-                valid_begin: begin.clone(),
-                valid_end: end.clone(),
-            }];
-            assoc.days = days_of_week.clone();
-            assoc.day_diff = day_diff;
-            assoc.for_passengers = for_passengers;
-        }
-        if matches!(stp_modification_type, ModificationType::Amend) || matches!(stp_modification_type, ModificationType::Delete) {
-            if assoc.other_train_id == other_train_id && assoc.other_train_location_id_suffix == *other_train_location_suffix {
-                if matches!(stp_modification_type, ModificationType::Amend) {
-                    for replacement in assoc.replacements.iter_mut() {
-                        if replacement.validity[0].valid_begin == *begin {
-                            replacement.validity = vec![TrainValidityPeriod {
-                                valid_begin: begin.clone(),
-                                valid_end: end.clone(),
-                            }];
-                            replacement.days = days_of_week.clone();
-                            replacement.day_diff = day_diff;
-                            replacement.for_passengers = for_passengers;
-                        }
-                    }
-                }
-                else if matches!(stp_modification_type, ModificationType::Delete) {
-                    for (cancellation, old_days_of_week) in assoc.cancellations.iter_mut() {
-                        if cancellation.valid_begin == *begin {
-                            *cancellation = TrainValidityPeriod {
-                                valid_begin: begin.clone(),
-                                valid_end: end.clone(),
-                            };
-                            *old_days_of_week = days_of_week.clone();
-                        }
-                    }
-                }
-                else {
-                    panic!("Insert found where amend or cancel expected");
-                }
+        if *stp_modification_type == ModificationType::Insert {
+            if is_matching_assoc_for_modify_insertion(assoc, other_train_id, begin, other_train_location_suffix, is_stp, false) {
+                amend_individual_assoc(assoc, begin, end, days_of_week, day_diff, for_passengers);
             }
         }
+        else {
+            amend_single_assoc_replacements_cancellations(assoc, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, day_diff, for_passengers);
+        }
+    }
+}
+
+fn cancel_single_assoc(assoc: &mut AssociationNode, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, other_train_location_suffix: &Option<String>, use_rev: bool) {
+    if other_train_id == assoc.other_train_id && *other_train_location_suffix == assoc.other_train_location_id_suffix {
+        let (rev_begin, rev_end, rev_days_of_week) = if use_rev {
+            (rev_date(&begin, assoc.day_diff), rev_date(&end, assoc.day_diff), rev_days(&days_of_week, assoc.day_diff))
+        }
+        else {
+            (*begin, *end, *days_of_week)
+        };
+
+        if !check_date_applicability(&assoc.validity[0], &assoc.days, rev_begin, rev_end, &rev_days_of_week) {
+            return;
+        }
+        let new_cancel = TrainValidityPeriod {
+            valid_begin: rev_begin,
+            valid_end: rev_end,
+        };
+        assoc.cancellations.push((new_cancel, rev_days_of_week.clone()))
     }
 }
 
 fn cancel_single_vec_assocs(assocs: &mut Vec<AssociationNode>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, other_train_location_suffix: &Option<String>, use_rev: bool) {
     for ref mut assoc in assocs.iter_mut() {
-        if !(other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix) {
-            let rev_begin = if use_rev {
-                rev_date(&begin, assoc.day_diff)
-            }
-            else {
-                *begin
-            };
-            let rev_end = if use_rev {
-                rev_date(&end, assoc.day_diff)
-            }
-            else {
-                *end
-            };
-            let rev_days_of_week = if use_rev {
-                rev_days(&days_of_week, assoc.day_diff)
-            }
-            else {
-                *days_of_week
-            };
-            // check for no overlapping days at all
-            if rev_days_of_week.into_iter().zip(assoc.days.into_iter()).find(|(new_day, assoc_day)| *new_day && *assoc_day).is_none() {
-                continue;
-            }
-            let new_begin = if rev_begin > assoc.validity[0].valid_begin {
-                rev_begin.clone()
-            }
-            else {
-                assoc.validity[0].valid_begin.clone()
-            };
-            let new_end = if rev_end < assoc.validity[0].valid_end {
-                rev_end.clone()
-            }
-            else {
-                assoc.validity[0].valid_end.clone()
-            };
-            if new_end < new_begin {
-                continue;
-            }
-            let new_cancel = TrainValidityPeriod {
-                valid_begin: new_begin,
-                valid_end: new_end,
-            };
-            assoc.cancellations.push((new_cancel, rev_days_of_week.clone()))
-        }
+        cancel_single_assoc(assoc, other_train_id, begin, end, days_of_week, other_train_location_suffix, use_rev);
     }
 }
 
 fn replace_single_vec_assocs(assocs: &mut Vec<AssociationNode>, other_train_id: &str, other_train_location_suffix: &Option<String>, new_assoc: &AssociationNode) {
     for ref mut assoc in assocs.iter_mut() {
-        if !(other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix) {
+        if other_train_id == assoc.other_train_id && *other_train_location_suffix == assoc.other_train_location_id_suffix {
             // check for no overlapping days at all
-            if new_assoc.days.into_iter().zip(assoc.days.into_iter()).find(|(new_day, assoc_day)| *new_day && *assoc_day).is_none() {
+            if !check_date_applicability(&assoc.validity[0], &assoc.days, new_assoc.validity[0].valid_begin, new_assoc.validity[0].valid_end, &new_assoc.days) {
                 continue;
             }
-            let new_begin = if new_assoc.validity[0].valid_begin > assoc.validity[0].valid_begin {
-                new_assoc.validity[0].valid_begin.clone()
-            }
-            else {
-                assoc.validity[0].valid_begin.clone()
-            };
-            let new_end = if new_assoc.validity[0].valid_end < assoc.validity[0].valid_end {
-                new_assoc.validity[0].valid_end.clone()
-            }
-            else {
-                assoc.validity[0].valid_end.clone()
-            };
-            if new_end < new_begin {
-                continue;
-            }
-            let new_assoc_fixed_date = AssociationNode {
-                validity: vec![TrainValidityPeriod {
-                    valid_begin: new_begin,
-                    valid_end: new_end,
-                }],
-                ..new_assoc.clone()
-            };
-            assoc.replacements.push(new_assoc_fixed_date);
+            assoc.replacements.push(new_assoc.clone());
         }
     }
 }
@@ -388,382 +348,175 @@ fn find_replacement_train<'a>(trains: &'a mut Vec<Train>, begin: &DateTime::<Tz>
     None
 }
 
+fn trains_delete_assoc(trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool) {
+    for ref mut train in trains.iter_mut() {
+        // recurse on replacements
+        trains_delete_assoc(&mut train.replacements, &other_train_id, &begin, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp);
+
+        for ref mut train_location in train.route.iter_mut() {
+            if train_location.id != location || train_location.id_suffix != *location_suffix {
+                continue;
+            }
+            delete_single_vec_assocs(&mut train_location.divides_to_form, other_train_id, begin, other_train_location_suffix, stp_modification_type, is_stp, false);
+            delete_single_vec_assocs(&mut train_location.joins_to, other_train_id, begin, other_train_location_suffix, stp_modification_type, is_stp, false);
+            if let Some(ref mut assoc) = &mut train_location.becomes {
+                delete_single_assoc_replacements_cancellations(assoc, other_train_id, begin, other_train_location_suffix, stp_modification_type, false);
+                if *stp_modification_type == ModificationType::Insert && is_matching_assoc_for_modify_insertion(assoc, other_train_id, begin, other_train_location_suffix, is_stp, false) {
+                    train_location.becomes = None;
+                }
+            }
+        }
+    }
+}
+
+fn trains_delete_rev_assoc(trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool) {
+    for ref mut train in trains.iter_mut() {
+        // recurse on replacements
+        trains_delete_rev_assoc(&mut train.replacements, &other_train_id, &begin, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp);
+
+        for ref mut train_location in train.route.iter_mut() {
+            if train_location.id != location || train_location.id_suffix != *location_suffix {
+                continue;
+            }
+            delete_single_vec_assocs(&mut train_location.divides_from, other_train_id, begin, other_train_location_suffix, stp_modification_type, is_stp, true);
+            delete_single_vec_assocs(&mut train_location.is_joined_to_by, other_train_id, begin, other_train_location_suffix, stp_modification_type, is_stp, true);
+            if let Some(ref mut assoc) = &mut train_location.forms_from {
+                delete_single_assoc_replacements_cancellations(assoc, other_train_id, begin, other_train_location_suffix, stp_modification_type, true);
+                if *stp_modification_type == ModificationType::Insert && is_matching_assoc_for_modify_insertion(assoc, other_train_id, begin, other_train_location_suffix, is_stp, true) {
+                    train_location.forms_from = None;
+                }
+            }
+        }
+    }
+}
+
+fn trains_amend_assoc(trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool, day_diff: i8, for_passengers: bool) {
+    for ref mut train in trains.iter_mut() {
+        // recurse on replacements
+        trains_amend_assoc(&mut train.replacements, &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp, day_diff, for_passengers);
+
+        for ref mut train_location in train.route.iter_mut() {
+            if train_location.id != location || train_location.id_suffix != *location_suffix {
+                continue;
+            }
+            amend_single_vec_assocs(&mut train_location.divides_to_form, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, is_stp, day_diff, for_passengers);
+            amend_single_vec_assocs(&mut train_location.joins_to, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, is_stp, day_diff, for_passengers);
+            if let Some(ref mut assoc) = &mut train_location.becomes {
+                if *stp_modification_type == ModificationType::Insert && is_matching_assoc_for_modify_insertion(assoc, other_train_id, begin, other_train_location_suffix, is_stp, false) {
+                    amend_individual_assoc(assoc, begin, end, days_of_week, day_diff, for_passengers);
+                }
+                amend_single_assoc_replacements_cancellations(assoc, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, day_diff, for_passengers);
+            }
+        }
+    }
+}
+
+fn trains_amend_rev_assoc(trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool, day_diff: i8, for_passengers: bool) {
+    for ref mut train in trains.iter_mut() {
+        // recurse on replacements
+        trains_amend_rev_assoc(&mut train.replacements, &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp, day_diff, for_passengers);
+
+        for ref mut train_location in train.route.iter_mut() {
+            if train_location.id != location || train_location.id_suffix != *location_suffix {
+                continue;
+            }
+            amend_single_vec_assocs(&mut train_location.divides_from, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, is_stp, day_diff, for_passengers);
+            amend_single_vec_assocs(&mut train_location.is_joined_to_by, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, is_stp, day_diff, for_passengers);
+            if let Some(ref mut assoc) = &mut train_location.forms_from {
+                if *stp_modification_type == ModificationType::Insert && is_matching_assoc_for_modify_insertion(assoc, other_train_id, begin, other_train_location_suffix, is_stp, false) {
+                    amend_individual_assoc(assoc, begin, end, days_of_week, day_diff, for_passengers);
+                }
+                amend_single_assoc_replacements_cancellations(assoc, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, day_diff, for_passengers);
+            }
+        }
+    }
+}
+
+fn trains_cancel_assoc(trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>) {
+    for ref mut train in trains.iter_mut() {
+        // recurse on replacements
+        trains_cancel_assoc(&mut train.replacements, &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix);
+
+        for ref mut train_location in train.route.iter_mut() {
+            if train_location.id == location && train_location.id_suffix == *location_suffix {
+                cancel_single_vec_assocs(&mut train_location.divides_to_form, other_train_id, begin, end, days_of_week, other_train_location_suffix, false);
+                cancel_single_vec_assocs(&mut train_location.joins_to, other_train_id, begin, end, days_of_week, other_train_location_suffix, false);
+                if let Some(assoc) = &mut train_location.becomes {
+                    cancel_single_assoc(assoc, other_train_id, begin, end, days_of_week, other_train_location_suffix, false);
+                }
+            }
+        }
+    }
+}
+
+fn trains_cancel_rev_assoc(trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>) {
+    for ref mut train in trains.iter_mut() {
+        // recurse on replacements
+        trains_cancel_rev_assoc(&mut train.replacements, &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix);
+
+        for ref mut train_location in train.route.iter_mut() {
+            if train_location.id == location && train_location.id_suffix == *location_suffix {
+                cancel_single_vec_assocs(&mut train_location.divides_from, other_train_id, begin, end, days_of_week, other_train_location_suffix, true);
+                cancel_single_vec_assocs(&mut train_location.is_joined_to_by, other_train_id, begin, end, days_of_week, other_train_location_suffix, true);
+                if let Some(assoc) = &mut train_location.forms_from {
+                    cancel_single_assoc(assoc, other_train_id, begin, end, days_of_week, other_train_location_suffix, true);
+                }
+            }
+        }
+    }
+}
+
+fn trains_replace_assoc(trains: &mut Vec<Train>, other_train_id: &str, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, new_assoc: &AssociationNode) {
+    for ref mut train in trains.iter_mut() {
+        // recurse on replacements
+        trains_replace_assoc(&mut train.replacements, &other_train_id, &location, &location_suffix, &other_train_location_suffix, &new_assoc);
+
+        for ref mut train_location in train.route.iter_mut() {
+            if train_location.id == location && train_location.id_suffix == *location_suffix {
+                replace_single_vec_assocs(&mut train_location.divides_to_form, other_train_id, other_train_location_suffix, new_assoc);
+                replace_single_vec_assocs(&mut train_location.joins_to, other_train_id, other_train_location_suffix, new_assoc);
+                if let Some(assoc) = &mut train_location.becomes {
+                    if other_train_id == assoc.other_train_id && *other_train_location_suffix == assoc.other_train_location_id_suffix {
+                        // check for no overlapping days at all
+                        if !check_date_applicability(&assoc.validity[0], &assoc.days, new_assoc.validity[0].valid_begin, new_assoc.validity[0].valid_end, &new_assoc.days) {
+                            continue;
+                        }
+                        assoc.replacements.push(new_assoc.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn trains_replace_rev_assoc(trains: &mut Vec<Train>, other_train_id: &str, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, new_assoc: &AssociationNode) {
+    for ref mut train in trains.iter_mut() {
+        // recurse on replacements
+        trains_replace_rev_assoc(&mut train.replacements, &other_train_id, &location, &location_suffix, &other_train_location_suffix, &new_assoc);
+
+        for ref mut train_location in train.route.iter_mut() {
+            if train_location.id == location && train_location.id_suffix == *location_suffix {
+                replace_single_vec_assocs(&mut train_location.divides_from, other_train_id, other_train_location_suffix, new_assoc);
+                replace_single_vec_assocs(&mut train_location.is_joined_to_by, other_train_id, other_train_location_suffix, new_assoc);
+                if let Some(assoc) = &mut train_location.forms_from {
+                    if other_train_id == assoc.other_train_id && *other_train_location_suffix == assoc.other_train_location_id_suffix {
+                        // check for no overlapping days at all
+                        if !check_date_applicability(&assoc.validity[0], &assoc.days, new_assoc.validity[0].valid_begin, new_assoc.validity[0].valid_end, &new_assoc.days) {
+                            continue;
+                        }
+                        assoc.replacements.push(new_assoc.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl CifImporter {
     pub fn new() -> CifImporter {
         CifImporter { ..Default::default() }
     }
 
-    fn trains_delete_assoc(&self, trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool) {
-        for ref mut train in trains.iter_mut() {
-            // recurse on replacements
-            self.trains_delete_assoc(&mut train.replacements, &other_train_id, &begin, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp);
-
-            for ref mut train_location in train.route.iter_mut() {
-                if train_location.id == location && train_location.id_suffix == *location_suffix {
-                    delete_single_vec_assocs(&mut train_location.divides_to_form, other_train_id, begin, other_train_location_suffix, stp_modification_type, is_stp, false);
-                    delete_single_vec_assocs(&mut train_location.joins_to, other_train_id, begin, other_train_location_suffix, stp_modification_type, is_stp, false);
-                    if let Some(ref mut assoc) = &mut train_location.becomes {
-                        assoc.replacements.retain(|assoc| match &stp_modification_type {
-                            ModificationType::Insert => true, // never delete from here for insertions
-                            ModificationType::Amend => assoc.validity[0].valid_begin != *begin, // for deleted amendments we delete the actual replacement along with cleaning up the replacement list in the original
-                            ModificationType::Delete => true, // for deleted cancellations we never delete an item here
-                        } || other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix);
-                        assoc.cancellations.retain(|(validity, _days_of_week)| match &stp_modification_type {
-                            ModificationType::Insert => true, // never delete from here for insertions
-                            ModificationType::Amend => true,
-                            ModificationType::Delete => validity.valid_begin != *begin,
-                        } || other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix);
-                        if !(match (&stp_modification_type, &is_stp) {
-                                (ModificationType::Insert, false) => assoc.source.unwrap() != TrainSource::LongTerm || assoc.validity[0].valid_begin != *begin, // delete the entire association for deleted inserts
-                                (ModificationType::Insert, true) => assoc.source.unwrap() != TrainSource::ShortTerm || assoc.validity[0].valid_begin != *begin,
-                                (ModificationType::Amend, _) => true, // for deleted amendments we never delete an item here
-                                (ModificationType::Delete, _) => true, // for deleted cancellations we never delete an item here
-                            } || other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix) {
-                            train_location.becomes = None;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn trains_delete_rev_assoc(&self, trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool) {
-        for ref mut train in trains.iter_mut() {
-            // recurse on replacements
-            self.trains_delete_rev_assoc(&mut train.replacements, &other_train_id, &begin, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp);
-
-            for ref mut train_location in train.route.iter_mut() {
-                if train_location.id == location && train_location.id_suffix == *location_suffix {
-                    delete_single_vec_assocs(&mut train_location.divides_from, other_train_id, begin, other_train_location_suffix, stp_modification_type, is_stp, true);
-                    delete_single_vec_assocs(&mut train_location.is_joined_to_by, other_train_id, begin, other_train_location_suffix, stp_modification_type, is_stp, true);
-                    if let Some(ref mut assoc) = &mut train_location.forms_from {
-                        let rev_begin = rev_date(&begin, assoc.day_diff);
-                        assoc.replacements.retain(|assoc| match &stp_modification_type {
-                            ModificationType::Insert => true, // never delete from here for insertions
-                            ModificationType::Amend => assoc.validity[0].valid_begin != rev_begin, // for deleted amendments we delete the actual replacement along with cleaning up the replacement list in the original
-                            ModificationType::Delete => true, // for deleted cancellations we never delete an item here
-                        } || other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix);
-                        assoc.cancellations.retain(|(validity, _days_of_week)| match &stp_modification_type {
-                            ModificationType::Insert => true, // never delete from here for insertions
-                            ModificationType::Amend => true,
-                            ModificationType::Delete => validity.valid_begin != rev_begin,
-                        } || other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix);
-                        if !(match (&stp_modification_type, &is_stp) {
-                                (ModificationType::Insert, false) => assoc.source.unwrap() != TrainSource::LongTerm || assoc.validity[0].valid_begin != rev_begin, // delete the entire association for deleted inserts
-                                (ModificationType::Insert, true) => assoc.source.unwrap() != TrainSource::ShortTerm || assoc.validity[0].valid_begin != rev_begin,
-                                (ModificationType::Amend, _) => true, // for deleted amendments we never delete an item here
-                                (ModificationType::Delete, _) => true, // for deleted cancellations we never delete an item here
-                            } || other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix) {
-                            train_location.forms_from = None;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn trains_amend_assoc(&self, trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool, day_diff: i8, for_passengers: bool) {
-        for ref mut train in trains.iter_mut() {
-            // recurse on replacements
-            self.trains_amend_assoc(&mut train.replacements, &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp, day_diff, for_passengers);
-
-            for ref mut train_location in train.route.iter_mut() {
-                if train_location.id == location && train_location.id_suffix == *location_suffix {
-                    amend_single_vec_assocs(&mut train_location.divides_to_form, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, is_stp, day_diff, for_passengers);
-                    amend_single_vec_assocs(&mut train_location.joins_to, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, is_stp, day_diff, for_passengers);
-                    if let Some(ref mut assoc) = &mut train_location.becomes {
-                        if !(match (&stp_modification_type, &is_stp) {
-                                (ModificationType::Insert, false) => assoc.source.unwrap() != TrainSource::LongTerm || assoc.validity[0].valid_begin != *begin, // delete the entire association for deleted inserts
-                                (ModificationType::Insert, true) => assoc.source.unwrap() != TrainSource::ShortTerm || assoc.validity[0].valid_begin != *begin,
-                                (ModificationType::Amend, _) => true, // for deleted amendments we never delete an item here
-                                (ModificationType::Delete, _) => true, // for deleted cancellations we never delete an item here
-                            } || other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix) {
-                            assoc.validity = vec![TrainValidityPeriod {
-                                valid_begin: begin.clone(),
-                                valid_end: end.clone(),
-                            }];
-                            assoc.days = days_of_week.clone();
-                            assoc.day_diff = day_diff;
-                            assoc.for_passengers = for_passengers;
-                        }
-                    }
-                    if let Some(ref mut assoc) = &mut train_location.becomes {
-                        if matches!(stp_modification_type, ModificationType::Amend) || matches!(stp_modification_type, ModificationType::Delete) {
-                            if assoc.other_train_id == other_train_id && assoc.other_train_location_id_suffix == *other_train_location_suffix {
-                                if matches!(stp_modification_type, ModificationType::Amend) {
-                                    for replacement in assoc.replacements.iter_mut() {
-                                        if replacement.validity[0].valid_begin == *begin {
-                                            replacement.validity = vec![TrainValidityPeriod {
-                                                valid_begin: begin.clone(),
-                                                valid_end: end.clone(),
-                                            }];
-                                            replacement.days = days_of_week.clone();
-                                            replacement.day_diff = day_diff;
-                                            replacement.for_passengers = for_passengers;
-                                        }
-                                    }
-                                }
-                                else if matches!(stp_modification_type, ModificationType::Delete) {
-                                    for (cancellation, old_days_of_week) in assoc.cancellations.iter_mut() {
-                                        if cancellation.valid_begin == *begin {
-                                            *cancellation = TrainValidityPeriod {
-                                                valid_begin: begin.clone(),
-                                                valid_end: end.clone(),
-                                            };
-                                            *old_days_of_week = days_of_week.clone();
-                                        }
-                                    }
-                                }
-                                else {
-                                    panic!("Insert found where amend or cancel expected");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn trains_amend_rev_assoc(&self, trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool, day_diff: i8, for_passengers: bool) {
-        for ref mut train in trains.iter_mut() {
-            // recurse on replacements
-            self.trains_amend_assoc(&mut train.replacements, &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp, day_diff, for_passengers);
-
-            for ref mut train_location in train.route.iter_mut() {
-                if train_location.id == location && train_location.id_suffix == *location_suffix {
-                    amend_single_vec_assocs(&mut train_location.divides_from, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, is_stp, day_diff, for_passengers);
-                    amend_single_vec_assocs(&mut train_location.is_joined_to_by, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, is_stp, day_diff, for_passengers);
-                    if let Some(ref mut assoc) = &mut train_location.forms_from {
-                        if !(match (&stp_modification_type, &is_stp) {
-                                (ModificationType::Insert, false) => assoc.source.unwrap() != TrainSource::LongTerm || assoc.validity[0].valid_begin != *begin, // delete the entire association for deleted inserts
-                                (ModificationType::Insert, true) => assoc.source.unwrap() != TrainSource::ShortTerm || assoc.validity[0].valid_begin != *begin,
-                                (ModificationType::Amend, _) => true, // for deleted amendments we never delete an item here
-                                (ModificationType::Delete, _) => true, // for deleted cancellations we never delete an item here
-                            } || other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix) {
-                            assoc.validity = vec![TrainValidityPeriod {
-                                valid_begin: begin.clone(),
-                                valid_end: end.clone(),
-                            }];
-                            assoc.days = days_of_week.clone();
-                            assoc.day_diff = day_diff;
-                            assoc.for_passengers = for_passengers;
-                        }
-                    }
-                    if let Some(ref mut assoc) = &mut train_location.forms_from {
-                        if matches!(stp_modification_type, ModificationType::Amend) || matches!(stp_modification_type, ModificationType::Delete) {
-                            if assoc.other_train_id == other_train_id && assoc.other_train_location_id_suffix == *other_train_location_suffix {
-                                if matches!(stp_modification_type, ModificationType::Amend) {
-                                    for replacement in assoc.replacements.iter_mut() {
-                                        if replacement.validity[0].valid_begin == *begin {
-                                            replacement.validity = vec![TrainValidityPeriod {
-                                                valid_begin: begin.clone(),
-                                                valid_end: end.clone(),
-                                            }];
-                                            replacement.days = days_of_week.clone();
-                                            replacement.day_diff = day_diff;
-                                            replacement.for_passengers = for_passengers;
-                                        }
-                                    }
-                                }
-                                else if matches!(stp_modification_type, ModificationType::Delete) {
-                                    for (cancellation, old_days_of_week) in assoc.cancellations.iter_mut() {
-                                        if cancellation.valid_begin == *begin {
-                                            *cancellation = TrainValidityPeriod {
-                                                valid_begin: begin.clone(),
-                                                valid_end: end.clone(),
-                                            };
-                                            *old_days_of_week = days_of_week.clone();
-                                        }
-                                    }
-                                }
-                                else {
-                                    panic!("Insert found where amend or cancel expected");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn trains_cancel_assoc(&self, trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>) {
-        for ref mut train in trains.iter_mut() {
-            // recurse on replacements
-            self.trains_cancel_assoc(&mut train.replacements, &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix);
-
-            for ref mut train_location in train.route.iter_mut() {
-                if train_location.id == location && train_location.id_suffix == *location_suffix {
-                    cancel_single_vec_assocs(&mut train_location.divides_to_form, other_train_id, begin, end, days_of_week, other_train_location_suffix, false);
-                    cancel_single_vec_assocs(&mut train_location.joins_to, other_train_id, begin, end, days_of_week, other_train_location_suffix, false);
-                    if let Some(assoc) = &mut train_location.becomes {
-                        if !(other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix) {
-                            // check for no overlapping days at all
-                            if days_of_week.into_iter().zip(assoc.days.into_iter()).find(|(new_day, assoc_day)| *new_day && *assoc_day).is_none() {
-                                continue;
-                            }
-                            let new_begin = if begin > &assoc.validity[0].valid_begin {
-                                begin.clone()
-                            }
-                            else {
-                                assoc.validity[0].valid_begin.clone()
-                            };
-                            let new_end = if end < &assoc.validity[0].valid_end {
-                                end.clone()
-                            }
-                            else {
-                                assoc.validity[0].valid_end.clone()
-                            };
-                            if new_end < new_begin {
-                                continue;
-                            }
-                            let new_cancel = TrainValidityPeriod {
-                                valid_begin: new_begin,
-                                valid_end: new_end,
-                            };
-                            assoc.cancellations.push((new_cancel, days_of_week.clone()))
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn trains_cancel_rev_assoc(&self, trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>) {
-        for ref mut train in trains.iter_mut() {
-            // recurse on replacements
-            self.trains_cancel_rev_assoc(&mut train.replacements, &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix);
-
-            for ref mut train_location in train.route.iter_mut() {
-                if train_location.id == location && train_location.id_suffix == *location_suffix {
-                    cancel_single_vec_assocs(&mut train_location.divides_from, other_train_id, begin, end, days_of_week, other_train_location_suffix, true);
-                    cancel_single_vec_assocs(&mut train_location.is_joined_to_by, other_train_id, begin, end, days_of_week, other_train_location_suffix, true);
-                    if let Some(assoc) = &mut train_location.forms_from {
-                        if !(other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix) {
-                            let rev_begin = rev_date(&begin, assoc.day_diff);
-                            let rev_end = rev_date(&end, assoc.day_diff);
-                            let rev_days_of_week = rev_days(&days_of_week, assoc.day_diff);
-                            // check for no overlapping days at all
-                            if rev_days_of_week.into_iter().zip(assoc.days.into_iter()).find(|(new_day, assoc_day)| *new_day && *assoc_day).is_none() {
-                                continue;
-                            }
-                            let new_begin = if rev_begin > assoc.validity[0].valid_begin {
-                                rev_begin.clone()
-                            }
-                            else {
-                                assoc.validity[0].valid_begin.clone()
-                            };
-                            let new_end = if rev_end < assoc.validity[0].valid_end {
-                                rev_end.clone()
-                            }
-                            else {
-                                assoc.validity[0].valid_end.clone()
-                            };
-                            if new_end < new_begin {
-                                continue;
-                            }
-                            let new_cancel = TrainValidityPeriod {
-                                valid_begin: new_begin,
-                                valid_end: new_end,
-                            };
-                            assoc.cancellations.push((new_cancel, rev_days_of_week.clone()))
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn trains_replace_assoc(&self, trains: &mut Vec<Train>, other_train_id: &str, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, new_assoc: &AssociationNode) {
-        for ref mut train in trains.iter_mut() {
-            // recurse on replacements
-            self.trains_replace_assoc(&mut train.replacements, &other_train_id, &location, &location_suffix, &other_train_location_suffix, &new_assoc);
-
-            for ref mut train_location in train.route.iter_mut() {
-                if train_location.id == location && train_location.id_suffix == *location_suffix {
-                    replace_single_vec_assocs(&mut train_location.divides_to_form, other_train_id, other_train_location_suffix, new_assoc);
-                    replace_single_vec_assocs(&mut train_location.joins_to, other_train_id, other_train_location_suffix, new_assoc);
-                    if let Some(assoc) = &mut train_location.becomes {
-                        if !(other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix) {
-                            // check for no overlapping days at all
-                            if new_assoc.days.into_iter().zip(assoc.days.into_iter()).find(|(new_day, assoc_day)| *new_day && *assoc_day).is_none() {
-                                continue;
-                            }
-                            let new_begin = if new_assoc.validity[0].valid_begin > assoc.validity[0].valid_begin {
-                                new_assoc.validity[0].valid_begin.clone()
-                            }
-                            else {
-                                assoc.validity[0].valid_begin.clone()
-                            };
-                            let new_end = if new_assoc.validity[0].valid_end < assoc.validity[0].valid_end {
-                                new_assoc.validity[0].valid_end.clone()
-                            }
-                            else {
-                                assoc.validity[0].valid_end.clone()
-                            };
-                            if new_end < new_begin {
-                                continue;
-                            }
-                            let new_assoc_fixed_date = AssociationNode {
-                                validity: vec![TrainValidityPeriod {
-                                    valid_begin: new_begin,
-                                    valid_end: new_end,
-                                }],
-                                ..new_assoc.clone()
-                            };
-                            assoc.replacements.push(new_assoc_fixed_date);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn trains_replace_rev_assoc(&self, trains: &mut Vec<Train>, other_train_id: &str, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, new_assoc: &AssociationNode) {
-        for ref mut train in trains.iter_mut() {
-            // recurse on replacements
-            self.trains_replace_assoc(&mut train.replacements, &other_train_id, &location, &location_suffix, &other_train_location_suffix, &new_assoc);
-
-            for ref mut train_location in train.route.iter_mut() {
-                if train_location.id == location && train_location.id_suffix == *location_suffix {
-                    replace_single_vec_assocs(&mut train_location.divides_from, other_train_id, other_train_location_suffix, new_assoc);
-                    replace_single_vec_assocs(&mut train_location.is_joined_to_by, other_train_id, other_train_location_suffix, new_assoc);
-                    if let Some(assoc) = &mut train_location.forms_from {
-                        if !(other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix) {
-                            // check for no overlapping days at all
-                            if new_assoc.days.into_iter().zip(assoc.days.into_iter()).find(|(new_day, assoc_day)| *new_day && *assoc_day).is_none() {
-                                continue;
-                            }
-                            let new_begin = if new_assoc.validity[0].valid_begin > assoc.validity[0].valid_begin {
-                                new_assoc.validity[0].valid_begin.clone()
-                            }
-                            else {
-                                assoc.validity[0].valid_begin.clone()
-                            };
-                            let new_end = if new_assoc.validity[0].valid_end < assoc.validity[0].valid_end {
-                                new_assoc.validity[0].valid_end.clone()
-                            }
-                            else {
-                                assoc.validity[0].valid_end.clone()
-                            };
-                            if new_end < new_begin {
-                                continue;
-                            }
-                            let new_assoc_fixed_date = AssociationNode {
-                                validity: vec![TrainValidityPeriod {
-                                    valid_begin: new_begin,
-                                    valid_end: new_end,
-                                }],
-                                ..new_assoc.clone()
-                            };
-                            assoc.replacements.push(new_assoc_fixed_date);
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     fn read_association(&mut self, line: &str, mut schedule: Schedule, number: u64) -> Result<Schedule, CifError> {
         let modification_type = match &line[2..3] {
@@ -814,8 +567,8 @@ impl CifImporter {
         // Note these are NOT the same as STP cancels and indeed handled completely differently
         if matches!(modification_type, ModificationType::Delete) {
             // first find any committed associations and delete
-            self.trains_delete_assoc(schedule.trains.get_mut(main_train_id).as_mut().unwrap_or(&mut &mut vec![]), &other_train_id, &begin, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp);
-            self.trains_delete_rev_assoc(schedule.trains.get_mut(other_train_id).as_mut().unwrap_or(&mut &mut vec![]), &main_train_id, &begin, &location, &other_train_location_suffix, &location_suffix, &stp_modification_type, is_stp);
+            trains_delete_assoc(schedule.trains.get_mut(main_train_id).as_mut().unwrap_or(&mut &mut vec![]), &other_train_id, &begin, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp);
+            trains_delete_rev_assoc(schedule.trains.get_mut(other_train_id).as_mut().unwrap_or(&mut &mut vec![]), &main_train_id, &begin, &location, &other_train_location_suffix, &location_suffix, &stp_modification_type, is_stp);
 
             // now delete from unwritten associations
             let old_assoc = self.unwritten_assocs.remove(&(main_train_id.to_string(), location.to_string(), location_suffix.clone()));
@@ -914,8 +667,8 @@ impl CifImporter {
         // associations are deleted as a one-off
         if matches!(stp_modification_type, ModificationType::Delete) && matches!(modification_type, ModificationType::Insert) {
             // modify written ones
-            self.trains_cancel_assoc(schedule.trains.get_mut(main_train_id).as_mut().unwrap_or(&mut &mut vec![]), &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix);
-            self.trains_cancel_rev_assoc(schedule.trains.get_mut(other_train_id).as_mut().unwrap_or(&mut &mut vec![]), &main_train_id, &begin, &end, &days_of_week, &location, &other_train_location_suffix, &location_suffix);
+            trains_cancel_assoc(schedule.trains.get_mut(main_train_id).as_mut().unwrap_or(&mut &mut vec![]), &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix);
+            trains_cancel_rev_assoc(schedule.trains.get_mut(other_train_id).as_mut().unwrap_or(&mut &mut vec![]), &main_train_id, &begin, &end, &days_of_week, &location, &other_train_location_suffix, &location_suffix);
 
             // now modify in unwritten associations
             let old_assoc = self.unwritten_assocs.remove(&(main_train_id.to_string(), location.to_string(), location_suffix.clone()));
@@ -1072,12 +825,12 @@ impl CifImporter {
 
         if matches!(modification_type, ModificationType::Amend) {
             // first find any committed associations and modify
-            self.trains_amend_assoc(schedule.trains.get_mut(main_train_id).as_mut().unwrap_or(&mut &mut vec![]), &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp, day_diff, for_passengers);
+            trains_amend_assoc(schedule.trains.get_mut(main_train_id).as_mut().unwrap_or(&mut &mut vec![]), &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp, day_diff, for_passengers);
 
             let rev_days_of_week = rev_days(&days_of_week, day_diff);
             let rev_begin = rev_date(&begin, day_diff);
             let rev_end = rev_date(&end, day_diff);
-            self.trains_amend_rev_assoc(schedule.trains.get_mut(other_train_id).as_mut().unwrap_or(&mut &mut vec![]), &main_train_id, &rev_begin, &rev_end, &rev_days_of_week, &location, &other_train_location_suffix, &location_suffix, &stp_modification_type, is_stp, -day_diff, for_passengers);
+            trains_amend_rev_assoc(schedule.trains.get_mut(other_train_id).as_mut().unwrap_or(&mut &mut vec![]), &main_train_id, &rev_begin, &rev_end, &rev_days_of_week, &location, &other_train_location_suffix, &location_suffix, &stp_modification_type, is_stp, -day_diff, for_passengers);
 
             // now amend unwritten associations
             let old_assoc = self.unwritten_assocs.remove(&(main_train_id.to_string(), location.to_string(), location_suffix.clone()));
@@ -1255,8 +1008,8 @@ impl CifImporter {
             };
 
             // first find any committed associations and modify
-            self.trains_replace_assoc(schedule.trains.get_mut(main_train_id).as_mut().unwrap_or(&mut &mut vec![]), &other_train_id, &location, &location_suffix, &other_train_location_suffix, &new_assoc);
-            self.trains_replace_rev_assoc(schedule.trains.get_mut(other_train_id).as_mut().unwrap_or(&mut &mut vec![]), &main_train_id, &location, &other_train_location_suffix, &location_suffix, &new_rev_assoc);
+            trains_replace_assoc(schedule.trains.get_mut(main_train_id).as_mut().unwrap_or(&mut &mut vec![]), &other_train_id, &location, &location_suffix, &other_train_location_suffix, &new_assoc);
+            trains_replace_rev_assoc(schedule.trains.get_mut(other_train_id).as_mut().unwrap_or(&mut &mut vec![]), &main_train_id, &location, &other_train_location_suffix, &location_suffix, &new_rev_assoc);
 
             // now amend unwritten associations
             let old_assoc = self.unwritten_assocs.remove(&(main_train_id.to_string(), location.to_string(), location_suffix.clone()));
