@@ -153,6 +153,7 @@ pub enum TrainPower {
     ElectricAndDieselLocomotive,
     ElectricMultipleUnitWithLocomotive,
     ElectricMultipleUnit,
+    ElectricAndDieselMultipleUnit,
     BatteryLocomotive,
     BatteryMultipleUnit,
     SteamLocomotive,

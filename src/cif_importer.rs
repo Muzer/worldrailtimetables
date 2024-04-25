@@ -40,7 +40,7 @@ pub enum CifErrorType {
     InvalidTimingLoad(String),
     InvalidSpeed(String),
     InvalidOperatingCharacteristic(String),
-    InvalidSeatingClass(String),
+    InvalidClass(String),
     InvalidReservationType(String),
     InvalidCatering(String),
     InvalidBrand(String),
@@ -74,7 +74,7 @@ impl fmt::Display for CifErrorType {
             CifErrorType::InvalidTimingLoad(x) => write!(f, "Invalid train timing load {}", x),
             CifErrorType::InvalidSpeed(x) => write!(f, "Invalid train speed {}", x),
             CifErrorType::InvalidOperatingCharacteristic(x) => write!(f, "Invalid operating characteristic {}", x),
-            CifErrorType::InvalidSeatingClass(x) => write!(f, "Invalid seating class {}", x),
+            CifErrorType::InvalidClass(x) => write!(f, "Invalid accommodation class {}", x),
             CifErrorType::InvalidReservationType(x) => write!(f, "Invalid reservation type {}", x),
             CifErrorType::InvalidCatering(x) => write!(f, "Invalid catering code {}", x),
             CifErrorType::InvalidBrand(x) => write!(f, "Invalid brand code {}", x),
@@ -579,6 +579,417 @@ fn read_days_of_week(slice: &str, number: u64, column: usize) -> Result<DaysOfWe
     }
 }
 
+fn read_train_type(slice: &str, number: u64, column: usize) -> Result<Option<TrainType>, CifError> {
+    match slice {
+        "OL" => Ok(Some(TrainType::Metro)),
+        "OU" => Ok(Some(TrainType::UnadvertisedPassenger)),
+        "OO" => Ok(Some(TrainType::OrdinaryPassenger)),
+        "OS" => Ok(Some(TrainType::Staff)),
+        "OW" => Ok(Some(TrainType::Mixed)),
+        "XC" => Ok(Some(TrainType::InternationalPassenger)),
+        "XD" => Ok(Some(TrainType::InternationalSleeperPassenger)),
+        "XI" => Ok(Some(TrainType::InternationalPassenger)),
+        "XR" => Ok(Some(TrainType::CarCarryingPassenger)),
+        "XU" => Ok(Some(TrainType::UnadvertisedExpressPassenger)),
+        "XX" => Ok(Some(TrainType::ExpressPassenger)),
+        "XZ" => Ok(Some(TrainType::SleeperPassenger)),
+        "BR" => Ok(Some(TrainType::ReplacementBus)),
+        "BS" => Ok(Some(TrainType::ServiceBus)),
+        "SS" => Ok(Some(TrainType::Ship)),
+        "EE" => Ok(Some(TrainType::EmptyPassenger)),
+        "EL" => Ok(Some(TrainType::EmptyMetro)),
+        "ES" => Ok(Some(TrainType::EmptyPassengerAndStaff)),
+        "JJ" => Ok(Some(TrainType::Post)),
+        "PM" => Ok(Some(TrainType::Parcels)),
+        "PP" => Ok(Some(TrainType::Parcels)),
+        "PV" => Ok(Some(TrainType::EmptyNonPassenger)),
+        "DD" => Ok(Some(TrainType::FreightDepartmental)),
+        "DH" => Ok(Some(TrainType::FreightCivilEngineer)),
+        "DI" => Ok(Some(TrainType::FreightMechanicalElectricalEngineer)),
+        "DQ" => Ok(Some(TrainType::FreightStores)),
+        "DT" => Ok(Some(TrainType::FreightTest)),
+        "DY" => Ok(Some(TrainType::FreightSignalTelecoms)),
+        "ZB" => Ok(Some(TrainType::LocomotiveBrakeVan)),
+        "ZZ" => Ok(Some(TrainType::Locomotive)),
+        "J2" => Ok(Some(TrainType::FreightAutomotiveComponents)),
+        "H2" => Ok(Some(TrainType::FreightAutomotiveVehicles)),
+        "J6" => Ok(Some(TrainType::FreightWagonloadBuildingMaterials)),
+        "J5" => Ok(Some(TrainType::FreightChemicals)),
+        "J3" => Ok(Some(TrainType::FreightEdibleProducts)),
+        "J9" => Ok(Some(TrainType::FreightIntermodalContracts)),
+        "H9" => Ok(Some(TrainType::FreightIntermodalOther)),
+        "H8" => Ok(Some(TrainType::FreightInternational)),
+        "J8" => Ok(Some(TrainType::FreightMerchandise)),
+        "J4" => Ok(Some(TrainType::FreightIndustrialMinerals)),
+        "A0" => Ok(Some(TrainType::FreightCoalDistributive)),
+        "E0" => Ok(Some(TrainType::FreightCoalElectricity)),
+        "B0" => Ok(Some(TrainType::FreightNuclear)),
+        "B1" => Ok(Some(TrainType::FreightMetals)),
+        "B4" => Ok(Some(TrainType::FreightAggregates)),
+        "B5" => Ok(Some(TrainType::FreightWaste)),
+        "B6" => Ok(Some(TrainType::FreightTrainloadBuildingMaterials)),
+        "B7" => Ok(Some(TrainType::FreightPetroleum)),
+        "H0" => Ok(Some(TrainType::FreightInternationalMixed)),
+        "H1" => Ok(Some(TrainType::FreightInternationalIntermodal)),
+        "H3" => Ok(Some(TrainType::FreightInternationalAutomotive)),
+        "H4" => Ok(Some(TrainType::FreightInternationalContract)),
+        "H5" => Ok(Some(TrainType::FreightInternationalHaulmark)),
+        "H6" => Ok(Some(TrainType::FreightInternationalJointVenture)),
+        "  " => Ok(None),
+        x => Err(CifError { error_type: CifErrorType::InvalidTrainCategory(x.to_string()), line: number, column: column } ),
+    }
+}
+
+fn read_power_type(slice: &str, number: u64, column: usize) -> Result<Option<TrainPower>, CifError> {
+    match &slice[0..3] {
+        "D  " => Ok(Some(TrainPower::DieselLocomotive)),
+        "DEM" => Ok(Some(TrainPower::DieselElectricMultipleUnit)),
+        "DMU" => match &slice[3..4] {
+            "D" => Ok(Some(TrainPower::DieselMechanicalMultipleUnit)),
+            "V" => Ok(Some(TrainPower::DieselElectricMultipleUnit)),
+            "7" => Ok(Some(TrainPower::ElectricAndDieselMultipleUnit)),
+            "8" => Ok(Some(TrainPower::ElectricAndDieselMultipleUnit)),
+            _   => Ok(Some(TrainPower::DieselHydraulicMultipleUnit)),
+        },
+        "E  " => Ok(Some(TrainPower::ElectricLocomotive)),
+        "ED " => Ok(Some(TrainPower::ElectricAndDieselLocomotive)),
+        "EML" => Ok(Some(TrainPower::ElectricMultipleUnitWithLocomotive)),
+        "EMU" => Ok(Some(TrainPower::ElectricMultipleUnit)),
+        "HST" => Ok(Some(TrainPower::DieselElectricMultipleUnit)),
+        "   " => Ok(None),
+        x => Err(CifError { error_type: CifErrorType::InvalidTrainPower(x.to_string()), line: number, column: column } ),
+    }
+}
+
+fn read_speed(slice: &str, number: u64, column: usize) -> Result<Option<f64>, CifError> {
+    let speed_mph = match slice {
+        "   " => None,
+        x => match x.parse::<u16>() {
+            Ok(speed) => Some(speed),
+            Err(_) => return Err(CifError { error_type: CifErrorType::InvalidSpeed(slice.to_string()), line: number, column: column } ),
+        },
+    };
+
+    match speed_mph {
+        Some(x) => Ok(Some(f64::from(x) * (1609.344 / (60. * 60.)))),
+        None => Ok(None),
+    }
+}
+
+fn read_operating_characteristics(slice: &str, number: u64, column: usize) -> Result<(OperatingCharacteristics, bool), CifError> {
+    let mut operating_characteristics = OperatingCharacteristics { ..Default::default() };
+    let mut runs_as_required = false;
+
+    for chr in slice.chars() {
+        match chr {
+            'B' => operating_characteristics.vacuum_braked = true,
+            'C' => operating_characteristics.one_hundred_mph = true,
+            'D' => operating_characteristics.driver_only_passenger = true,
+            'E' => operating_characteristics.br_mark_four_coaches = true,
+            'G' => operating_characteristics.guard_required = true,
+            'M' => operating_characteristics.one_hundred_and_ten_mph = true,
+            'P' => operating_characteristics.push_pull = true,
+            'Q' => runs_as_required = true,
+            'R' => operating_characteristics.air_conditioned_with_pa = true,
+            'S' => operating_characteristics.steam_heat = true,
+            'Y' => operating_characteristics.runs_to_locations_as_required = true,
+            'Z' => operating_characteristics.sb1c_gauge = true,
+            ' ' => (),
+            x => return Err(CifError { error_type: CifErrorType::InvalidOperatingCharacteristic(x.to_string()), line: number, column: column } ),
+        }
+    }
+
+    Ok((operating_characteristics, runs_as_required))
+}
+
+fn read_timing_load(slice: &str, br_mark_four_coaches: bool, number: u64, column: usize) -> Result<Option<String>, CifError> {
+    Ok(match &slice[0..3] {
+        "D  "       => match &slice[3..7] {
+            "    " => None,
+            x      => if br_mark_four_coaches {
+                Some(format!("Diesel locomotive hauling {} tons of BR Mark 4 Coaches", x))
+            }
+            else {
+                Some(format!("Diesel locomotive hauling {} tons", x))
+            },
+        },
+        "DEM"|"DMU" => match &slice[3..7] {
+            "69  " => Some("Class 172/0, 172/1, or 172/2 'Turbostar' DMU".to_string()),
+            "A   " => Some("Class 14x 2-axle 'Pacer' DMU".to_string()),
+            "E   " => Some("Class 158, 168, 170, 172, or 175 'Express' DMU".to_string()),
+            "N   " => Some("Class 165/0 'Network Turbo' DMU".to_string()),
+            "S   " => Some("Class 150, 153, 155, or 156 'Sprinter' DMU".to_string()),
+            "T   " => Some("Class 165/1 or 166 'Network Turbo' DMU".to_string()),
+            "V   " => Some("Class 220 or 221 'Voyager' DMU".to_string()),
+            "X   " => Some("Class 159 'South Western Turbo' DMU".to_string()),
+            "D1  " => Some("Vacuum-braked DMU with power car and trailer".to_string()),
+            "D2  " => Some("Vacuum-braked DMU with two power cars and trailer".to_string()),
+            "D3  " => Some("Vacuum-braked DMU with two power cars".to_string()),
+            "195 " => Some("Class 195 'Civity' DMU".to_string()),
+            "196 " => Some("Class 196 'Civity' DMU".to_string()),
+            "197 " => Some("Class 197 'Civity' DMU".to_string()),
+            "755 " => Some("Class 755 'FLIRT' bi-mode running on diesel".to_string()),
+            "777 " => Some("Class 777/1 'METRO' bi-mode running on battery".to_string()),
+            "800 " => Some("Class 800 'Azuma' bi-mode running on diesel".to_string()),
+            "802 " => Some("Class 800/802 'IET/Nova 1/Paragon' bi-mode running on diesel".to_string()),
+            "805 " => Some("Class 805 'Hitachi AT300' bi-mode running on diesel".to_string()),
+            "1400" => Some("Diesel locomotive hauling 1400 tons".to_string()), // lol
+            "    " => None,
+            x => return Err(CifError { error_type: CifErrorType::InvalidTimingLoad(x.to_string()), line: number, column: column + 3 } ),
+        },
+        "E  "       => match &slice[3..7] {
+            "325 " => Some("Class 325 Parcels EMU".to_string()),
+            "    " => None,
+            x      => if br_mark_four_coaches {
+                Some(format!("Electric locomotive hauling {} tons of BR Mark 4 Coaches", x))
+            }
+            else {
+                Some(format!("Electric locomotive hauling {} tons", x))
+            },
+        },
+        "ED "       => match &slice[3..7] {
+            "    " => None,
+            x      => if br_mark_four_coaches {
+                Some(format!("Electric and diesel locomotive hauling {} tons of BR Mark 4 Coaches", x))
+            }
+            else {
+                Some(format!("Electric and diesel locomotive hauling {} tons", x))
+            },
+        },
+        "EML"|"EMU" => match &slice[3..6] {
+            "AT " => Some("EMU with accelerated timings".to_string()),
+            "E  " => Some("Class 458 EMU".to_string()),
+            "0  " => Some("Class 380 EMU".to_string()),
+            "506" => Some("Class 350/1 EMU".to_string()),
+            "   " => None,
+            x => Some(format!("Class {} EMU", x)),
+        },
+        "HST"       => Some("High Speed Train (IC125)".to_string()),
+        "   "       => None,
+        x => return Err(CifError { error_type: CifErrorType::InvalidTrainPower(x.to_string()), line: number, column: column } ),
+    })
+}
+
+fn classes_to_bools(class: Class) -> (bool, bool) {
+    let first = match class {
+        Class::Both => true,
+        Class::First => true,
+        Class::Standard => false,
+        Class::None => false,
+    };
+    let standard = match class {
+        Class::Both => true,
+        Class::First => false,
+        Class::Standard => true,
+        Class::None => false,
+    };
+
+    (first, standard)
+}
+
+fn read_seating_class(slice: &str, train_type: TrainType, number: u64, column: usize) -> Result<(bool, bool), CifError> {
+    let seating_class = match slice {
+        " " => match train_type {
+            TrainType::Bus|TrainType::ServiceBus|TrainType::ReplacementBus|TrainType::OrdinaryPassenger|TrainType::ExpressPassenger|TrainType::InternationalPassenger|TrainType::SleeperPassenger|TrainType::InternationalSleeperPassenger|TrainType::CarCarryingPassenger|TrainType::UnadvertisedPassenger|TrainType::UnadvertisedExpressPassenger|TrainType::Staff|TrainType::EmptyPassengerAndStaff|TrainType::Mixed|TrainType::Metro|TrainType::PassengerParcels|TrainType::Ship => Class::Both,
+            _ => Class::None,
+        },
+        "B" => Class::Both,
+        "F" => Class::First,
+        "S" => Class::Standard,
+        x => return Err(CifError { error_type: CifErrorType::InvalidClass(x.to_string()), line: number, column: column } ),
+    };
+
+    Ok(classes_to_bools(seating_class))
+}
+
+fn read_sleeper_class(slice: &str, number: u64, column: usize) -> Result<(bool, bool), CifError> {
+    let seating_class = match slice {
+        " " => Class::None,
+        "B" => Class::Both,
+        "F" => Class::First,
+        "S" => Class::Standard,
+        x => return Err(CifError { error_type: CifErrorType::InvalidClass(x.to_string()), line: number, column: column } ),
+    };
+
+    Ok(classes_to_bools(seating_class))
+}
+
+fn read_catering(slice: &str, number: u64, column: usize) -> Result<(Catering, bool), CifError> {
+    let mut catering = Catering { ..Default::default() };
+    let mut wheelchair_reservations = false;
+
+    for chr in slice.chars() {
+        match chr {
+            'C' => catering.buffet = true,
+            'F' => catering.first_class_restaurant = true,
+            'H' => catering.hot_food = true,
+            'M' => catering.first_class_meal = true,
+            'P' => wheelchair_reservations = true,
+            'R' => catering.restaurant = true,
+            'T' => catering.trolley = true,
+            ' ' => (),
+            x => return Err(CifError { error_type: CifErrorType::InvalidCatering(x.to_string()), line: number, column: column } ),
+        }
+    }
+
+    Ok((catering, wheelchair_reservations))
+}
+
+fn read_reservations(slice: &str, wheelchair_reservations: bool, first_seating: bool, standard_seating: bool, first_sleepers: bool, standard_sleepers: bool, train_type: TrainType, number: u64, column: usize) -> Result<Reservations, CifError> {
+    match slice {
+        "A" => Ok(Reservations {
+            seats: if first_seating || standard_seating { ReservationField::Mandatory } else { ReservationField::NotApplicable },
+            bicycles: ReservationField::Mandatory,
+            sleepers: if first_sleepers || standard_sleepers { ReservationField::Mandatory } else { ReservationField::NotApplicable },
+            vehicles: if train_type == TrainType::CarCarryingPassenger { ReservationField::Mandatory } else { ReservationField::NotApplicable },
+            wheelchairs: ReservationField::Mandatory,
+        }),
+        "E" => Ok(Reservations {
+            seats: if first_seating || standard_seating { ReservationField::NotMandatory } else { ReservationField::NotApplicable },
+            bicycles: ReservationField::Mandatory,
+            sleepers: if first_sleepers || standard_sleepers { ReservationField::NotMandatory } else { ReservationField::NotApplicable },
+            vehicles: if train_type == TrainType::CarCarryingPassenger { ReservationField::Mandatory } else { ReservationField::NotApplicable },
+            wheelchairs: if wheelchair_reservations { ReservationField::Possible } else { ReservationField::NotMandatory },
+        }),
+        "R" => Ok(Reservations {
+            seats: if first_seating || standard_seating { ReservationField::Recommended } else { ReservationField::NotApplicable },
+            bicycles: ReservationField::NotMandatory,
+            sleepers: if first_sleepers || standard_sleepers { ReservationField::Recommended } else { ReservationField::NotApplicable },
+            vehicles: if train_type == TrainType::CarCarryingPassenger { ReservationField::Mandatory } else { ReservationField::NotApplicable },
+            wheelchairs: ReservationField::Recommended,
+        }),
+        "S" => Ok(Reservations {
+            seats: if first_seating || standard_seating { ReservationField::Possible } else { ReservationField::NotApplicable },
+            bicycles: ReservationField::NotMandatory,
+            sleepers: if first_sleepers || standard_sleepers { ReservationField::Possible } else { ReservationField::NotApplicable },
+            vehicles: if train_type == TrainType::CarCarryingPassenger { ReservationField::Mandatory } else { ReservationField::NotApplicable },
+            wheelchairs: ReservationField::Possible,
+        }),
+        " " => Ok(Reservations {
+            seats: if first_seating || standard_seating { ReservationField::Impossible } else { ReservationField::NotApplicable },
+            bicycles: ReservationField::NotMandatory,
+            sleepers: if first_sleepers || standard_sleepers { ReservationField::Impossible } else { ReservationField::NotApplicable },
+            vehicles: if train_type == TrainType::CarCarryingPassenger { ReservationField::Mandatory } else { ReservationField::NotApplicable },
+            wheelchairs: if wheelchair_reservations { ReservationField::Possible } else { if first_seating || standard_seating || first_sleepers || standard_sleepers { ReservationField::Impossible } else { ReservationField::NotApplicable } },
+        }),
+        x => Err(CifError { error_type: CifErrorType::InvalidReservationType(x.to_string()), line: number, column: column } ),
+    }
+}
+
+fn read_brand(slice: &str, number: u64, column: usize) -> Result<Option<String>, CifError> {
+    let mut brand = None;
+    for chr in slice.chars() {
+        match chr {
+            'E' => brand = Some("Eurostar".to_string()),
+            'U' => brand = Some("Alphaline".to_string()),
+            ' ' => (),
+            x => return Err(CifError { error_type: CifErrorType::InvalidBrand(x.to_string()), line: number, column: column } ),
+        }
+    }
+
+    Ok(brand)
+}
+
+fn amend_train(train: &mut Train, new_train: Train) {
+    train.validity = new_train.validity;
+    train.days_of_week = new_train.days_of_week;
+    train.runs_as_required = new_train.runs_as_required;
+    train.performance_monitoring = None;
+    train.route = vec![];
+    train.variable_train = new_train.variable_train;
+}
+
+fn read_mandatory_wtt_time(slice: &str, number: u64, column: usize) -> Result<NaiveTime, CifError> {
+    let wtt_dep = NaiveTime::parse_from_str(&slice[0..4], "%H%M");
+    let wtt_dep = match wtt_dep {
+        Ok(x) => x,
+        Err(x) => return Err(CifError { error_type: CifErrorType::ChronoParseError(x), line: number, column: column }),
+    };
+    Ok(wtt_dep + match &slice[4..5] {
+        "H" => Duration::seconds(30),
+        " " => Duration::seconds(0),
+        x => return Err(CifError { error_type: CifErrorType::InvalidMinuteFraction(x.to_string()), line: number, column: column + 4 }),
+    })
+}
+
+fn read_public_time(slice: &str, number: u64, column: usize) -> Result<Option<NaiveTime>, CifError> {
+    let pub_dep = NaiveTime::parse_from_str(slice, "%H%M");
+    let pub_dep = match pub_dep {
+        Ok(x) => x,
+        Err(x) => return Err(CifError { error_type: CifErrorType::ChronoParseError(x), line: number, column: column }),
+    };
+    // amazingly, public departure times of midnight are impossible in Britain!
+    Ok(if pub_dep == NaiveTime::from_hms_opt(0, 0, 0).unwrap() {
+        None
+    }
+    else {
+        Some(pub_dep)
+    })
+}
+
+fn read_allowance(slice: &str, number: u64, column: usize) -> Result<u32, CifError> {
+    let (eng_minutes, eng_seconds) = match (&slice[0..1], &slice[1..2], &slice[0..2]) {
+        (_, _, "  ") => (Ok(0), 0),
+        (_, _, " H") => (Ok(0), 30),
+        (x, " ", _) => (x.parse::<u32>(), 0),
+        (x, "H", _) => (x.parse::<u32>(), 30),
+        (_, _, x) => (x.parse::<u32>(), 0),
+    };
+    let eng_minutes = match eng_minutes {
+        Ok(x) => x,
+        Err(_) => return Err(CifError { error_type: CifErrorType::InvalidAllowance(slice.to_string()), line: number, column: column }),
+    };
+    Ok(eng_minutes * 60 + eng_seconds)
+}
+
+fn read_activities(slice: &str, number: u64, column: usize) -> Result<Activities, CifError> {
+    let mut activities = Activities { ..Default::default() };
+
+    for activity in slice.chars().chunks(2).into_iter().map(|chunk| chunk.collect::<String>()) {
+        match activity.as_str() {
+            "A " => activities.other_trains_pass = true,
+            "AE" => activities.attach_or_detach_assisting_loco = true,
+            "AX" => activities.x_on_arrival = true,
+            "BL" => activities.banking_loco = true,
+            "C " => activities.crew_change = true,
+            "D " => activities.set_down_only = true,
+            "-D" => activities.detach = true,
+            "E " => activities.examination = true,
+            "G " => activities.gbprtt = true,
+            "H " => activities.prevent_column_merge = true,
+            "HH" => activities.prevent_third_column_merge = true,
+            "K " => activities.passenger_count = true,
+            "KC" => activities.ticket_collection = true,
+            "KE" => activities.ticket_examination = true,
+            "KF" => activities.first_class_ticket_examination = true,
+            "KS" => activities.selective_ticket_examination = true,
+            "L " => activities.change_loco = true,
+            "N " => activities.unadvertised_stop = true,
+            "OP" => activities.operational_stop = true,
+            "OR" => activities.train_locomotive_on_rear = true,
+            "PR" => activities.propelling = true,
+            "R " => activities.request_stop = true,
+            "RM" => activities.reversing_move = true,
+            "RR" => activities.run_round = true,
+            "S " => activities.staff_stop = true,
+            "T " => activities.normal_passenger_stop = true,
+            "-T" => (activities.detach, activities.attach) = (true, true),
+            "TB" => activities.train_begins = true,
+            "TF" => activities.train_finishes = true,
+            "TS" => activities.tops_reporting = true,
+            "TW" => activities.token_etc = true,
+            "U " => activities.pick_up_only = true,
+            "-U" => activities.attach = true,
+            "W " => activities.watering_stock = true,
+            "X " => activities.cross_at_passing_point = true,
+            "  " => (),
+            x => return Err(CifError { error_type: CifErrorType::InvalidActivity(x.to_string()), line: number, column: column }),
+        };
+    };
+
+    Ok(activities)
+}
+
 impl CifImporter {
     pub fn new() -> CifImporter {
         CifImporter { ..Default::default() }
@@ -657,6 +1068,30 @@ impl CifImporter {
         }
 
         self.unwritten_assocs.insert((main_train_id.to_string(), location.to_string(), location_suffix.clone()), old_assoc);
+    }
+
+    fn get_last_train<'a>(&'a mut self, schedule: &'a mut Schedule, number: u64, record_type: &str) -> Result<&'a mut Train, CifError> {
+        let (main_train_id, begin, stp_modification_type, is_stp) = match &self.last_train {
+            Some(x) => x,
+            None => return Err(CifError { error_type: CifErrorType::UnexpectedRecordType(record_type.to_string(), "No preceding BS".to_string()), line: number, column: 0 } ),
+        };
+
+        let trains = match schedule.trains.get_mut(main_train_id) {
+            Some(x) => x,
+            None => panic!("Unable to find last-written train"),
+        };
+
+        let train = match (&stp_modification_type, &is_stp) {
+            (ModificationType::Insert, false) => trains.iter_mut().find(|train| train.source.unwrap() == TrainSource::LongTerm && train.validity[0].valid_begin == *begin),
+            (ModificationType::Insert, true) => trains.iter_mut().find(|train| train.source.unwrap() == TrainSource::ShortTerm && train.validity[0].valid_begin == *begin),
+            (ModificationType::Amend, _) => find_replacement_train(trains, begin),
+            (ModificationType::Delete, _) => panic!("Unexpected train modification type"),
+        };
+
+        Ok(match train {
+            Some(x) => x,
+            None => panic!("Unable to find last-written train"),
+        })
     }
 
     fn read_association(&mut self, line: &str, mut schedule: Schedule, number: u64) -> Result<Schedule, CifError> {
@@ -807,25 +1242,24 @@ impl CifImporter {
         // At this stage we have all the data we need for a simple delete, so handle this here
         //
         // Note these are NOT the same as STP cancels and indeed handled completely differently
-        if matches!(modification_type, ModificationType::Delete) {
+        if modification_type == ModificationType::Delete {
             let old_trains = schedule.trains.remove(main_train_id);
             let mut old_trains = match old_trains {
                 None => return Ok(schedule),
                 Some(x) => x,
             };
 
-            // first we delete main trains
-            old_trains.retain(|train| {
-                match (&stp_modification_type, &is_stp) {
-                    (ModificationType::Insert, false) => train.source.unwrap() != TrainSource::LongTerm || train.validity[0].valid_begin != begin, // delete the entire train for deleted inserts
-                    (ModificationType::Insert, true) => train.source.unwrap() != TrainSource::ShortTerm || train.validity[0].valid_begin != begin,
-                    (ModificationType::Amend, _) => true, // for deleted amendments we never delete an item here
-                    (ModificationType::Delete, _) => true, // for deleted cancellations we never delete an item here
-                }
-            });
-
-            // now we clean up modifications/cancellations
-            if matches!(stp_modification_type, ModificationType::Amend) || matches!(stp_modification_type, ModificationType::Delete) {
+            if stp_modification_type == ModificationType::Insert {
+                // first we delete main trains
+                old_trains.retain(|train| {
+                    match is_stp {
+                        false => train.source.unwrap() != TrainSource::LongTerm || train.validity[0].valid_begin != begin, // delete the entire train for deleted inserts
+                        true => train.source.unwrap() != TrainSource::ShortTerm || train.validity[0].valid_begin != begin,
+                    }
+                });
+            }
+            else {
+                // now we clean up modifications/cancellations
                 for ref mut train in old_trains.iter_mut() {
                     match stp_modification_type {
                         ModificationType::Insert => panic!("Insert found where Amend or Cancel expected"),
@@ -840,25 +1274,12 @@ impl CifImporter {
             return Ok(schedule);
         }
 
-        let parsed_end_date = NaiveDate::parse_from_str(&line[15..21], "%y%m%d");
-        let parsed_end_date = match parsed_end_date {
-            Ok(x) => x,
-            Err(x) => return Err(CifError { error_type: CifErrorType::ChronoParseError(x), line: number, column: 15 }),
-        };
-        let end = London.from_local_datetime(&parsed_end_date.and_hms_opt(0, 0, 0).unwrap()).unwrap();
-        let days_of_week = DaysOfWeek {
-            monday: &line[21..22] == "1",
-            tuesday: &line[22..23] == "1",
-            wednesday: &line[23..24] == "1",
-            thursday: &line[24..25] == "1",
-            friday: &line[25..26] == "1",
-            saturday: &line[26..27] == "1",
-            sunday: &line[27..28] == "1",
-        };
+        let end = read_date(&line[15..21], number, 15)?;
+        let days_of_week = read_days_of_week(&line[21..28], number, 27)?;
 
         // Now we handle STP cancellations; these are where long-running
         // trains are deleted as a one-off
-        if matches!(stp_modification_type, ModificationType::Delete) && matches!(modification_type, ModificationType::Insert) {
+        if stp_modification_type == ModificationType::Delete && modification_type == ModificationType::Insert {
             let old_trains = schedule.trains.remove(main_train_id);
             let mut old_trains = match old_trains {
                 None => return Ok(schedule),
@@ -867,28 +1288,12 @@ impl CifImporter {
 
             // we cancel main trains
             for train in old_trains.iter_mut() {
-                // check for no overlapping days at all
-                if days_of_week.into_iter().zip(train.days_of_week.into_iter()).find(|(new_day, train_day)| *new_day && *train_day).is_none() {
-                    continue;
-                }
-                let new_begin = if begin > train.validity[0].valid_begin {
-                    begin.clone()
-                }
-                else {
-                    train.validity[0].valid_begin.clone()
-                };
-                let new_end = if end < train.validity[0].valid_end {
-                    end.clone()
-                }
-                else {
-                    train.validity[0].valid_end.clone()
-                };
-                if new_end < new_begin {
+                if !check_date_applicability(&train.validity[0], &train.days_of_week, begin, end, &days_of_week) {
                     continue;
                 }
                 let new_cancel = TrainValidityPeriod {
-                    valid_begin: new_begin,
-                    valid_end: new_end,
+                    valid_begin: begin.clone(),
+                    valid_end: end.clone(),
                 };
                 train.cancellations.push((new_cancel, days_of_week.clone()))
             }
@@ -912,62 +1317,9 @@ impl CifImporter {
             x => return Err(CifError { error_type: CifErrorType::InvalidTrainStatus(x.to_string()), line: number, column: 29 } ),
         };
 
-        let train_type = match &line[30..32] {
-            "OL" => TrainType::Metro,
-            "OU" => TrainType::UnadvertisedPassenger,
-            "OO" => TrainType::OrdinaryPassenger,
-            "OS" => TrainType::Staff,
-            "OW" => TrainType::Mixed,
-            "XC" => TrainType::InternationalPassenger,
-            "XD" => TrainType::InternationalSleeperPassenger,
-            "XI" => TrainType::InternationalPassenger,
-            "XR" => TrainType::CarCarryingPassenger,
-            "XU" => TrainType::UnadvertisedExpressPassenger,
-            "XX" => TrainType::ExpressPassenger,
-            "XZ" => TrainType::SleeperPassenger,
-            "BR" => TrainType::ReplacementBus,
-            "BS" => TrainType::ServiceBus,
-            "SS" => TrainType::Ship,
-            "EE" => TrainType::EmptyPassenger,
-            "EL" => TrainType::EmptyMetro,
-            "ES" => TrainType::EmptyPassengerAndStaff,
-            "JJ" => TrainType::Post,
-            "PM" => TrainType::Parcels,
-            "PP" => TrainType::Parcels,
-            "PV" => TrainType::EmptyNonPassenger,
-            "DD" => TrainType::FreightDepartmental,
-            "DH" => TrainType::FreightCivilEngineer,
-            "DI" => TrainType::FreightMechanicalElectricalEngineer,
-            "DQ" => TrainType::FreightStores,
-            "DT" => TrainType::FreightTest,
-            "DY" => TrainType::FreightSignalTelecoms,
-            "ZB" => TrainType::LocomotiveBrakeVan,
-            "ZZ" => TrainType::Locomotive,
-            "J2" => TrainType::FreightAutomotiveComponents,
-            "H2" => TrainType::FreightAutomotiveVehicles,
-            "J6" => TrainType::FreightWagonloadBuildingMaterials,
-            "J5" => TrainType::FreightChemicals,
-            "J3" => TrainType::FreightEdibleProducts,
-            "J9" => TrainType::FreightIntermodalContracts,
-            "H9" => TrainType::FreightIntermodalOther,
-            "H8" => TrainType::FreightInternational,
-            "J8" => TrainType::FreightMerchandise,
-            "J4" => TrainType::FreightIndustrialMinerals,
-            "A0" => TrainType::FreightCoalDistributive,
-            "E0" => TrainType::FreightCoalElectricity,
-            "B0" => TrainType::FreightNuclear,
-            "B1" => TrainType::FreightMetals,
-            "B4" => TrainType::FreightAggregates,
-            "B5" => TrainType::FreightWaste,
-            "B6" => TrainType::FreightTrainloadBuildingMaterials,
-            "B7" => TrainType::FreightPetroleum,
-            "H0" => TrainType::FreightInternationalMixed,
-            "H1" => TrainType::FreightInternationalIntermodal,
-            "H3" => TrainType::FreightInternationalAutomotive,
-            "H4" => TrainType::FreightInternationalContract,
-            "H5" => TrainType::FreightInternationalHaulmark,
-            "H6" => TrainType::FreightInternationalJointVenture,
-            "  " => match train_status {
+        let train_type = match read_train_type(&line[30..32], number, 30)? {
+            Some(x) => x,
+            None => match train_status {
                 TrainStatus::Bus => TrainType::Bus,
                 TrainStatus::Freight => TrainType::Freight,
                 TrainStatus::PassengerParcels => TrainType::PassengerParcels,
@@ -979,298 +1331,75 @@ impl CifImporter {
                 TrainStatus::StpShip => TrainType::Ship,
                 TrainStatus::StpBus => TrainType::Bus,
             },
-            x => return Err(CifError { error_type: CifErrorType::InvalidTrainCategory(x.to_string()), line: number, column: 30 } ),
         };
 
         let public_id = &line[32..36];
-        let headcode = match &line[36..40] {
-            "    " => None,
-            x => Some(x.to_string()),
-        };
+        let headcode = read_optional_string(&line[36..40]);
         let service_group = &line[41..49];
 
-        let power_type = match &line[50..53] {
-            "D  " => Some(TrainPower::DieselLocomotive),
-            "DEM" => Some(TrainPower::DieselElectricMultipleUnit),
-            "DMU" => match &line[53..54] {
-                "D" => Some(TrainPower::DieselMechanicalMultipleUnit),
-                "V" => Some(TrainPower::DieselElectricMultipleUnit),
-                _   => Some(TrainPower::DieselHydraulicMultipleUnit),
-            },
-            "E  " => Some(TrainPower::ElectricLocomotive),
-            "ED " => Some(TrainPower::ElectricAndDieselLocomotive),
-            "EML" => Some(TrainPower::ElectricMultipleUnitWithLocomotive),
-            "EMU" => Some(TrainPower::ElectricMultipleUnit),
-            "HST" => Some(TrainPower::DieselElectricMultipleUnit),
-            "   " => None,
-            x => return Err(CifError { error_type: CifErrorType::InvalidTrainPower(x.to_string()), line: number, column: 50 } ),
-        };
+        let power_type = read_power_type(&line[50..57], number, 50)?;
+        let speed_m_per_s = read_speed(&line[57..60], number, 57)?;
 
-        let speed_mph = match &line[57..60] {
-            "   " => None,
-            x => match x.parse::<u16>() {
-                Ok(speed) => Some(speed),
-                Err(_) => return Err(CifError { error_type: CifErrorType::InvalidSpeed(line[57..60].to_string()), line: number, column: 57 } ),
-            },
-        };
+        let (operating_characteristics, runs_as_required) = read_operating_characteristics(&line[60..66], number, 60)?;
 
-        let speed_m_per_s = match speed_mph {
-            Some(x) => Some(f64::from(x) * (1609.344 / (60. * 60.))),
-            None => None,
-        };
+        let timing_load_str = read_timing_load(&line[50..57], operating_characteristics.br_mark_four_coaches, number, 50)?;
+        let timing_load_id = &line[50..57];
 
-        let mut operating_characteristics = OperatingCharacteristics { ..Default::default() };
-        let mut runs_as_required = false;
+        let (first_seating, standard_seating) = read_seating_class(&line[66..67], train_type, number, 66)?;
+        let (first_sleepers, standard_sleepers) = read_sleeper_class(&line[67..68], number, 67)?;
 
-        for chr in line[60..66].chars() {
-            match chr {
-                'B' => operating_characteristics.vacuum_braked = true,
-                'C' => operating_characteristics.one_hundred_mph = true,
-                'D' => operating_characteristics.driver_only_passenger = true,
-                'E' => operating_characteristics.br_mark_four_coaches = true,
-                'G' => operating_characteristics.guard_required = true,
-                'M' => operating_characteristics.one_hundred_and_ten_mph = true,
-                'P' => operating_characteristics.push_pull = true,
-                'Q' => runs_as_required = true,
-                'R' => operating_characteristics.air_conditioned_with_pa = true,
-                'S' => operating_characteristics.steam_heat = true,
-                'Y' => operating_characteristics.runs_to_locations_as_required = true,
-                'Z' => operating_characteristics.sb1c_gauge = true,
-                ' ' => (),
-                x => return Err(CifError { error_type: CifErrorType::InvalidOperatingCharacteristic(x.to_string()), line: number, column: 60 } ),
-            }
-        }
+        let (catering, wheelchair_reservations) = read_catering(&line[70..74], number, 70)?;
 
-        let timing_load_str = match &line[50..53] {
-            "D  "       => match &line[53..57] {
-                "    " => None,
-                x      => if operating_characteristics.br_mark_four_coaches {
-                    Some(format!("Diesel locomotive hauling {} tons of BR Mark 4 Coaches", x))
-                }
-                else {
-                    Some(format!("Diesel locomotive hauling {} tons", x))
+        let reservations = read_reservations(&line[68..69], wheelchair_reservations, first_seating, standard_seating, first_sleepers, standard_sleepers, train_type, number, 68)?;
+
+        let brand = read_brand(&line[74..78], number, 74)?;
+
+        // all of the below will use this so construct it now
+        let new_train = Train {
+            id: main_train_id.to_string(),
+            validity: vec![TrainValidityPeriod {
+                valid_begin: begin,
+                valid_end: end,
+            }],
+            cancellations: vec![],
+            replacements: vec![],
+            days_of_week,
+            variable_train: VariableTrain {
+                train_type,
+                public_id: Some(public_id.to_string()),
+                headcode,
+                service_group: Some(service_group.to_string()),
+                power_type: power_type,
+                timing_allocation: match timing_load_str {
+                    None => None,
+                    Some(x) => Some(TrainAllocation {
+                        id: timing_load_id.to_string(),
+                        description: x,
+                        vehicles: None,
+                    }),
                 },
+                actual_allocation: None,
+                timing_speed_m_per_s: speed_m_per_s,
+                operating_characteristics,
+                has_first_class_seats: first_seating,
+                has_second_class_seats: standard_seating,
+                has_first_class_sleepers: first_sleepers,
+                has_second_class_sleepers: standard_sleepers,
+                carries_vehicles: train_type == TrainType::CarCarryingPassenger,
+                reservations,
+                catering,
+                brand,
+                name: None,
+                uic_code: None,
+                operator: None,
             },
-            "DEM"|"DMU" => match &line[53..57] {
-                "69  " => Some("Class 172/0, 172/1, or 172/2 'Turbostar' DMU".to_string()),
-                "A   " => Some("Class 14x 2-axle 'Pacer' DMU".to_string()),
-                "E   " => Some("Class 158, 168, 170, 172, or 175 'Express' DMU".to_string()),
-                "N   " => Some("Class 165/0 'Network Turbo' DMU".to_string()),
-                "S   " => Some("Class 150, 153, 155, or 156 'Sprinter' DMU".to_string()),
-                "T   " => Some("Class 165/1 or 166 'Network Turbo' DMU".to_string()),
-                "V   " => Some("Class 220 or 221 'Voyager' DMU".to_string()),
-                "X   " => Some("Class 159 'South Western Turbo' DMU".to_string()),
-                "D1  " => Some("Vacuum-braked DMU with power car and trailer".to_string()),
-                "D2  " => Some("Vacuum-braked DMU with two power cars and trailer".to_string()),
-                "D3  " => Some("Vacuum-braked DMU with two power cars".to_string()),
-                "195 " => Some("Class 195 'Civity' DMU".to_string()),
-                "196 " => Some("Class 196 'Civity' DMU".to_string()),
-                "197 " => Some("Class 197 'Civity' DMU".to_string()),
-                "755 " => Some("Class 755 'FLIRT' bi-mode running on diesel".to_string()),
-                "777 " => Some("Class 777/1 'METRO' bi-mode running on battery".to_string()),
-                "800 " => Some("Class 800 'Azuma' bi-mode running on diesel".to_string()),
-                "802 " => Some("Class 800/802 'IET/Nova 1/Paragon' bi-mode running on diesel".to_string()),
-                "805 " => Some("Class 805 'Hitachi AT300' bi-mode running on diesel".to_string()),
-                "1400" => Some("Diesel locomotive hauling 1400 tons".to_string()), // lol
-                "    " => None,
-                x => return Err(CifError { error_type: CifErrorType::InvalidTimingLoad(x.to_string()), line: number, column: 53 } ),
-            },
-            "E  "       => match &line[53..57] {
-                "325 " => Some("Class 325 Parcels EMU".to_string()),
-                "    " => None,
-                x      => if operating_characteristics.br_mark_four_coaches {
-                    Some(format!("Electric locomotive hauling {} tons of BR Mark 4 Coaches", x))
-                }
-                else {
-                    Some(format!("Electric locomotive hauling {} tons", x))
-                },
-            },
-            "ED "       => match &line[53..57] {
-                "    " => None,
-                x      => if operating_characteristics.br_mark_four_coaches {
-                    Some(format!("Electric and diesel locomotive hauling {} tons of BR Mark 4 Coaches", x))
-                }
-                else {
-                    Some(format!("Electric and diesel locomotive hauling {} tons", x))
-                },
-            },
-            "EML"|"EMU" => match &line[53..56] {
-                "AT " => Some("EMU with accelerated timings".to_string()),
-                "E  " => Some("Class 458 EMU".to_string()),
-                "0  " => Some("Class 380 EMU".to_string()),
-                "506" => Some("Class 350/1 EMU".to_string()),
-                "   " => None,
-                x => Some(format!("Class {} EMU", x)),
-            },
-            "HST"       => Some("High Speed Train (IC125)".to_string()),
-            "   "       => None,
-            x => return Err(CifError { error_type: CifErrorType::InvalidTrainPower(x.to_string()), line: number, column: 50 } ),
+            source: Some(if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }),
+            runs_as_required,
+            performance_monitoring: None,
+            route: vec![],
         };
 
-        let seating_class = match &line[66..67] {
-            " " => match train_type {
-                TrainType::Bus|TrainType::ServiceBus|TrainType::ReplacementBus|TrainType::OrdinaryPassenger|TrainType::ExpressPassenger|TrainType::InternationalPassenger|TrainType::SleeperPassenger|TrainType::InternationalSleeperPassenger|TrainType::CarCarryingPassenger|TrainType::UnadvertisedPassenger|TrainType::UnadvertisedExpressPassenger|TrainType::Staff|TrainType::EmptyPassengerAndStaff|TrainType::Mixed|TrainType::Metro|TrainType::PassengerParcels|TrainType::Ship => Class::Both,
-                _ => Class::None,
-            },
-            "B" => Class::Both,
-            "F" => Class::First,
-            "S" => Class::Standard,
-            x => return Err(CifError { error_type: CifErrorType::InvalidSeatingClass(x.to_string()), line: number, column: 66 } ),
-        };
-
-        let first_seating = match seating_class {
-            Class::Both => true,
-            Class::First => true,
-            Class::Standard => false,
-            Class::None => false,
-        };
-        let standard_seating = match seating_class {
-            Class::Both => true,
-            Class::First => false,
-            Class::Standard => true,
-            Class::None => false,
-        };
-
-        let sleeper_class = match &line[67..68] {
-            " " => Class::None,
-            "B" => Class::Both,
-            "F" => Class::First,
-            "S" => Class::Standard,
-            x => return Err(CifError { error_type: CifErrorType::InvalidSeatingClass(x.to_string()), line: number, column: 67 } ),
-        };
-
-        let first_sleepers = match sleeper_class {
-            Class::Both => true,
-            Class::First => true,
-            Class::Standard => false,
-            Class::None => false,
-        };
-        let standard_sleepers = match sleeper_class {
-            Class::Both => true,
-            Class::First => false,
-            Class::Standard => true,
-            Class::None => false,
-        };
-
-        let mut catering = Catering { ..Default::default() };
-        let mut wheelchair_reservations = false;
-        for chr in line[70..74].chars() {
-            match chr {
-                'C' => catering.buffet = true,
-                'F' => catering.first_class_restaurant = true,
-                'H' => catering.hot_food = true,
-                'M' => catering.first_class_meal = true,
-                'P' => wheelchair_reservations = true,
-                'R' => catering.restaurant = true,
-                'T' => catering.trolley = true,
-                ' ' => (),
-                x => return Err(CifError { error_type: CifErrorType::InvalidCatering(x.to_string()), line: number, column: 70 } ),
-            }
-        }
-
-        let reservations = match &line[68..69] {
-            "A" => Reservations {
-                seats: if first_seating || standard_seating { ReservationField::Mandatory } else { ReservationField::NotApplicable },
-                bicycles: ReservationField::NotMandatory,
-                sleepers: if first_sleepers || standard_sleepers { ReservationField::Mandatory } else { ReservationField::NotApplicable },
-                vehicles: if train_type == TrainType::CarCarryingPassenger { ReservationField::Mandatory } else { ReservationField::NotApplicable },
-                wheelchairs: ReservationField::Mandatory,
-            },
-            "E" => Reservations {
-                seats: if first_seating || standard_seating { ReservationField::NotMandatory } else { ReservationField::NotApplicable },
-                bicycles: ReservationField::Mandatory,
-                sleepers: if first_sleepers || standard_sleepers { ReservationField::NotMandatory } else { ReservationField::NotApplicable },
-                vehicles: if train_type == TrainType::CarCarryingPassenger { ReservationField::Mandatory } else { ReservationField::NotApplicable },
-                wheelchairs: if wheelchair_reservations { ReservationField::Possible } else { ReservationField::NotMandatory },
-            },
-            "R" => Reservations {
-                seats: if first_seating || standard_seating { ReservationField::Recommended } else { ReservationField::NotApplicable },
-                bicycles: ReservationField::NotMandatory,
-                sleepers: if first_sleepers || standard_sleepers { ReservationField::Recommended } else { ReservationField::NotApplicable },
-                vehicles: if train_type == TrainType::CarCarryingPassenger { ReservationField::Mandatory } else { ReservationField::NotApplicable },
-                wheelchairs: ReservationField::Recommended,
-            },
-            "S" => Reservations {
-                seats: if first_seating || standard_seating { ReservationField::Possible } else { ReservationField::NotApplicable },
-                bicycles: ReservationField::NotMandatory,
-                sleepers: if first_sleepers || standard_sleepers { ReservationField::Possible } else { ReservationField::NotApplicable },
-                vehicles: if train_type == TrainType::CarCarryingPassenger { ReservationField::Mandatory } else { ReservationField::NotApplicable },
-                wheelchairs: ReservationField::Possible,
-            },
-            " " => Reservations {
-                seats: if first_seating || standard_seating { ReservationField::Impossible } else { ReservationField::NotApplicable },
-                bicycles: ReservationField::NotMandatory,
-                sleepers: if first_sleepers || standard_sleepers { ReservationField::Impossible } else { ReservationField::NotApplicable },
-                vehicles: if train_type == TrainType::CarCarryingPassenger { ReservationField::Mandatory } else { ReservationField::NotApplicable },
-                wheelchairs: if wheelchair_reservations { ReservationField::Possible } else { if first_seating || standard_seating || first_sleepers || standard_sleepers { ReservationField::Impossible } else { ReservationField::NotApplicable } },
-            },
-            x => return Err(CifError { error_type: CifErrorType::InvalidReservationType(x.to_string()), line: number, column: 68 } ),
-        };
-
-        let mut brand = None;
-        for chr in line[74..78].chars() {
-            match chr {
-                'E' => brand = Some("Eurostar".to_string()),
-                'U' => brand = Some("Alphaline".to_string()),
-                ' ' => (),
-                x => return Err(CifError { error_type: CifErrorType::InvalidBrand(x.to_string()), line: number, column: 74 } ),
-            }
-        }
-
-        if matches!(modification_type, ModificationType::Insert) && matches!(stp_modification_type, ModificationType::Insert) {
-            // we can write a (partial) train now, and continue updating it later.
-            self.last_train = Some((main_train_id.to_string(), begin, stp_modification_type, is_stp));
-
-            let new_train = Train {
-                id: main_train_id.to_string(),
-                validity: vec![TrainValidityPeriod {
-                    valid_begin: begin,
-                    valid_end: end,
-                }],
-                cancellations: vec![],
-                replacements: vec![],
-                days_of_week,
-                variable_train: VariableTrain {
-                    train_type,
-                    public_id: Some(public_id.to_string()),
-                    headcode,
-                    service_group: Some(service_group.to_string()),
-                    power_type: power_type,
-                    timing_allocation: match timing_load_str {
-                        None => None,
-                        Some(x) => Some(TrainAllocation {
-                            id: line[50..57].to_string(),
-                            description: x,
-                            vehicles: None,
-                        }),
-                    },
-                    actual_allocation: None,
-                    timing_speed_m_per_s: speed_m_per_s,
-                    operating_characteristics,
-                    has_first_class_seats: first_seating,
-                    has_second_class_seats: standard_seating,
-                    has_first_class_sleepers: first_sleepers,
-                    has_second_class_sleepers: standard_sleepers,
-                    carries_vehicles: train_type == TrainType::CarCarryingPassenger,
-                    reservations,
-                    catering,
-                    brand,
-                    name: None,
-                    uic_code: None,
-                    operator: None,
-                },
-                source: Some(if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }),
-                runs_as_required,
-                performance_monitoring: None,
-                route: vec![],
-            };
-
-            schedule.trains.entry(main_train_id.to_string()).or_insert(vec![]).push(new_train);
-
-            return Ok(schedule);
-        }
-        
-        if matches!(modification_type, ModificationType::Amend) {
+        if modification_type == ModificationType::Amend {
             // we can write a (partial) train now, and continue updating it later.
             self.last_train = Some((main_train_id.to_string(), begin, stp_modification_type, is_stp));
 
@@ -1281,100 +1410,27 @@ impl CifImporter {
             };
 
             // first we amend main trains
-            for ref mut train in old_trains.iter_mut() {
-                if match (&stp_modification_type, &is_stp) {
-                        (ModificationType::Insert, false) => train.source.unwrap() == TrainSource::LongTerm && train.validity[0].valid_begin == begin,
-                        (ModificationType::Insert, true) => train.source.unwrap() == TrainSource::ShortTerm && train.validity[0].valid_begin == begin,
-                        (ModificationType::Amend, _) => false,
-                        (ModificationType::Delete, _) => false,
-                    } {
-                    train.validity = vec![TrainValidityPeriod {
-                        valid_begin: begin,
-                        valid_end: end,
-                    }];
-                    train.days_of_week = days_of_week.clone();
-                    train.runs_as_required = runs_as_required;
-                    train.performance_monitoring = None;
-                    train.route = vec![];
-                    train.variable_train = VariableTrain {
-                        train_type,
-                        public_id: Some(public_id.to_string()),
-                        headcode: headcode.clone(),
-                        service_group: Some(service_group.to_string()),
-                        power_type: power_type,
-                        timing_allocation: match timing_load_str {
-                            None => None,
-                            Some(ref x) => Some(TrainAllocation {
-                                id: line[50..57].to_string(),
-                                description: x.clone(),
-                                vehicles: None,
-                            }),
-                        },
-                        actual_allocation: None,
-                        timing_speed_m_per_s: speed_m_per_s,
-                        operating_characteristics: operating_characteristics.clone(),
-                        has_first_class_seats: first_seating,
-                        has_second_class_seats: standard_seating,
-                        has_first_class_sleepers: first_sleepers,
-                        has_second_class_sleepers: standard_sleepers,
-                        carries_vehicles: train_type == TrainType::CarCarryingPassenger,
-                        reservations: reservations.clone(),
-                        catering: catering.clone(),
-                        brand: brand.clone(),
-                        name: None,
-                        uic_code: None,
-                        operator: None,
-                    };
+            if stp_modification_type == ModificationType::Insert {
+                for ref mut train in old_trains.iter_mut() {
+                    if match is_stp {
+                            false => train.source.unwrap() == TrainSource::LongTerm && train.validity[0].valid_begin == begin,
+                            true => train.source.unwrap() == TrainSource::ShortTerm && train.validity[0].valid_begin == begin,
+                        } {
+                        amend_train(train, new_train.clone());
+                    }
                 }
             }
-
-            // now we clean up modifications/cancellations
-            if matches!(stp_modification_type, ModificationType::Amend) || matches!(stp_modification_type, ModificationType::Delete) {
+            else {
+                // now we clean up modifications/cancellations
                 for ref mut train in old_trains.iter_mut() {
-                    if matches!(stp_modification_type, ModificationType::Amend) {
+                    if stp_modification_type == ModificationType::Amend {
                         for replacement in train.replacements.iter_mut() {
                             if replacement.validity[0].valid_begin == begin {
-                                replacement.validity = vec![TrainValidityPeriod {
-                                    valid_begin: begin,
-                                    valid_end: end,
-                                }];
-                                replacement.days_of_week = days_of_week.clone();
-                                replacement.runs_as_required = runs_as_required;
-                                replacement.performance_monitoring = None;
-                                replacement.route = vec![];
-                                replacement.variable_train = VariableTrain {
-                                    train_type,
-                                    public_id: Some(public_id.to_string()),
-                                    headcode: headcode.clone(),
-                                    service_group: Some(service_group.to_string()),
-                                    power_type: power_type,
-                                    timing_allocation: match timing_load_str {
-                                        None => None,
-                                        Some(ref x) => Some(TrainAllocation {
-                                            id: line[50..57].to_string(),
-                                            description: x.clone(),
-                                            vehicles: None,
-                                        }),
-                                    },
-                                    actual_allocation: None,
-                                    timing_speed_m_per_s: speed_m_per_s,
-                                    operating_characteristics: operating_characteristics.clone(),
-                                    has_first_class_seats: first_seating,
-                                    has_second_class_seats: standard_seating,
-                                    has_first_class_sleepers: first_sleepers,
-                                    has_second_class_sleepers: standard_sleepers,
-                                    carries_vehicles: train_type == TrainType::CarCarryingPassenger,
-                                    reservations: reservations.clone(),
-                                    catering: catering.clone(),
-                                    brand: brand.clone(),
-                                    name: None,
-                                    uic_code: None,
-                                    operator: None,
-                                };
+                                amend_train(replacement, new_train.clone());
                             }
                         }
                     }
-                    else if matches!(stp_modification_type, ModificationType::Delete) {
+                    else if stp_modification_type == ModificationType::Delete {
                         for (cancellation, old_days_of_week) in train.cancellations.iter_mut() {
                             if cancellation.valid_begin == begin {
                                 *cancellation = TrainValidityPeriod {
@@ -1385,9 +1441,6 @@ impl CifImporter {
                             }
                         }
                     }
-                    else {
-                        panic!("Insert found where amend or cancel expected");
-                    }
                 }
             }
 
@@ -1396,7 +1449,16 @@ impl CifImporter {
             return Ok(schedule);
         }
 
-        if matches!(stp_modification_type, ModificationType::Amend) {
+        if modification_type == ModificationType::Insert && stp_modification_type == ModificationType::Insert {
+            // we can write a (partial) train now, and continue updating it later.
+            self.last_train = Some((main_train_id.to_string(), begin, stp_modification_type, is_stp));
+
+            schedule.trains.entry(main_train_id.to_string()).or_insert(vec![]).push(new_train);
+
+            return Ok(schedule);
+        }
+        
+        if stp_modification_type == ModificationType::Amend {
             // we can write a (partial) train now, and continue updating it later.
             self.last_train = Some((main_train_id.to_string(), begin, stp_modification_type, is_stp));
 
@@ -1408,70 +1470,10 @@ impl CifImporter {
 
             // we replace main trains
             for train in old_trains.iter_mut() {
-                // check for no overlapping days at all
-                if days_of_week.into_iter().zip(train.days_of_week.into_iter()).find(|(new_day, train_day)| *new_day && *train_day).is_none() {
+                if !check_date_applicability(&train.validity[0], &train.days_of_week, begin, end, &days_of_week) {
                     continue;
                 }
-                let new_begin = if begin > train.validity[0].valid_begin {
-                    begin.clone()
-                }
-                else {
-                    train.validity[0].valid_begin.clone()
-                };
-                let new_end = if end < train.validity[0].valid_end {
-                    end.clone()
-                }
-                else {
-                    train.validity[0].valid_end.clone()
-                };
-                if new_end < new_begin {
-                    continue;
-                }
-                let new_train = Train {
-                    id: main_train_id.to_string(),
-                    validity: vec![TrainValidityPeriod {
-                        valid_begin: new_begin,
-                        valid_end: new_end,
-                    }],
-                    cancellations: vec![],
-                    replacements: vec![],
-                    days_of_week,
-                    variable_train: VariableTrain {
-                        train_type,
-                        public_id: Some(public_id.to_string()),
-                        headcode: headcode.clone(),
-                        service_group: Some(service_group.to_string()),
-                        power_type: power_type,
-                        timing_allocation: match timing_load_str {
-                            None => None,
-                            Some(ref x) => Some(TrainAllocation {
-                                id: line[50..57].to_string(),
-                                description: x.clone(),
-                                vehicles: None,
-                            }),
-                        },
-                        actual_allocation: None,
-                        timing_speed_m_per_s: speed_m_per_s,
-                        operating_characteristics: operating_characteristics.clone(),
-                        has_first_class_seats: first_seating,
-                        has_second_class_seats: standard_seating,
-                        has_first_class_sleepers: first_sleepers,
-                        has_second_class_sleepers: standard_sleepers,
-                        carries_vehicles: train_type == TrainType::CarCarryingPassenger,
-                        reservations: reservations.clone(),
-                        catering: catering.clone(),
-                        brand: brand.clone(),
-                        name: None,
-                        uic_code: None,
-                        operator: None,
-                    },
-                    source: Some(if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }),
-                    runs_as_required,
-                    performance_monitoring: None,
-                    route: vec![],
-                };
-
-                train.replacements.push(new_train)
+                train.replacements.push(new_train.clone())
             }
 
             schedule.trains.insert(main_train_id.to_string(), old_trains);
@@ -1486,32 +1488,9 @@ impl CifImporter {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
-        let (main_train_id, begin, stp_modification_type, is_stp) = match &self.last_train {
-            Some(x) => x,
-            None => return Err(CifError { error_type: CifErrorType::UnexpectedRecordType("BX".to_string(), "No preceding BS".to_string()), line: number, column: 0 } ),
-        };
+        let train = self.get_last_train(&mut schedule, number, "BX")?;
 
-        let ref mut trains = match schedule.trains.get_mut(main_train_id) {
-            Some(x) => x,
-            None => panic!("Unable to find last-written train"),
-        };
-
-        let ref mut train = match (&stp_modification_type, &is_stp) {
-            (ModificationType::Insert, false) => trains.iter_mut().find(|train| train.source.unwrap() == TrainSource::LongTerm && train.validity[0].valid_begin == *begin),
-            (ModificationType::Insert, true) => trains.iter_mut().find(|train| train.source.unwrap() == TrainSource::ShortTerm && train.validity[0].valid_begin == *begin),
-            (ModificationType::Amend, _) => find_replacement_train(trains, begin),
-            (ModificationType::Delete, _) => panic!("Unexpected train modification type"),
-        };
-
-        let train = match train {
-            Some(x) => x,
-            None => panic!("Unable to find last-written train"),
-        };
-
-        let uic_code = match &line[6..11] {
-            "     " => None,
-            x => Some(x.to_string()),
-        };
+        let uic_code = read_optional_string(&line[6..11]);
 
         let atoc_code = &line[11..13];
 
@@ -1589,154 +1568,27 @@ impl CifImporter {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
-        let (main_train_id, begin, stp_modification_type, is_stp) = match &self.last_train {
-            Some(x) => x,
-            None => return Err(CifError { error_type: CifErrorType::UnexpectedRecordType("LO".to_string(), "No preceding BS".to_string()), line: number, column: 0 } ),
-        };
-
-        let ref mut trains = match schedule.trains.get_mut(main_train_id) {
-            Some(x) => x,
-            None => panic!("Unable to find last-written train"),
-        };
-
-        let ref mut train = match (&stp_modification_type, &is_stp) {
-            (ModificationType::Insert, false) => trains.iter_mut().find(|train| train.source.unwrap() == TrainSource::LongTerm && train.validity[0].valid_begin == *begin),
-            (ModificationType::Insert, true) => trains.iter_mut().find(|train| train.source.unwrap() == TrainSource::ShortTerm && train.validity[0].valid_begin == *begin),
-            (ModificationType::Amend, _) => find_replacement_train(trains, begin),
-            (ModificationType::Delete, _) => panic!("Unexpected train modification type"),
-        };
-
-        let train = match train {
-            Some(x) => x,
-            None => panic!("Unable to find last-written train"),
-        };
+        let train = self.get_last_train(&mut schedule, number, "LO")?;
 
         if !train.route.is_empty() {
             return Err(CifError { error_type: CifErrorType::UnexpectedRecordType("LO".to_string(), "Train route not empty".to_string()), line: number, column: 0 } );
         }
 
         let location_id = &line[2..9];
-        let location_suffix = match &line[9..10] {
-            " " => None,
-            x => Some(x.to_string()),
-        };
+        let location_suffix = read_optional_string(&line[9..10]);
 
-        let wtt_dep = NaiveTime::parse_from_str(&line[10..14], "%H%M");
-        let wtt_dep = match wtt_dep {
-            Ok(x) => x,
-            Err(x) => return Err(CifError { error_type: CifErrorType::ChronoParseError(x), line: number, column: 10 }),
-        };
-        let wtt_dep = wtt_dep + match &line[14..15] {
-            "H" => Duration::seconds(30),
-            " " => Duration::seconds(0),
-            x => return Err(CifError { error_type: CifErrorType::InvalidMinuteFraction(x.to_string()), line: number, column: 14 }),
-        };
+        let wtt_dep = read_mandatory_wtt_time(&line[10..15], number, 10)?;
+        let pub_dep = read_public_time(&line[15..19], number, 15)?;
 
-        let pub_dep = NaiveTime::parse_from_str(&line[15..19], "%H%M");
-        let pub_dep = match pub_dep {
-            Ok(x) => x,
-            Err(x) => return Err(CifError { error_type: CifErrorType::ChronoParseError(x), line: number, column: 15 }),
-        };
-        // amazingly, public departure times of midnight are impossible in Britain!
-        let pub_dep = if pub_dep == NaiveTime::from_hms_opt(0, 0, 0).unwrap() {
-            None
-        }
-        else {
-            Some(pub_dep)
-        };
+        let platform = read_optional_string(&line[19..22]);
+        let line_code = read_optional_string(&line[22..25]);
 
-        let platform = match &line[19..22] {
-            "   " => None,
-            x => Some(x.trim().to_string()),
-        };
+        let eng_allowance = read_allowance(&line[25..27], number, 25)?;
+        let path_allowance = read_allowance(&line[27..29], number, 27)?;
 
-        let line_code = match &line[22..25] {
-            "   " => None,
-            x => Some(x.trim().to_string()),
-        };
+        let activities = read_activities(&line[29..41], number, 29)?;
 
-        let (eng_minutes, eng_seconds) = match (&line[25..26], &line[26..27], &line[25..27]) {
-            (_, _, "  ") => (Ok(0), 0),
-            (_, _, " H") => (Ok(0), 30),
-            (x, " ", _) => (x.parse::<u32>(), 0),
-            (x, "H", _) => (x.parse::<u32>(), 30),
-            (_, _, x) => (x.parse::<u32>(), 0),
-        };
-        let eng_minutes = match eng_minutes {
-            Ok(x) => x,
-            Err(_) => return Err(CifError { error_type: CifErrorType::InvalidAllowance(line[25..27].to_string()), line: number, column: 25 }),
-        };
-        let eng_allowance = eng_minutes * 60 + eng_seconds;
-
-        let (path_minutes, path_seconds) = match (&line[27..28], &line[28..29], &line[27..29]) {
-            (_, _, "  ") => (Ok(0), 0),
-            (_, _, " H") => (Ok(0), 30),
-            (x, " ", _) => (x.parse::<u32>(), 0),
-            (x, "H", _) => (x.parse::<u32>(), 30),
-            (_, _, x) => (x.parse::<u32>(), 0),
-        };
-        let path_minutes = match path_minutes {
-            Ok(x) => x,
-            Err(_) => return Err(CifError { error_type: CifErrorType::InvalidAllowance(line[27..29].to_string()), line: number, column: 27 }),
-        };
-        let path_allowance = path_minutes * 60 + path_seconds;
-
-        let mut activities = Activities { ..Default::default() };
-
-        for activity in line[29..41].chars().chunks(2).into_iter().map(|chunk| chunk.collect::<String>()) {
-            match activity.as_str() {
-                "A " => activities.other_trains_pass = true,
-                "AE" => activities.attach_or_detach_assisting_loco = true,
-                "AX" => activities.x_on_arrival = true,
-                "BL" => activities.banking_loco = true,
-                "C " => activities.crew_change = true,
-                "D " => activities.set_down_only = true,
-                "-D" => activities.detach = true,
-                "E " => activities.examination = true,
-                "G " => activities.gbprtt = true,
-                "H " => activities.prevent_column_merge = true,
-                "HH" => activities.prevent_third_column_merge = true,
-                "K " => activities.passenger_count = true,
-                "KC" => activities.ticket_collection = true,
-                "KE" => activities.ticket_examination = true,
-                "KF" => activities.first_class_ticket_examination = true,
-                "KS" => activities.selective_ticket_examination = true,
-                "L " => activities.change_loco = true,
-                "N " => activities.unadvertised_stop = true,
-                "OP" => activities.operational_stop = true,
-                "OR" => activities.train_locomotive_on_rear = true,
-                "PR" => activities.propelling = true,
-                "R " => activities.request_stop = true,
-                "RM" => activities.reversing_move = true,
-                "RR" => activities.run_round = true,
-                "S " => activities.staff_stop = true,
-                "T " => activities.normal_passenger_stop = true,
-                "-T" => (activities.detach, activities.attach) = (true, true),
-                "TB" => activities.train_begins = true,
-                "TF" => activities.train_finishes = true,
-                "TS" => activities.tops_reporting = true,
-                "TW" => activities.token_etc = true,
-                "U " => activities.pick_up_only = true,
-                "-U" => activities.attach = true,
-                "W " => activities.watering_stock = true,
-                "X " => activities.cross_at_passing_point = true,
-                "  " => (),
-                x => return Err(CifError { error_type: CifErrorType::InvalidActivity(x.to_string()), line: number, column: 29 }),
-            };
-        };
-
-        let (performance_minutes, performance_seconds) = match (&line[41..42], &line[42..43], &line[41..43]) {
-            (_, _, "  ") => (Ok(0), 0),
-            (_, _, " H") => (Ok(0), 30),
-            (x, " ", _) => (x.parse::<u32>(), 0),
-            (x, "H", _) => (x.parse::<u32>(), 30),
-            (_, _, x) => (x.parse::<u32>(), 0),
-        };
-        let performance_minutes = match performance_minutes {
-            Ok(x) => x,
-            Err(_) => return Err(CifError { error_type: CifErrorType::InvalidAllowance(line[41..43].to_string()), line: number, column: 41 }),
-        };
-        let performance_allowance = performance_minutes * 60 + performance_seconds;
+        let performance_allowance = read_allowance(&line[41..43], number, 41)?;
 
         let new_location = TrainLocation {
             timezone: London,
@@ -2494,7 +2346,7 @@ impl CifImporter {
             "B" => Class::Both,
             "F" => Class::First,
             "S" => Class::Standard,
-            x => return Err(CifError { error_type: CifErrorType::InvalidSeatingClass(x.to_string()), line: number, column: 46 } ),
+            x => return Err(CifError { error_type: CifErrorType::InvalidClass(x.to_string()), line: number, column: 46 } ),
         };
 
         let first_seating = match seating_class {
@@ -2515,7 +2367,7 @@ impl CifImporter {
             "B" => Class::Both,
             "F" => Class::First,
             "S" => Class::Standard,
-            x => return Err(CifError { error_type: CifErrorType::InvalidSeatingClass(x.to_string()), line: number, column: 47 } ),
+            x => return Err(CifError { error_type: CifErrorType::InvalidClass(x.to_string()), line: number, column: 47 } ),
         };
 
         let first_sleepers = match sleeper_class {
