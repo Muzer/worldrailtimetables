@@ -1,5 +1,8 @@
+use anyhow;
 use config_file::ConfigFileError;
-use crate::cif_importer::CifError;
+use crate::nr_importer::CifError;
+use crate::nr_importer::NrJsonError;
+use crate::nr_vstp_subscriber::NrVstpError;
 use reqwest;
 
 use std::fmt;
@@ -10,6 +13,10 @@ pub enum Error {
     HttpRequestError(reqwest::Error),
     IoError(std::io::Error),
     CifError(CifError),
+    NrJsonError(NrJsonError),
+    AnyhowError(anyhow::Error),
+    NrVstpError(NrVstpError),
+    SerdeJsonError(serde_json::Error),
 }
 
 impl fmt::Display for Error {
@@ -41,5 +48,29 @@ impl From<std::io::Error> for Error {
 impl From<CifError> for Error {
     fn from(error: CifError) -> Self {
         Error::CifError(error)
+    }
+}
+
+impl From<NrJsonError> for Error {
+    fn from(error: NrJsonError) -> Self {
+        Error::NrJsonError(error)
+    }
+}
+
+impl From<anyhow::Error> for Error {
+    fn from(error: anyhow::Error) -> Self {
+        Error::AnyhowError(error)
+    }
+}
+
+impl From<NrVstpError> for Error {
+    fn from(error: NrVstpError) -> Self {
+        Error::NrVstpError(error)
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(error: serde_json::Error) -> Self {
+        Error::SerdeJsonError(error)
     }
 }

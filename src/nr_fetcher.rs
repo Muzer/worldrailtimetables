@@ -31,6 +31,7 @@ impl NrFetcher {
 #[async_trait]
 impl Fetcher for NrFetcher {
     async fn fetch(&self) -> Result<Box<dyn AsyncBufRead + Unpin + Send>, Error> {
+        println!("Fetching SCHEDULE from Network Rail");
         let client = Client::new();
         let response = client
             .get("https://publicdatafeeds.networkrail.co.uk/ntrod/CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full.CIF.gz")

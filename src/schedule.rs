@@ -1,6 +1,7 @@
 use chrono::{DateTime, NaiveTime, Weekday};
 use chrono_tz::Tz;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 #[derive(Clone, Debug)]
 pub struct Schedule {
@@ -12,6 +13,7 @@ pub struct Schedule {
     pub valid_begin: Option<DateTime::<Tz>>,
     pub valid_end: Option<DateTime::<Tz>>,
     pub last_updated: Option<DateTime::<Tz>>,
+    pub trains_indexed_by_location: HashMap<String, HashSet<String>>,
 }
 
 impl Schedule {
@@ -24,6 +26,7 @@ impl Schedule {
             valid_begin: None,
             valid_end: None,
             last_updated: None,
+            trains_indexed_by_location: HashMap::new(),
         }
     }
 }
@@ -335,7 +338,7 @@ pub struct VariableTrain {
 pub struct Train {
     pub id: String,
     pub validity: Vec<TrainValidityPeriod>,
-    pub cancellations: Vec<(TrainValidityPeriod, DaysOfWeek)>,
+    pub cancellations: Vec<(TrainValidityPeriod, DaysOfWeek)>, // TODO should include TrainSource?
     pub replacements: Vec<Train>,
     pub days_of_week: DaysOfWeek,
     pub variable_train: VariableTrain,
