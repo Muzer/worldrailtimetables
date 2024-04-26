@@ -1,5 +1,5 @@
 use crate::schedule::{Activities, AssociationNode, Catering, DaysOfWeek, Location, OperatingCharacteristics, ReservationField, Reservations, Schedule, Train, TrainAllocation, TrainLocation, TrainOperator, TrainSource, TrainType, TrainPower, TrainValidityPeriod, VariableTrain};
-use crate::importer::Importer;
+use crate::importer::{FastImporter, SlowImporter};
 use crate::error::Error;
 
 use async_trait::async_trait;
@@ -17,7 +17,6 @@ use std::collections::HashSet;
 use std::fmt;
 use std::ops::{Add, Sub};
 use tokio::io::AsyncBufReadExt;
-use tokio::io::AsyncReadExt;
 
 #[derive(Default)]
 pub struct CifImporter {
@@ -575,6 +574,15 @@ fn read_stp_indicator<F, T>(stp_slice: &str, error_logic: F) -> Result<(Modifica
 
 fn read_date<F, T>(date_slice: &str, error_logic: F) -> Result<DateTime::<Tz>, T> where F: FnOnce(CifErrorType) -> T {
     let parsed_date = NaiveDate::parse_from_str(date_slice, "%y%m%d");
+    let parsed_date = match parsed_date {
+        Ok(x) => x,
+        Err(x) => return Err(error_logic(CifErrorType::ChronoParseError(x))),
+    };
+    Ok(London.from_local_datetime(&parsed_date.and_hms_opt(0, 0, 0).unwrap()).unwrap())
+}
+
+fn read_backwards_date<F, T>(date_slice: &str, error_logic: F) -> Result<DateTime::<Tz>, T> where F: FnOnce(CifErrorType) -> T {
+    let parsed_date = NaiveDate::parse_from_str(date_slice, "%d%m%y");
     let parsed_date = match parsed_date {
         Ok(x) => x,
         Err(x) => return Err(error_logic(CifErrorType::ChronoParseError(x))),
@@ -2004,8 +2012,8 @@ impl CifImporter {
         };
         schedule.last_updated = Some(London.from_local_datetime(&parsed_datetime).unwrap());
         if &line[46..47] == "F" {
-            schedule.valid_begin = Some(read_date(&line[48..54], produce_cif_error_closure(number, 48))?);
-            schedule.valid_end = Some(read_date(&line[54..60], produce_cif_error_closure(number, 48))?);
+            schedule.valid_begin = Some(read_backwards_date(&line[48..54], produce_cif_error_closure(number, 48))?);
+            schedule.valid_end = Some(read_backwards_date(&line[54..60], produce_cif_error_closure(number, 48))?);
         }
         Ok(schedule)
     }
@@ -2049,7 +2057,7 @@ impl CifImporter {
 }
 
 #[async_trait]
-impl Importer for CifImporter {
+impl SlowImporter for CifImporter {
     async fn overlay(&mut self, reader: impl AsyncBufReadExt + Unpin + Send, mut schedule: Schedule) -> Result<Schedule, Error> {
         let mut lines = reader.lines();
 
@@ -2662,12 +2670,9 @@ impl NrJsonImporter {
 }
 
 #[async_trait]
-impl Importer for NrJsonImporter {
-    async fn overlay(&mut self, mut reader: impl AsyncBufReadExt + Unpin + Send, mut schedule: Schedule) -> Result<Schedule, Error> {
-        let mut buf = Vec::<u8>::new();
-        reader.read_to_end(&mut buf).await?;
-
-        let parsed_json = serde_json::from_slice::<NrJsonVstp>(&buf)?;
+impl FastImporter for NrJsonImporter {
+    fn overlay(&mut self, data: Vec<u8>, mut schedule: Schedule) -> Result<Schedule, Error> {
+        let parsed_json = serde_json::from_slice::<NrJsonVstp>(&data)?;
         schedule = self.read_vstp_entry(&parsed_json, schedule)?;
         self.previously_received.push(parsed_json);
 

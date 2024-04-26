@@ -14,12 +14,9 @@ use futures::StreamExt;
 use futures::stream::SplitSink;
 use futures::stream::SplitStream;
 
-use tokio::io::AsyncBufRead;
-use tokio::io::BufReader;
 use tokio::time::Duration;
 
 use std::fmt;
-use std::io::Cursor;
 
 pub struct NrVstpSubscriber {
     config: NrVstpSubscriberConfig,
@@ -85,7 +82,7 @@ impl Subscriber for NrVstpSubscriber {
         Ok(())
     }
 
-    async fn receive(&mut self) -> Result<Box<dyn AsyncBufRead + Unpin + Send>, Error> {
+    async fn receive(&mut self) -> Result<Vec<u8>, Error> {
         let msg = match &mut self.stream {
             Some(x) => x.next().await.transpose()?,
             None => return Err(Error::NrVstpError(NrVstpError { what: "Subscribe not yet called".to_string() })),
@@ -97,10 +94,10 @@ impl Subscriber for NrVstpSubscriber {
         };
 
         match msg.content {
-            FromServer::Message { body, .. } => Ok(Box::new(BufReader::new(Cursor::new(match body {
+            FromServer::Message { body, .. } => Ok(match body {
                 Some(x) => x,
                 None => return Err(Error::NrVstpError(NrVstpError { what: "No body".to_string() })),
-            })))),
+            }),
             FromServer::Receipt { .. } => Err(Error::NrVstpError(NrVstpError { what: "Received Receipt".to_string() })),
             FromServer::Error { message, .. } => Err(Error::NrVstpError(NrVstpError { what: message.unwrap() })),
             _ => Err(Error::NrVstpError(NrVstpError { what: "Received unknown message".to_string() })),
