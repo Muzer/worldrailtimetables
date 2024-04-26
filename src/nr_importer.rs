@@ -2062,6 +2062,10 @@ impl Importer for CifImporter {
         println!("Successfully loaded {} trains from {} lines of CIF", schedule.trains.len(), i);
         Ok(schedule)
     }
+
+    async fn repopulate(&mut self, schedule: Schedule) -> Result<Schedule, Error> {
+        Ok(schedule)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2196,6 +2200,7 @@ struct NrJsonVstp {
 
 #[derive(Default)]
 pub struct NrJsonImporter {
+    previously_received: Vec<NrJsonVstp>,
 }
 
 impl NrJsonImporter {
@@ -2203,7 +2208,7 @@ impl NrJsonImporter {
         NrJsonImporter { ..Default::default() }
     }
 
-    fn read_vstp_route(&mut self, schedule_segments: &Vec<NrJsonScheduleSegment>, train_status: &TrainStatus, train_id: &str, schedule: &mut Schedule) -> Result<Vec<TrainLocation>, NrJsonError> {
+    fn read_vstp_route(&self, schedule_segments: &Vec<NrJsonScheduleSegment>, train_status: &TrainStatus, train_id: &str, schedule: &mut Schedule) -> Result<Vec<TrainLocation>, NrJsonError> {
         let mut route = vec![];
         for (i, segment) in schedule_segments.iter().enumerate() {
             if segment.schedule_location.len() == 0 {
@@ -2359,7 +2364,7 @@ impl NrJsonImporter {
         Ok(route)
     }
 
-    fn read_vstp_variable_train(&mut self, schedule_segment: &NrJsonScheduleSegment, train_status: &TrainStatus) -> Result<VariableTrain, NrJsonError> {
+    fn read_vstp_variable_train(&self, schedule_segment: &NrJsonScheduleSegment, train_status: &TrainStatus) -> Result<VariableTrain, NrJsonError> {
         let train_type = match read_train_type(&schedule_segment.cif_train_category, produce_nr_json_error_closure("CIF_train_category".to_string()))? {
             Some(x) => x,
             None => match train_status {
@@ -2505,7 +2510,7 @@ impl NrJsonImporter {
         })
     }
 
-    fn read_vstp_entry(&mut self, parsed_json: NrJsonVstp, mut schedule: Schedule) -> Result<Schedule, NrJsonError> {
+    fn read_vstp_entry(&self, parsed_json: &NrJsonVstp, mut schedule: Schedule) -> Result<Schedule, NrJsonError> {
         println!("Input: {:#?}", parsed_json);
         let modification_type = match parsed_json.vstp_cif_msg_v1.schedule.transaction_type.as_str() {
             "Create" => ModificationType::Insert,
@@ -2516,6 +2521,12 @@ impl NrJsonImporter {
 
         let main_train_id = parsed_json.vstp_cif_msg_v1.schedule.cif_train_uid.trim();
         let begin = read_vstp_date(&parsed_json.vstp_cif_msg_v1.schedule.schedule_start_date, produce_nr_json_error_closure("schedule_start_date".to_string()))?;
+
+        // check that our schedule is the correct one
+        if begin > *schedule.valid_end.as_ref().unwrap() {
+            println!("{} is later than {}, skipping...", begin, schedule.valid_end.as_ref().unwrap());
+            return Ok(schedule)
+        }
 
         // At this stage we have all the data we need for a simple delete, so handle this here
         //
@@ -2657,8 +2668,17 @@ impl Importer for NrJsonImporter {
         reader.read_to_end(&mut buf).await?;
 
         let parsed_json = serde_json::from_slice::<NrJsonVstp>(&buf)?;
-        schedule = self.read_vstp_entry(parsed_json, schedule)?;
+        schedule = self.read_vstp_entry(&parsed_json, schedule)?;
+        self.previously_received.push(parsed_json);
 
+        Ok(schedule)
+    }
+
+    async fn repopulate(&mut self, mut schedule: Schedule) -> Result<Schedule, Error> {
+        println!("Repopulating VSTP entries...");
+        for parsed_json in &self.previously_received {
+            schedule = self.read_vstp_entry(&parsed_json, schedule)?;
+        }
         Ok(schedule)
     }
 }
