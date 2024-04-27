@@ -1,5 +1,5 @@
 use crate::schedule::{Activities, AssociationNode, Catering, DaysOfWeek, Location, OperatingCharacteristics, ReservationField, Reservations, Schedule, Train, TrainAllocation, TrainLocation, TrainOperator, TrainSource, TrainType, TrainPower, TrainValidityPeriod, VariableTrain};
-use crate::importer::{FastImporter, SlowImporter};
+use crate::importer::{EphemeralImporter, FastImporter, SlowImporter};
 use crate::error::Error;
 
 use async_trait::async_trait;
@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
 use std::ops::{Add, Sub};
+
+use tokio::fs;
 use tokio::io::AsyncBufReadExt;
 
 #[derive(Default)]
@@ -24,6 +26,7 @@ pub struct CifImporter {
     unwritten_assocs: HashMap<(String, String, Option<String>), Vec<(AssociationNode, AssociationCategory)>>,
     change_en_route: Option<VariableTrain>,
     cr_location: Option<(String, Option<String>)>,
+    orphaned_overlay_trains: HashMap<(String, DateTime::<Tz>), Train>,
 }
 
 #[derive(Debug)]
@@ -1241,15 +1244,19 @@ impl CifImporter {
         self.unwritten_assocs.insert((main_train_id.to_string(), location.to_string(), location_suffix.clone()), old_assoc);
     }
 
-    fn get_last_train<'a>(&self, schedule: &'a mut Schedule, number: u64, record_type: &str) -> Result<&'a mut Train, CifError> {
+    fn get_last_train<'a>(&'a mut self, schedule: &'a mut Schedule, number: u64, record_type: &str) -> Result<&'a mut Train, CifError> {
         let (main_train_id, begin, stp_modification_type, is_stp) = match &self.last_train {
             Some(x) => x,
             None => return Err(CifError { error_type: CifErrorType::UnexpectedRecordType(record_type.to_string(), "No preceding BS".to_string()), line: number, column: 0 } ),
         };
 
-        let trains = match schedule.trains.get_mut(main_train_id) {
-            Some(x) => x,
-            None => panic!("Unable to find last-written train"),
+        let trains = match (schedule.trains.get_mut(main_train_id), &stp_modification_type) {
+            (Some(x), _) => x,
+            (None, ModificationType::Amend) => match self.orphaned_overlay_trains.get_mut(&(main_train_id.clone(), begin.clone())) {
+                Some(x) => return Ok(x),
+                None => panic!("Unable to find last-written train, even in orphaned overlays"),
+            },
+            _ => panic!("Unable to find last-written train"),
         };
 
         let train = match (&stp_modification_type, &is_stp) {
@@ -1259,9 +1266,13 @@ impl CifImporter {
             (ModificationType::Delete, _) => panic!("Unexpected train modification type"),
         };
 
-        Ok(match train {
-            Some(x) => x,
-            None => panic!("Unable to find last-written train"),
+        Ok(match (train, &stp_modification_type) {
+            (Some(x), _) => x,
+            (None, ModificationType::Amend) => match self.orphaned_overlay_trains.get_mut(&(main_train_id.clone(), begin.clone())) {
+                Some(x) => x,
+                None => panic!("Unable to find last-written train, even in orphaned overlays"),
+            },
+            _ => panic!("Unable to find last-written train"),
         })
     }
 
@@ -1633,16 +1644,25 @@ impl CifImporter {
 
             let old_trains = schedule.trains.remove(main_train_id);
             let mut old_trains = match old_trains {
-                None => return Ok(schedule),
+                None => {
+                    self.orphaned_overlay_trains.insert((main_train_id.to_string(), begin), new_train);
+                    return Ok(schedule);
+                },
                 Some(x) => x,
             };
 
             // we replace main trains
+            let mut replaced = false;
             for train in old_trains.iter_mut() {
                 if !check_date_applicability(&train.validity[0], &train.days_of_week, begin, end, &days_of_week) {
                     continue;
                 }
+                replaced = true;
                 train.replacements.push(new_train.clone())
+            }
+
+            if !replaced {
+                self.orphaned_overlay_trains.insert((main_train_id.to_string(), begin), new_train);
             }
 
             schedule.trains.insert(main_train_id.to_string(), old_trains);
@@ -1657,8 +1677,6 @@ impl CifImporter {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
-        let train = self.get_last_train(&mut schedule, number, "BX")?;
-
         let uic_code = read_optional_string(&line[6..11]);
 
         let atoc_code = &line[11..13];
@@ -1666,6 +1684,8 @@ impl CifImporter {
         let train_operator_desc = read_train_operator(atoc_code, produce_cif_error_closure(number, 11))?;
 
         let performance_monitoring = read_ats_code(&line[13..14], produce_cif_error_closure(number, 13))?;
+
+        let train = self.get_last_train(&mut schedule, number, "BX")?;
 
         train.variable_train.uic_code = uic_code;
         train.variable_train.operator = Some(TrainOperator {
@@ -1680,12 +1700,6 @@ impl CifImporter {
     fn read_location_origin(&mut self, line: &str, mut schedule: Schedule, number: u64) -> Result<Schedule, CifError> {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
-
-        let train = self.get_last_train(&mut schedule, number, "LO")?;
-
-        if !train.route.is_empty() {
-            return Err(CifError { error_type: CifErrorType::UnexpectedRecordType("LO".to_string(), "Train route not empty".to_string()), line: number, column: 0 } );
-        }
 
         let location_id = &line[2..9];
         let location_suffix = read_optional_string(&line[9..10]);
@@ -1733,7 +1747,15 @@ impl CifImporter {
             forms_from: None,
         };
 
-        train.route.push(new_location);
+        {
+            let train = self.get_last_train(&mut schedule, number, "LI")?;
+
+            if !train.route.is_empty() {
+                return Err(CifError { error_type: CifErrorType::UnexpectedRecordType("LO".to_string(), "Train route not empty".to_string()), line: number, column: 0 } );
+            }
+
+            train.route.push(new_location);
+        }
         schedule.trains_indexed_by_location.entry(location_id.to_string()).or_insert(HashSet::new()).insert(self.last_train.as_ref().unwrap().0.clone());
 
         Ok(schedule)
@@ -1743,27 +1765,14 @@ impl CifImporter {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
-        let train = self.get_last_train(&mut schedule, number, "LI")?;
-
-        if train.route.is_empty() {
-            return Err(CifError { error_type: CifErrorType::UnexpectedRecordType("LI".to_string(), "Train route is empty".to_string()), line: number, column: 0 } );
-        }
-
-        let (last_wtt_time, last_wtt_day) = get_working_time(train.route.last().unwrap());
-
         let location_id = &line[2..9];
         let location_suffix = read_optional_string(&line[9..10]);
 
         self.validate_change_en_route_location(location_id, &location_suffix, number, 2)?;
 
         let wtt_arr = read_optional_wtt_time(&line[10..15], produce_cif_error_closure(number, 10))?;
-        let wtt_arr_day = calculate_day(&wtt_arr, &last_wtt_time, last_wtt_day);
-
         let wtt_dep = read_optional_wtt_time(&line[15..20], produce_cif_error_closure(number, 15))?;
-        let wtt_dep_day = calculate_day(&wtt_dep, &last_wtt_time, last_wtt_day);
-
         let wtt_pass = read_optional_wtt_time(&line[20..25], produce_cif_error_closure(number, 20))?;
-        let wtt_pass_day = calculate_day(&wtt_pass, &last_wtt_time, last_wtt_day);
 
         match (wtt_arr, wtt_dep, wtt_pass) {
             (None, None, Some(_)) => (),
@@ -1772,11 +1781,7 @@ impl CifImporter {
         };
 
         let pub_arr = read_public_time(&line[25..29], produce_cif_error_closure(number, 25))?;
-        // TODO maybe should change this to calculate based on last public time?
-        let pub_arr_day = calculate_day(&pub_arr, &last_wtt_time, last_wtt_day);
-
         let pub_dep = read_public_time(&line[29..33], produce_cif_error_closure(number, 29))?;
-        let pub_dep_day = calculate_day(&pub_dep, &last_wtt_time, last_wtt_day);
 
         let platform = read_optional_string(&line[33..36]);
         let line_code = read_optional_string(&line[36..39]);
@@ -1788,39 +1793,59 @@ impl CifImporter {
         let path_allowance = read_allowance(&line[56..58], produce_cif_error_closure(number, 56))?;
         let perf_allowance = read_allowance(&line[58..60], produce_cif_error_closure(number, 58))?;
 
-        let new_location = TrainLocation {
-            timezone: London,
-            id: location_id.to_string(),
-            id_suffix: location_suffix,
-            working_arr: wtt_arr,
-            working_arr_day: wtt_arr_day,
-            working_dep: wtt_dep,
-            working_dep_day: wtt_dep_day,
-            working_pass: wtt_pass,
-            working_pass_day: wtt_pass_day,
-            public_arr: pub_arr,
-            public_arr_day: pub_arr_day,
-            public_dep: pub_dep,
-            public_dep_day: pub_dep_day,
-            platform,
-            line: line_code,
-            path: path_code,
-            engineering_allowance_s: Some(eng_allowance),
-            pathing_allowance_s: Some(path_allowance),
-            performance_allowance_s: Some(perf_allowance),
-            activities,
-            change_en_route: self.change_en_route.take(),
-            divides_to_form: vec![],
-            joins_to: vec![],
-            becomes: None,
-            divides_from: vec![],
-            is_joined_to_by: vec![],
-            forms_from: None,
-        };
+        let change_en_route = self.change_en_route.take();
 
         self.cr_location = None;
 
-        train.route.push(new_location);
+        {
+            let train = self.get_last_train(&mut schedule, number, "LI")?;
+
+            if train.route.is_empty() {
+                return Err(CifError { error_type: CifErrorType::UnexpectedRecordType("LI".to_string(), "Train route is empty".to_string()), line: number, column: 0 } );
+            }
+
+            let (last_wtt_time, last_wtt_day) = get_working_time(train.route.last().unwrap());
+
+            let wtt_arr_day = calculate_day(&wtt_arr, &last_wtt_time, last_wtt_day);
+            let wtt_dep_day = calculate_day(&wtt_dep, &last_wtt_time, last_wtt_day);
+            let wtt_pass_day = calculate_day(&wtt_pass, &last_wtt_time, last_wtt_day);
+
+            // TODO maybe should change this to calculate based on last public time?
+            let pub_arr_day = calculate_day(&pub_arr, &last_wtt_time, last_wtt_day);
+            let pub_dep_day = calculate_day(&pub_dep, &last_wtt_time, last_wtt_day);
+
+            let new_location = TrainLocation {
+                timezone: London,
+                id: location_id.to_string(),
+                id_suffix: location_suffix,
+                working_arr: wtt_arr,
+                working_arr_day: wtt_arr_day,
+                working_dep: wtt_dep,
+                working_dep_day: wtt_dep_day,
+                working_pass: wtt_pass,
+                working_pass_day: wtt_pass_day,
+                public_arr: pub_arr,
+                public_arr_day: pub_arr_day,
+                public_dep: pub_dep,
+                public_dep_day: pub_dep_day,
+                platform,
+                line: line_code,
+                path: path_code,
+                engineering_allowance_s: Some(eng_allowance),
+                pathing_allowance_s: Some(path_allowance),
+                performance_allowance_s: Some(perf_allowance),
+                activities,
+                change_en_route: change_en_route,
+                divides_to_form: vec![],
+                joins_to: vec![],
+                becomes: None,
+                divides_from: vec![],
+                is_joined_to_by: vec![],
+                forms_from: None,
+            };
+
+            train.route.push(new_location);
+        }
         schedule.trains_indexed_by_location.entry(location_id.to_string()).or_insert(HashSet::new()).insert(self.last_train.as_ref().unwrap().0.clone());
 
         Ok(schedule)
@@ -1830,62 +1855,66 @@ impl CifImporter {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
-        let train = self.get_last_train(&mut schedule, number, "LT")?;
-
-        if train.route.is_empty() {
-            return Err(CifError { error_type: CifErrorType::UnexpectedRecordType("LT".to_string(), "Train route is empty".to_string()), line: number, column: 0 } );
-        }
-
-        let (last_wtt_time, last_wtt_day) = get_working_time(train.route.last().unwrap());
-
         let location_id = &line[2..9];
         let location_suffix = read_optional_string(&line[9..10]);
 
         self.validate_change_en_route_location(location_id, &location_suffix, number, 2)?;
 
         let wtt_arr = read_mandatory_wtt_time(&line[10..15], produce_cif_error_closure(number, 10))?;
-        let wtt_arr_day = calculate_day(&Some(wtt_arr), &last_wtt_time, last_wtt_day).unwrap();
-
         let pub_arr = read_public_time(&line[15..19], produce_cif_error_closure(number, 15))?;
-        let pub_arr_day = calculate_day(&pub_arr, &last_wtt_time, last_wtt_day);
 
         let platform = read_optional_string(&line[19..22]);
         let path_code = read_optional_string(&line[22..25]);
 
         let activities = read_activities(&line[25..37], produce_cif_error_closure(number, 25))?;
 
-        let new_location = TrainLocation {
-            timezone: London,
-            id: location_id.to_string(),
-            id_suffix: location_suffix,
-            working_arr: Some(wtt_arr),
-            working_arr_day: Some(wtt_arr_day),
-            working_dep: None,
-            working_dep_day: None,
-            working_pass: None,
-            working_pass_day: None,
-            public_arr: pub_arr,
-            public_arr_day: pub_arr_day,
-            public_dep: None,
-            public_dep_day: None,
-            platform,
-            line: None,
-            path: path_code,
-            engineering_allowance_s: None,
-            pathing_allowance_s: None,
-            performance_allowance_s: None,
-            activities,
-            change_en_route: self.change_en_route.take(),
-            divides_to_form: vec![],
-            joins_to: vec![],
-            becomes: None,
-            divides_from: vec![],
-            is_joined_to_by: vec![],
-            forms_from: None,
-        };
         self.cr_location = None;
+        let change_en_route = self.change_en_route.take();
 
-        train.route.push(new_location);
+        {
+            let train = self.get_last_train(&mut schedule, number, "LT")?;
+
+            if train.route.is_empty() {
+                return Err(CifError { error_type: CifErrorType::UnexpectedRecordType("LT".to_string(), "Train route is empty".to_string()), line: number, column: 0 } );
+            }
+
+            let (last_wtt_time, last_wtt_day) = get_working_time(train.route.last().unwrap());
+
+            let wtt_arr_day = calculate_day(&Some(wtt_arr), &last_wtt_time, last_wtt_day).unwrap();
+            let pub_arr_day = calculate_day(&pub_arr, &last_wtt_time, last_wtt_day);
+
+            let new_location = TrainLocation {
+                timezone: London,
+                id: location_id.to_string(),
+                id_suffix: location_suffix,
+                working_arr: Some(wtt_arr),
+                working_arr_day: Some(wtt_arr_day),
+                working_dep: None,
+                working_dep_day: None,
+                working_pass: None,
+                working_pass_day: None,
+                public_arr: pub_arr,
+                public_arr_day: pub_arr_day,
+                public_dep: None,
+                public_dep_day: None,
+                platform,
+                line: None,
+                path: path_code,
+                engineering_allowance_s: None,
+                pathing_allowance_s: None,
+                performance_allowance_s: None,
+                activities,
+                change_en_route: change_en_route,
+                divides_to_form: vec![],
+                joins_to: vec![],
+                becomes: None,
+                divides_from: vec![],
+                is_joined_to_by: vec![],
+                forms_from: None,
+            };
+
+            train.route.push(new_location);
+        }
         schedule.trains_indexed_by_location.entry(location_id.to_string()).or_insert(HashSet::new()).insert(self.last_train.as_ref().unwrap().0.clone());
 
         // we can now unset the last_train as this should be the last message received for any
@@ -1899,21 +1928,25 @@ impl CifImporter {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
-        let train = self.get_last_train(&mut schedule, number, "CR")?;
+        let (train_type, operator) = {
+            let train = self.get_last_train(&mut schedule, number, "CR")?;
 
-        if train.route.is_empty() {
-            return Err(CifError { error_type: CifErrorType::UnexpectedRecordType("CR".to_string(), "Train route is empty".to_string()), line: number, column: 0 } );
-        }
+            if train.route.is_empty() {
+                return Err(CifError { error_type: CifErrorType::UnexpectedRecordType("CR".to_string(), "Train route is empty".to_string()), line: number, column: 0 } );
+            }
+
+            let train_type = match read_train_type(&line[10..12], produce_cif_error_closure(number, 10))? {
+                Some(x) => x,
+                None => train.variable_train.train_type, // should only really happen for ships
+            };
+
+            (train_type, train.variable_train.operator.clone())
+        };
 
         let location_id = &line[2..9];
         let location_suffix = read_optional_string(&line[9..10]);
 
         self.cr_location = Some((location_id.to_string(), location_suffix));
-
-        let train_type = match read_train_type(&line[10..12], produce_cif_error_closure(number, 10))? {
-            Some(x) => x,
-            None => train.variable_train.train_type, // should only really happen for ships
-        };
 
         let public_id = &line[12..16];
         let headcode = read_optional_string(&line[16..20]);
@@ -1966,7 +1999,7 @@ impl CifImporter {
             brand: brand,
             name: None,
             uic_code: uic_code,
-            operator: train.variable_train.operator.clone(),
+            operator,
         });
 
         Ok(schedule)
@@ -2028,6 +2061,27 @@ impl CifImporter {
             write_assocs_to_trains(&mut trains, &train_id, &location, &location_suffix, &assocs);
         }
         self.unwritten_assocs.clear();
+
+        for ((train_id, _begin), new_train) in &self.orphaned_overlay_trains {
+            let old_trains = schedule.trains.remove(train_id);
+            let mut old_trains = match old_trains {
+                None => return Ok(schedule),
+                Some(x) => x,
+            };
+
+            // we replace main trains
+            for train in old_trains.iter_mut() {
+                if !check_date_applicability(&train.validity[0], &train.days_of_week, new_train.validity[0].valid_begin, new_train.validity[0].valid_end, &new_train.days_of_week) {
+                    continue;
+                }
+                train.replacements.push(new_train.clone())
+            }
+
+            schedule.trains.insert(train_id.to_string(), old_trains);
+
+            return Ok(schedule);
+        }
+
         Ok(schedule)
     }
 
@@ -2068,10 +2122,6 @@ impl SlowImporter for CifImporter {
             schedule = self.read_record(line, schedule, i)?;
         }
         println!("Successfully loaded {} trains from {} lines of CIF", schedule.trains.len(), i);
-        Ok(schedule)
-    }
-
-    async fn repopulate(&mut self, schedule: Schedule) -> Result<Schedule, Error> {
         Ok(schedule)
     }
 }
@@ -2206,14 +2256,33 @@ struct NrJsonVstp {
     vstp_cif_msg_v1: NrJsonVstpCifMsgV1,
 }
 
-#[derive(Default)]
 pub struct NrJsonImporter {
     previously_received: Vec<NrJsonVstp>,
+    config: NrJsonImporterConfig,
+}
+
+#[derive(Deserialize)]
+pub struct NrJsonImporterConfig {
+    filename: Option<String>,
 }
 
 impl NrJsonImporter {
-    pub fn new() -> NrJsonImporter {
-        NrJsonImporter { ..Default::default() }
+    pub async fn new(config: NrJsonImporterConfig) -> Result<NrJsonImporter, Error> {
+        let mut previously_received = vec![];
+        match &config.filename {
+            None => (),
+            Some(filename) => {
+                 match fs::read_to_string(filename).await {
+                    Ok(contents) => {
+                        previously_received = serde_json::from_str::<Vec<NrJsonVstp>>(&contents)?;
+                    },
+                    Err(x) => {
+                        println!("WARNING: Failed to load previous VSTP workings: {}", x);
+                    }
+                }
+            },
+        }
+        Ok(NrJsonImporter { previously_received, config, })
     }
 
     fn read_vstp_route(&self, schedule_segments: &Vec<NrJsonScheduleSegment>, train_status: &TrainStatus, train_id: &str, schedule: &mut Schedule) -> Result<Vec<TrainLocation>, NrJsonError> {
@@ -2518,7 +2587,7 @@ impl NrJsonImporter {
         })
     }
 
-    fn read_vstp_entry(&self, parsed_json: &NrJsonVstp, mut schedule: Schedule) -> Result<Schedule, NrJsonError> {
+    fn read_vstp_entry(&self, parsed_json: &NrJsonVstp, mut schedule: Schedule) -> Result<(Schedule, bool), NrJsonError> {
         println!("Input: {:#?}", parsed_json);
         let modification_type = match parsed_json.vstp_cif_msg_v1.schedule.transaction_type.as_str() {
             "Create" => ModificationType::Insert,
@@ -2533,7 +2602,7 @@ impl NrJsonImporter {
         // check that our schedule is the correct one
         if begin > *schedule.valid_end.as_ref().unwrap() {
             println!("{} is later than {}, skipping...", begin, schedule.valid_end.as_ref().unwrap());
-            return Ok(schedule)
+            return Ok((schedule, false))
         }
 
         // At this stage we have all the data we need for a simple delete, so handle this here
@@ -2542,7 +2611,7 @@ impl NrJsonImporter {
         if modification_type == ModificationType::Delete {
             let old_trains = schedule.trains.remove(main_train_id);
             let mut old_trains = match old_trains {
-                None => return Ok(schedule),
+                None => return Ok((schedule, false)),
                 Some(x) => x,
             };
 
@@ -2569,10 +2638,17 @@ impl NrJsonImporter {
             schedule.trains.insert(main_train_id.to_string(), old_trains);
 
             println!("Successfully deleted train {}", main_train_id);
-            return Ok(schedule);
+            return Ok((schedule, true));
         }
 
         let end = read_vstp_date(&parsed_json.vstp_cif_msg_v1.schedule.schedule_end_date, produce_nr_json_error_closure("schedule_end_date".to_string()))?;
+
+        // check that our schedule is the correct one
+        if end < *schedule.valid_begin.as_ref().unwrap() {
+            println!("{} is earlier than {}, skipping...", begin, schedule.valid_end.as_ref().unwrap());
+            return Ok((schedule, false))
+        }
+
         let days_of_week = read_days_of_week(&parsed_json.vstp_cif_msg_v1.schedule.schedule_days_runs, produce_nr_json_error_closure("schedule_days_runs".to_string()))?;
 
         // Now we handle STP cancellations; these are where long-running
@@ -2580,7 +2656,7 @@ impl NrJsonImporter {
         if stp_modification_type == ModificationType::Delete && modification_type == ModificationType::Insert {
             let old_trains = schedule.trains.remove(main_train_id);
             let mut old_trains = match old_trains {
-                None => return Ok(schedule),
+                None => return Ok((schedule, false)),
                 Some(x) => x,
             };
 
@@ -2599,7 +2675,7 @@ impl NrJsonImporter {
             schedule.trains.insert(main_train_id.to_string(), old_trains);
 
             println!("Successfully cancelled train {}", main_train_id);
-            return Ok(schedule);
+            return Ok((schedule, true));
         }
 
         let train_status = read_train_status(&parsed_json.vstp_cif_msg_v1.schedule.train_status, produce_nr_json_error_closure("train_status".to_string()))?;
@@ -2641,13 +2717,13 @@ impl NrJsonImporter {
             println!("Output: {:#?}", new_train);
             schedule.trains.entry(main_train_id.to_string()).or_insert(vec![]).push(new_train);
 
-            return Ok(schedule);
+            return Ok((schedule, true));
         }
         
         if stp_modification_type == ModificationType::Amend {
             let old_trains = schedule.trains.remove(main_train_id);
             let mut old_trains = match old_trains {
-                None => return Ok(schedule),
+                None => return Ok((schedule, false)),
                 Some(x) => x,
             };
 
@@ -2662,7 +2738,38 @@ impl NrJsonImporter {
             println!("Successfully replaced train {}", main_train_id);
             schedule.trains.insert(main_train_id.to_string(), old_trains);
 
-            return Ok(schedule);
+            return Ok((schedule, true));
+        }
+
+        Ok((schedule, false))
+    }
+
+    async fn write(&self) -> Result<(), Error> {
+        match &self.config.filename {
+            None => Ok(()),
+            Some(filename) => {
+                let json_string = serde_json::to_string(&self.previously_received)?;
+
+
+                let tmp_filename = format!("{}.bak", filename);
+
+                fs::write(&tmp_filename, json_string).await?;
+
+                fs::rename(tmp_filename, filename).await?;
+
+                Ok(())
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl FastImporter for NrJsonImporter {
+    fn overlay(&mut self, data: Vec<u8>, schedule: Schedule) -> Result<Schedule, Error> {
+        let parsed_json = serde_json::from_slice::<NrJsonVstp>(&data)?;
+        let (schedule, change_made) = self.read_vstp_entry(&parsed_json, schedule)?;
+        if change_made {
+            self.previously_received.push(parsed_json);
         }
 
         Ok(schedule)
@@ -2670,20 +2777,23 @@ impl NrJsonImporter {
 }
 
 #[async_trait]
-impl FastImporter for NrJsonImporter {
-    fn overlay(&mut self, data: Vec<u8>, mut schedule: Schedule) -> Result<Schedule, Error> {
-        let parsed_json = serde_json::from_slice::<NrJsonVstp>(&data)?;
-        schedule = self.read_vstp_entry(&parsed_json, schedule)?;
-        self.previously_received.push(parsed_json);
+impl EphemeralImporter for NrJsonImporter {
+    async fn repopulate(&mut self, mut schedule: Schedule) -> Result<Schedule, Error> {
+        println!("Repopulating VSTP entries...");
+        let mut new_previously_received = vec![];
+        for parsed_json in &self.previously_received {
+            let (new_schedule, change_made) = self.read_vstp_entry(&parsed_json, schedule)?;
+            schedule = new_schedule;
+            if change_made {
+                new_previously_received.push(parsed_json.clone());
+            }
+        }
+        self.previously_received = new_previously_received;
 
         Ok(schedule)
     }
 
-    async fn repopulate(&mut self, mut schedule: Schedule) -> Result<Schedule, Error> {
-        println!("Repopulating VSTP entries...");
-        for parsed_json in &self.previously_received {
-            schedule = self.read_vstp_entry(&parsed_json, schedule)?;
-        }
-        Ok(schedule)
+    async fn persist(&mut self) -> Result<(), Error> {
+        Ok(self.write().await?)
     }
 }
