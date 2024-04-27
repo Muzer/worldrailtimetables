@@ -34,23 +34,23 @@ async fn main() -> Result<(), error::Error> {
 
     // test the write lock logic
     {
-        let _write_lock = schedule_manager.take_write_lock().await;
-        let mut schedule = schedule::Schedule::new("gbnr".to_string());
+        let mut transaction = schedule_manager.transactional_write().await;
+        let mut schedule = match transaction.remove("gbnr") {
+            Some(x) => x,
+            None => schedule::Schedule::new("gbnr".to_string()),
+        };
 
         let mut reader = nr_fetcher.fetch().await?;
         nr_vstp_subscriber.subscribe().await?;
         schedule = cif_importer.overlay(&mut reader, schedule).await?;
 
-        let schedules = schedule_manager.get_schedules();
-        let mut schedules = schedules.write().unwrap();
-        schedules.insert("gbnr".to_string(), schedule);
+        transaction.insert("gbnr".to_string(), schedule);
+        transaction.commit();
     }
 
     loop {
         let res = nr_vstp_subscriber.receive().await?;
-        let _write_lock = schedule_manager.take_write_lock().await;
-        let schedules = schedule_manager.get_schedules();
-        let mut schedules = schedules.write().unwrap();
+        let mut schedules = schedule_manager.immediate_write().await;
         let mut schedule = match schedules.remove("gbnr") {
             Some(x) => x,
             None => schedule::Schedule::new("gbnr".to_string()),
