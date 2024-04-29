@@ -12,11 +12,11 @@ pub trait SlowImporter {
 
 #[async_trait]
 pub trait FastImporter {
-    fn overlay(&mut self, data: Vec<u8>, schedule: Schedule) -> Result<Schedule, Error>;
+    fn overlay(&self, data: Vec<u8>, schedule: Schedule) -> Result<Schedule, Error>;
 }
 
 #[async_trait]
 pub trait EphemeralImporter {
-    async fn repopulate(&mut self, schedule: Schedule) -> Result<Schedule, Error>;
-    async fn persist(&mut self) -> Result<(), Error>;
+    async fn repopulate(&self, schedule: Schedule) -> Result<Schedule, Error>;
+    async fn persist(&self) -> Result<(), Error>;
 }

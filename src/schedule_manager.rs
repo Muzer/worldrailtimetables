@@ -52,6 +52,7 @@ impl TransactionalWriter {
     }
 }
 
+#[derive(Default)]
 pub struct ScheduleManager {
     schedules: Arc<RwLock<HashMap<String, Schedule>>>,
     transaction_lock: Arc<Mutex<()>>,
@@ -60,8 +61,7 @@ pub struct ScheduleManager {
 impl ScheduleManager {
     pub fn new() -> Self {
         Self {
-            schedules: Arc::new(RwLock::new(HashMap::new())),
-            transaction_lock: Arc::new(Mutex::new(())),
+            ..Default::default()
         }
     }
 

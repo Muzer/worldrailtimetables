@@ -16,9 +16,11 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
 use std::ops::{Add, Sub};
+use std::sync::{Arc, RwLock};
 
 use tokio::fs;
 use tokio::io::AsyncBufReadExt;
+use tokio::sync::Mutex;
 
 #[derive(Default)]
 pub struct CifImporter {
@@ -2257,11 +2259,12 @@ struct NrJsonVstp {
 }
 
 pub struct NrJsonImporter {
-    previously_received: Vec<NrJsonVstp>,
+    previously_received: Arc<RwLock<Vec<NrJsonVstp>>>,
     config: NrJsonImporterConfig,
+    persister_mutex: Arc<Mutex<()>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct NrJsonImporterConfig {
     filename: Option<String>,
 }
@@ -2282,7 +2285,11 @@ impl NrJsonImporter {
                 }
             },
         }
-        Ok(NrJsonImporter { previously_received, config, })
+        Ok(NrJsonImporter {
+            previously_received: Arc::new(RwLock::new(previously_received)),
+            config,
+            persister_mutex: Arc::new(Mutex::new(()))
+        })
     }
 
     fn read_vstp_route(&self, schedule_segments: &Vec<NrJsonScheduleSegment>, train_status: &TrainStatus, train_id: &str, schedule: &mut Schedule) -> Result<Vec<TrainLocation>, NrJsonError> {
@@ -2748,8 +2755,11 @@ impl NrJsonImporter {
         match &self.config.filename {
             None => Ok(()),
             Some(filename) => {
-                let json_string = serde_json::to_string(&self.previously_received)?;
-
+                let _mutex = self.persister_mutex.lock().await;
+                let json_string = {
+                    let previously_received = self.previously_received.read().unwrap();
+                    serde_json::to_string(&*previously_received)?
+                };
 
                 let tmp_filename = format!("{}.bak", filename);
 
@@ -2765,11 +2775,12 @@ impl NrJsonImporter {
 
 #[async_trait]
 impl FastImporter for NrJsonImporter {
-    fn overlay(&mut self, data: Vec<u8>, schedule: Schedule) -> Result<Schedule, Error> {
+    fn overlay(&self, data: Vec<u8>, schedule: Schedule) -> Result<Schedule, Error> {
         let parsed_json = serde_json::from_slice::<NrJsonVstp>(&data)?;
         let (schedule, change_made) = self.read_vstp_entry(&parsed_json, schedule)?;
         if change_made {
-            self.previously_received.push(parsed_json);
+            let mut previously_received = self.previously_received.write().unwrap();
+            previously_received.push(parsed_json);
         }
 
         Ok(schedule)
@@ -2778,22 +2789,26 @@ impl FastImporter for NrJsonImporter {
 
 #[async_trait]
 impl EphemeralImporter for NrJsonImporter {
-    async fn repopulate(&mut self, mut schedule: Schedule) -> Result<Schedule, Error> {
+    async fn repopulate(&self, mut schedule: Schedule) -> Result<Schedule, Error> {
         println!("Repopulating VSTP entries...");
         let mut new_previously_received = vec![];
-        for parsed_json in &self.previously_received {
-            let (new_schedule, change_made) = self.read_vstp_entry(&parsed_json, schedule)?;
-            schedule = new_schedule;
-            if change_made {
-                new_previously_received.push(parsed_json.clone());
+        {
+            let previously_received = self.previously_received.read().unwrap();
+            for parsed_json in &*previously_received {
+                let (new_schedule, change_made) = self.read_vstp_entry(&parsed_json, schedule)?;
+                schedule = new_schedule;
+                if change_made {
+                    new_previously_received.push(parsed_json.clone());
+                }
             }
         }
-        self.previously_received = new_previously_received;
+        let mut previously_received = self.previously_received.write().unwrap();
+        *previously_received = new_previously_received;
 
         Ok(schedule)
     }
 
-    async fn persist(&mut self) -> Result<(), Error> {
+    async fn persist(&self) -> Result<(), Error> {
         Ok(self.write().await?)
     }
 }

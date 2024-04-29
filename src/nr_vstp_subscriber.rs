@@ -24,7 +24,7 @@ pub struct NrVstpSubscriber {
     keepalive: Option<JoinHandle<Result<(), Error>>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct NrVstpSubscriberConfig {
     username: String,
     password: String,

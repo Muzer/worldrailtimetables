@@ -14,7 +14,7 @@ pub struct NrFetcher {
     config: NrFetcherConfig,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct NrFetcherConfig {
     username: String,
     password: String,
