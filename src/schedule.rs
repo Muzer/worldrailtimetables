@@ -1,9 +1,12 @@
 use chrono::{DateTime, NaiveTime, Weekday};
 use chrono_tz::Tz;
+
+use serde::Serialize;
+
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Schedule {
     pub locations: HashMap<String, Location>,
     pub trains: HashMap<String, Vec<Train>>, // one ID could have multiple permanent schedules on
@@ -35,7 +38,7 @@ impl Schedule {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Location {
     pub id: String,
     pub name: String,
@@ -43,13 +46,13 @@ pub struct Location {
                                    // ID for retail; we should expose the public one.
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct TrainValidityPeriod {
     pub valid_begin: DateTime<Tz>,
     pub valid_end: DateTime<Tz>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct DaysOfWeek {
     pub monday: bool,
     pub tuesday: bool,
@@ -91,7 +94,7 @@ impl IntoIterator for &DaysOfWeek {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub enum TrainType {
     Bus,
     ServiceBus,
@@ -151,14 +154,14 @@ pub enum TrainType {
     Trip,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub enum TrainSource {
     LongTerm,
     ShortTerm,
     VeryShortTerm,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub enum TrainPower {
     DieselLocomotive,
     DieselElectricMultipleUnit,
@@ -175,27 +178,27 @@ pub enum TrainPower {
     SteamRailcar,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct TrainVehicle {
     pub id: String,
     pub description: String,
     // TODO more here, types etc.?
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct TrainAllocation {
     pub id: String,
     pub description: String,
     pub vehicles: Option<Vec<TrainVehicle>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct TrainOperator {
     pub id: String,
     pub description: Option<String>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct OperatingCharacteristics {
     pub vacuum_braked: bool,
     pub one_hundred_mph: bool,
@@ -210,7 +213,7 @@ pub struct OperatingCharacteristics {
     pub sb1c_gauge: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub enum ReservationField {
     Possible,
     Mandatory,
@@ -220,7 +223,7 @@ pub enum ReservationField {
     NotApplicable,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Reservations {
     pub seats: ReservationField,
     pub bicycles: ReservationField,
@@ -229,7 +232,7 @@ pub struct Reservations {
     pub wheelchairs: ReservationField,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Catering {
     pub buffet: bool,
     pub first_class_restaurant: bool,
@@ -239,7 +242,7 @@ pub struct Catering {
     pub trolley: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Activities {
     pub detach: bool,
     pub attach: bool,
@@ -277,7 +280,7 @@ pub struct Activities {
     pub cross_at_passing_point: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct AssociationNode {
     pub other_train_id: String,
     pub other_train_location_id_suffix: Option<String>,
@@ -290,7 +293,7 @@ pub struct AssociationNode {
     pub source: Option<TrainSource>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct TrainLocation {
     pub timezone: Tz,
     pub id: String,
@@ -322,7 +325,7 @@ pub struct TrainLocation {
     pub forms_from: Option<AssociationNode>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct VariableTrain {
     pub train_type: TrainType,
     pub public_id: Option<String>,
@@ -346,7 +349,7 @@ pub struct VariableTrain {
     pub operator: Option<TrainOperator>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Train {
     pub id: String,
     pub validity: Vec<TrainValidityPeriod>,
