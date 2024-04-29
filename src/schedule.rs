@@ -14,6 +14,8 @@ pub struct Schedule {
     pub valid_end: Option<DateTime<Tz>>,
     pub last_updated: Option<DateTime<Tz>>,
     pub trains_indexed_by_location: HashMap<String, HashSet<String>>,
+    pub trains_indexed_by_public_id: HashMap<String, HashSet<String>>,
+    pub locations_indexed_by_public_id: HashMap<String, HashSet<String>>,
 }
 
 impl Schedule {
@@ -27,6 +29,8 @@ impl Schedule {
             valid_end: None,
             last_updated: None,
             trains_indexed_by_location: HashMap::new(),
+            trains_indexed_by_public_id: HashMap::new(),
+            locations_indexed_by_public_id: HashMap::new(),
         }
     }
 }

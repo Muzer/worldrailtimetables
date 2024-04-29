@@ -2972,6 +2972,12 @@ impl CifImporter {
             route: vec![],
         };
 
+        schedule
+            .trains_indexed_by_public_id
+            .entry(public_id.to_string())
+            .or_insert(HashSet::new())
+            .insert(main_train_id.to_string());
+
         if modification_type == ModificationType::Amend {
             // we can write a (partial) train now, and continue updating it later.
             self.last_train = Some((
@@ -3552,7 +3558,7 @@ impl CifImporter {
             ModificationType::Insert => Location {
                 id: tiploc.to_string(),
                 name: name.to_string(),
-                public_id: opt_crs,
+                public_id: opt_crs.clone(),
             },
             ModificationType::Amend => {
                 let location = schedule.locations.remove(tiploc);
@@ -3568,7 +3574,7 @@ impl CifImporter {
                 };
                 location.id = tiploc.to_string();
                 location.name = name.to_string();
-                location.public_id = opt_crs;
+                location.public_id = opt_crs.clone();
                 location
             }
             ModificationType::Delete => {
@@ -3577,6 +3583,16 @@ impl CifImporter {
             }
         };
         schedule.locations.insert(tiploc.to_string(), location);
+        match opt_crs {
+            None => (),
+            Some(crs) => {
+                schedule
+                    .locations_indexed_by_public_id
+                    .entry(crs.clone())
+                    .or_insert(HashSet::new())
+                    .insert(tiploc.to_string());
+            }
+        }
         Ok(schedule)
     }
 
