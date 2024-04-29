@@ -1,6 +1,6 @@
-use async_trait::async_trait;
-use crate::subscriber::Subscriber;
 use crate::error::Error;
+use crate::subscriber::Subscriber;
+use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::task::JoinHandle;
 
@@ -9,10 +9,10 @@ use tokio_stomp::client::ClientTransport;
 use tokio_stomp::FromServer;
 use tokio_stomp::ToServer;
 
-use futures::SinkExt;
-use futures::StreamExt;
 use futures::stream::SplitSink;
 use futures::stream::SplitStream;
+use futures::SinkExt;
+use futures::StreamExt;
 
 use tokio::time::Duration;
 
@@ -51,13 +51,27 @@ impl fmt::Display for NrVstpError {
     }
 }
 
-async fn keep_alive(mut sink: SplitSink<ClientTransport, tokio_stomp::Message<ToServer>>) -> Result<(), Error> {
+async fn keep_alive(
+    mut sink: SplitSink<ClientTransport, tokio_stomp::Message<ToServer>>,
+) -> Result<(), Error> {
     // horrible hacky workaround for tokio_stomp's lack of heartbeat support. I'm truly sorry.
     loop {
         tokio::time::sleep(Duration::from_secs(15)).await;
-        sink.send(ToServer::Begin { transaction: "foo".to_string() }.into()).await?;
+        sink.send(
+            ToServer::Begin {
+                transaction: "foo".to_string(),
+            }
+            .into(),
+        )
+        .await?;
         tokio::time::sleep(Duration::from_secs(15)).await;
-        sink.send(ToServer::Abort { transaction: "foo".to_string() }.into()).await?;
+        sink.send(
+            ToServer::Abort {
+                transaction: "foo".to_string(),
+            }
+            .into(),
+        )
+        .await?;
     }
 }
 
@@ -70,7 +84,9 @@ impl Subscriber for NrVstpSubscriber {
             "/".to_string(),
             Some(self.config.username.clone()),
             Some(self.config.password.clone()),
-        ).await?.split();
+        )
+        .await?
+        .split();
         self.stream = Some(stream);
 
         sink.send(client::subscribe("/topic/VSTP_ALL", "1")).await?;
@@ -85,22 +101,40 @@ impl Subscriber for NrVstpSubscriber {
     async fn receive(&mut self) -> Result<Vec<u8>, Error> {
         let msg = match &mut self.stream {
             Some(x) => x.next().await.transpose()?,
-            None => return Err(Error::NrVstpError(NrVstpError { what: "Subscribe not yet called".to_string() })),
+            None => {
+                return Err(Error::NrVstpError(NrVstpError {
+                    what: "Subscribe not yet called".to_string(),
+                }))
+            }
         };
         println!("Received VSTP data from Network Rail");
         let msg = match msg {
             Some(x) => x,
-            None => return Err(Error::NrVstpError(NrVstpError { what: "Received empty message".to_string() })),
+            None => {
+                return Err(Error::NrVstpError(NrVstpError {
+                    what: "Received empty message".to_string(),
+                }))
+            }
         };
 
         match msg.content {
             FromServer::Message { body, .. } => Ok(match body {
                 Some(x) => x,
-                None => return Err(Error::NrVstpError(NrVstpError { what: "No body".to_string() })),
+                None => {
+                    return Err(Error::NrVstpError(NrVstpError {
+                        what: "No body".to_string(),
+                    }))
+                }
             }),
-            FromServer::Receipt { .. } => Err(Error::NrVstpError(NrVstpError { what: "Received Receipt".to_string() })),
-            FromServer::Error { message, .. } => Err(Error::NrVstpError(NrVstpError { what: message.unwrap() })),
-            _ => Err(Error::NrVstpError(NrVstpError { what: "Received unknown message".to_string() })),
+            FromServer::Receipt { .. } => Err(Error::NrVstpError(NrVstpError {
+                what: "Received Receipt".to_string(),
+            })),
+            FromServer::Error { message, .. } => Err(Error::NrVstpError(NrVstpError {
+                what: message.unwrap(),
+            })),
+            _ => Err(Error::NrVstpError(NrVstpError {
+                what: "Received unknown message".to_string(),
+            })),
         }
     }
 }

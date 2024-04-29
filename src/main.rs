@@ -29,9 +29,7 @@ async fn main() -> Result<(), error::Error> {
 
     let mut nr_manager = NrManager::new(config.nr, &schedule_manager).await?;
 
-    tokio::try_join!(
-        nr_manager.run(),
-    )?;
+    tokio::try_join!(nr_manager.run(),)?;
 
     Ok(())
 }

@@ -1,5 +1,5 @@
-use crate::schedule::Schedule;
 use crate::error::Error;
+use crate::schedule::Schedule;
 
 use async_trait::async_trait;
 
@@ -7,7 +7,11 @@ use tokio::io::AsyncBufReadExt;
 
 #[async_trait]
 pub trait SlowImporter {
-    async fn overlay(&mut self, reader: impl AsyncBufReadExt + Unpin + Send, schedule: Schedule) -> Result<Schedule, Error>;
+    async fn overlay(
+        &mut self,
+        reader: impl AsyncBufReadExt + Unpin + Send,
+        schedule: Schedule,
+    ) -> Result<Schedule, Error>;
 }
 
 #[async_trait]

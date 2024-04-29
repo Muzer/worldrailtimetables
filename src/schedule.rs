@@ -7,12 +7,12 @@ use std::collections::HashSet;
 pub struct Schedule {
     pub locations: HashMap<String, Location>,
     pub trains: HashMap<String, Vec<Train>>, // one ID could have multiple permanent schedules on
-                                             // different dates
+    // different dates
     pub namespace: String, // this is defined by me
     pub their_id: Option<String>,
-    pub valid_begin: Option<DateTime::<Tz>>,
-    pub valid_end: Option<DateTime::<Tz>>,
-    pub last_updated: Option<DateTime::<Tz>>,
+    pub valid_begin: Option<DateTime<Tz>>,
+    pub valid_end: Option<DateTime<Tz>>,
+    pub last_updated: Option<DateTime<Tz>>,
     pub trains_indexed_by_location: HashMap<String, HashSet<String>>,
 }
 
@@ -41,8 +41,8 @@ pub struct Location {
 
 #[derive(Clone, Debug)]
 pub struct TrainValidityPeriod {
-    pub valid_begin: DateTime::<Tz>,
-    pub valid_end: DateTime::<Tz>,
+    pub valid_begin: DateTime<Tz>,
+    pub valid_end: DateTime<Tz>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -75,7 +75,15 @@ impl IntoIterator for &DaysOfWeek {
     type IntoIter = std::array::IntoIter<bool, 7>;
 
     fn into_iter(self) -> Self::IntoIter {
-        IntoIterator::into_iter([self.monday, self.tuesday, self.wednesday, self.thursday, self.friday, self.saturday, self.sunday])
+        IntoIterator::into_iter([
+            self.monday,
+            self.tuesday,
+            self.wednesday,
+            self.thursday,
+            self.friday,
+            self.saturday,
+            self.sunday,
+        ])
     }
 }
 
@@ -174,7 +182,7 @@ pub struct TrainVehicle {
 pub struct TrainAllocation {
     pub id: String,
     pub description: String,
-    pub vehicles: Option<Vec<TrainVehicle>>
+    pub vehicles: Option<Vec<TrainVehicle>>,
 }
 
 #[derive(Clone, Debug)]
@@ -283,7 +291,7 @@ pub struct TrainLocation {
     pub timezone: Tz,
     pub id: String,
     pub id_suffix: Option<String>, // to allow associations to be matched when the same location
-                                   // occurs multiple times in a given train
+    // occurs multiple times in a given train
     pub working_arr: Option<NaiveTime>,
     pub working_arr_day: Option<u8>,
     pub working_dep: Option<NaiveTime>,

@@ -1,8 +1,8 @@
-use anyhow;
-use config_file::ConfigFileError;
 use crate::nr_importer::CifError;
 use crate::nr_importer::NrJsonError;
 use crate::nr_vstp_subscriber::NrVstpError;
+use anyhow;
+use config_file::ConfigFileError;
 use reqwest;
 
 use std::fmt;
@@ -22,7 +22,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            other => write!(f, "WorldTrainTimes error: {}", other)
+            other => write!(f, "WorldTrainTimes error: {}", other),
         }
     }
 }

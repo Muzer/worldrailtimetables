@@ -9,8 +9,8 @@ use crate::schedule::Schedule;
 use crate::schedule_manager::ScheduleManager;
 use crate::subscriber::Subscriber;
 
-use chrono::{Days, NaiveTime, TimeZone};
 use chrono::offset::Utc;
+use chrono::{Days, NaiveTime, TimeZone};
 use chrono_tz::Europe::London;
 
 use tokio::time;
@@ -33,14 +33,22 @@ pub struct NrManager<'a> {
 }
 
 impl NrManager<'_> {
-    pub async fn new<'a>(config: NrConfig, schedule_manager: &'a ScheduleManager) -> Result<NrManager<'a>, Error> {
+    pub async fn new<'a>(
+        config: NrConfig,
+        schedule_manager: &'a ScheduleManager,
+    ) -> Result<NrManager<'a>, Error> {
         Ok(NrManager {
             schedule_manager,
             config,
         })
     }
 
-    async fn reload_cif(&self, nr_fetcher: &NrFetcher, cif_importer: &mut CifImporter, nr_json_importer: &NrJsonImporter) -> Result<(), Error> {
+    async fn reload_cif(
+        &self,
+        nr_fetcher: &NrFetcher,
+        cif_importer: &mut CifImporter,
+        nr_json_importer: &NrJsonImporter,
+    ) -> Result<(), Error> {
         {
             // lock for writing now, such that there will be no chance of smaller updates being
             // lost
@@ -62,7 +70,11 @@ impl NrManager<'_> {
         Ok(())
     }
 
-    async fn read_vstp(&self, nr_json_importer: &NrJsonImporter, nr_vstp_subscriber: &mut NrVstpSubscriber) -> Result<(), Error> {
+    async fn read_vstp(
+        &self,
+        nr_json_importer: &NrJsonImporter,
+        nr_vstp_subscriber: &mut NrVstpSubscriber,
+    ) -> Result<(), Error> {
         loop {
             let res = nr_vstp_subscriber.receive().await?;
             {
@@ -78,21 +90,36 @@ impl NrManager<'_> {
         }
     }
 
-    async fn update_cif(&self, nr_fetcher: &NrFetcher, cif_importer: &mut CifImporter, nr_json_importer: &NrJsonImporter) -> Result<(), Error> {
+    async fn update_cif(
+        &self,
+        nr_fetcher: &NrFetcher,
+        cif_importer: &mut CifImporter,
+        nr_json_importer: &NrJsonImporter,
+    ) -> Result<(), Error> {
         loop {
             let now = London.from_utc_datetime(&Utc::now().naive_utc());
             let new_time = if now.time() > NaiveTime::from_hms_opt(2, 9, 0).unwrap() {
-                London.from_local_datetime(&now.date_naive().checked_add_days(Days::new(1)).unwrap().and_hms_opt(2, 9, 0).unwrap()).unwrap()
-            }
-            else {
-                London.from_local_datetime(&now.date_naive().and_hms_opt(2, 9, 0).unwrap()).unwrap()
+                London
+                    .from_local_datetime(
+                        &now.date_naive()
+                            .checked_add_days(Days::new(1))
+                            .unwrap()
+                            .and_hms_opt(2, 9, 0)
+                            .unwrap(),
+                    )
+                    .unwrap()
+            } else {
+                London
+                    .from_local_datetime(&now.date_naive().and_hms_opt(2, 9, 0).unwrap())
+                    .unwrap()
             };
             let mut interval = time::interval(Duration::from_secs(60));
             while London.from_utc_datetime(&Utc::now().naive_utc()) < new_time {
                 interval.tick().await;
             }
 
-            self.reload_cif(nr_fetcher, cif_importer, nr_json_importer).await?;
+            self.reload_cif(nr_fetcher, cif_importer, nr_json_importer)
+                .await?;
         }
     }
 }
@@ -107,14 +134,19 @@ impl Manager for NrManager<'_> {
 
         nr_vstp_subscriber.subscribe().await?;
 
-        self.reload_cif(&nr_fetcher, &mut cif_importer, &nr_json_importer).await?;
+        self.reload_cif(&nr_fetcher, &mut cif_importer, &nr_json_importer)
+            .await?;
 
         tokio::try_join!(
             async {
-                return self.read_vstp(&nr_json_importer, &mut nr_vstp_subscriber).await;
+                return self
+                    .read_vstp(&nr_json_importer, &mut nr_vstp_subscriber)
+                    .await;
             },
             async {
-                return self.update_cif(&nr_fetcher, &mut cif_importer, &nr_json_importer).await;
+                return self
+                    .update_cif(&nr_fetcher, &mut cif_importer, &nr_json_importer)
+                    .await;
             },
         )?;
 

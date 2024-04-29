@@ -1,13 +1,17 @@
-use crate::schedule::{Activities, AssociationNode, Catering, DaysOfWeek, Location, OperatingCharacteristics, ReservationField, Reservations, Schedule, Train, TrainAllocation, TrainLocation, TrainOperator, TrainSource, TrainType, TrainPower, TrainValidityPeriod, VariableTrain};
-use crate::importer::{EphemeralImporter, FastImporter, SlowImporter};
 use crate::error::Error;
+use crate::importer::{EphemeralImporter, FastImporter, SlowImporter};
+use crate::schedule::{
+    Activities, AssociationNode, Catering, DaysOfWeek, Location, OperatingCharacteristics,
+    ReservationField, Reservations, Schedule, Train, TrainAllocation, TrainLocation, TrainOperator,
+    TrainPower, TrainSource, TrainType, TrainValidityPeriod, VariableTrain,
+};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 use chrono::format::ParseError;
 use chrono::naive::Days;
-use chrono_tz::Tz;
+use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 use chrono_tz::Europe::London;
+use chrono_tz::Tz;
 use itertools::Itertools;
 
 use serde::{Deserialize, Serialize};
@@ -24,11 +28,12 @@ use tokio::sync::Mutex;
 
 #[derive(Default)]
 pub struct CifImporter {
-    last_train: Option<(String, DateTime::<Tz>, ModificationType, bool)>,
-    unwritten_assocs: HashMap<(String, String, Option<String>), Vec<(AssociationNode, AssociationCategory)>>,
+    last_train: Option<(String, DateTime<Tz>, ModificationType, bool)>,
+    unwritten_assocs:
+        HashMap<(String, String, Option<String>), Vec<(AssociationNode, AssociationCategory)>>,
     change_en_route: Option<VariableTrain>,
     cr_location: Option<(String, Option<String>)>,
-    orphaned_overlay_trains: HashMap<(String, DateTime::<Tz>), Train>,
+    orphaned_overlay_trains: HashMap<(String, DateTime<Tz>), Train>,
 }
 
 #[derive(Debug)]
@@ -119,13 +124,21 @@ pub struct NrJsonError {
 
 impl fmt::Display for CifError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Error reading CIF file line {} column {}: {}", self.line, self.column, self.error_type)
+        write!(
+            f,
+            "Error reading CIF file line {} column {}: {}",
+            self.line, self.column, self.error_type
+        )
     }
 }
 
 impl fmt::Display for NrJsonError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Error reading VSTP JSON field {}: {}", self.field_name, self.error_type)
+        write!(
+            f,
+            "Error reading VSTP JSON field {}: {}",
+            self.field_name, self.error_type
+        )
     }
 }
 
@@ -190,51 +203,85 @@ fn rev_days(days: &DaysOfWeek, day_diff: i8) -> DaysOfWeek {
             saturday: days.friday,
             sunday: days.saturday,
         },
-        _ => panic!("Only designed for prev or next day (as per NR)")
+        _ => panic!("Only designed for prev or next day (as per NR)"),
     }
 }
 
-fn rev_date(date: &DateTime::<Tz>, day_diff: i8) -> DateTime::<Tz> {
+fn rev_date(date: &DateTime<Tz>, day_diff: i8) -> DateTime<Tz> {
     if day_diff < 0 {
         date.sub(Days::new(u64::try_from(-day_diff).unwrap()))
-    }
-    else {
+    } else {
         date.add(Days::new(u64::try_from(day_diff).unwrap()))
     }
 }
 
-fn check_date_applicability(existing_validity: &TrainValidityPeriod, existing_days: &DaysOfWeek, new_begin: DateTime::<Tz>, new_end: DateTime::<Tz>, new_days: &DaysOfWeek) -> bool {
+fn check_date_applicability(
+    existing_validity: &TrainValidityPeriod,
+    existing_days: &DaysOfWeek,
+    new_begin: DateTime<Tz>,
+    new_end: DateTime<Tz>,
+    new_days: &DaysOfWeek,
+) -> bool {
     // check for no overlapping days at all
-    if existing_days.into_iter().zip(new_days.into_iter()).find(|(existing_day, new_day)| *existing_day && *new_day).is_none() {
+    if existing_days
+        .into_iter()
+        .zip(new_days.into_iter())
+        .find(|(existing_day, new_day)| *existing_day && *new_day)
+        .is_none()
+    {
         false
-    }
-    else if new_begin > existing_validity.valid_end || new_end < existing_validity.valid_begin {
+    } else if new_begin > existing_validity.valid_end || new_end < existing_validity.valid_begin {
         false
-    }
-    else {
+    } else {
         true
     }
 }
 
-fn write_assocs_to_trains(trains: &mut Vec<Train>, train_id: &str, location: &str, location_suffix: &Option<String>, assocs: &Vec<(AssociationNode, AssociationCategory)>) {
+fn write_assocs_to_trains(
+    trains: &mut Vec<Train>,
+    train_id: &str,
+    location: &str,
+    location_suffix: &Option<String>,
+    assocs: &Vec<(AssociationNode, AssociationCategory)>,
+) {
     for ref mut train in trains.iter_mut() {
         // recurse on replacements
-        write_assocs_to_trains(&mut train.replacements, &train_id, &location, &location_suffix, &assocs);
+        write_assocs_to_trains(
+            &mut train.replacements,
+            &train_id,
+            &location,
+            &location_suffix,
+            &assocs,
+        );
 
         for ref mut train_location in train.route.iter_mut() {
             if train_location.id == location && train_location.id_suffix == *location_suffix {
                 for (assoc, category) in assocs {
-                    if !check_date_applicability(&train.validity[0], &train.days_of_week, assoc.validity[0].valid_begin, assoc.validity[0].valid_end, &assoc.days) {
+                    if !check_date_applicability(
+                        &train.validity[0],
+                        &train.days_of_week,
+                        assoc.validity[0].valid_begin,
+                        assoc.validity[0].valid_end,
+                        &assoc.days,
+                    ) {
                         continue;
                     }
                     // we now know this is applicable to this train, so add it
                     match category {
                         AssociationCategory::Join => train_location.joins_to.push(assoc.clone()),
-                        AssociationCategory::Divide => train_location.divides_to_form.push(assoc.clone()),
+                        AssociationCategory::Divide => {
+                            train_location.divides_to_form.push(assoc.clone())
+                        }
                         AssociationCategory::Next => train_location.becomes = Some(assoc.clone()),
-                        AssociationCategory::IsJoinedToBy => train_location.is_joined_to_by.push(assoc.clone()),
-                        AssociationCategory::DividesFrom => train_location.divides_from.push(assoc.clone()),
-                        AssociationCategory::FormsFrom => train_location.forms_from = Some(assoc.clone()),
+                        AssociationCategory::IsJoinedToBy => {
+                            train_location.is_joined_to_by.push(assoc.clone())
+                        }
+                        AssociationCategory::DividesFrom => {
+                            train_location.divides_from.push(assoc.clone())
+                        }
+                        AssociationCategory::FormsFrom => {
+                            train_location.forms_from = Some(assoc.clone())
+                        }
                     };
                 }
             }
@@ -242,44 +289,117 @@ fn write_assocs_to_trains(trains: &mut Vec<Train>, train_id: &str, location: &st
     }
 }
 
-fn is_matching_assoc_for_modify_insertion(assoc: &AssociationNode, other_train_id: &str, begin: &DateTime::<Tz>, other_train_location_suffix: &Option<String>, is_stp: bool, use_rev: bool) -> bool {
+fn is_matching_assoc_for_modify_insertion(
+    assoc: &AssociationNode,
+    other_train_id: &str,
+    begin: &DateTime<Tz>,
+    other_train_location_suffix: &Option<String>,
+    is_stp: bool,
+    use_rev: bool,
+) -> bool {
     return match is_stp {
         false => assoc.source.unwrap() == TrainSource::LongTerm, // match the entire association for deleted or modified inserts
         true => assoc.source.unwrap() == TrainSource::ShortTerm,
-    } &&
-        assoc.validity[0].valid_begin == if use_rev { rev_date(begin, assoc.day_diff) } else { *begin } &&
-        other_train_id == assoc.other_train_id &&
-        *other_train_location_suffix == assoc.other_train_location_id_suffix;
+    } && assoc.validity[0].valid_begin
+        == if use_rev {
+            rev_date(begin, assoc.day_diff)
+        } else {
+            *begin
+        }
+        && other_train_id == assoc.other_train_id
+        && *other_train_location_suffix == assoc.other_train_location_id_suffix;
 }
 
-fn is_matching_assoc_for_modify_replacement_or_cancel(validity: &TrainValidityPeriod, begin: &DateTime::<Tz>, day_diff: i8, use_rev: bool) -> bool {
-    validity.valid_begin == if use_rev { rev_date(begin, day_diff) } else { *begin }
+fn is_matching_assoc_for_modify_replacement_or_cancel(
+    validity: &TrainValidityPeriod,
+    begin: &DateTime<Tz>,
+    day_diff: i8,
+    use_rev: bool,
+) -> bool {
+    validity.valid_begin
+        == if use_rev {
+            rev_date(begin, day_diff)
+        } else {
+            *begin
+        }
 }
 
-fn delete_single_assoc_replacements_cancellations(assoc: &mut AssociationNode, other_train_id: &str, begin: &DateTime::<Tz>, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, use_rev: bool) {
-    if other_train_id != assoc.other_train_id || *other_train_location_suffix != assoc.other_train_location_id_suffix {
+fn delete_single_assoc_replacements_cancellations(
+    assoc: &mut AssociationNode,
+    other_train_id: &str,
+    begin: &DateTime<Tz>,
+    other_train_location_suffix: &Option<String>,
+    stp_modification_type: &ModificationType,
+    use_rev: bool,
+) {
+    if other_train_id != assoc.other_train_id
+        || *other_train_location_suffix != assoc.other_train_location_id_suffix
+    {
         return;
     }
     if *stp_modification_type == ModificationType::Amend {
-        assoc.replacements.retain(|assoc| !is_matching_assoc_for_modify_replacement_or_cancel(&assoc.validity[0], begin, assoc.day_diff, use_rev));
-    }
-    else if *stp_modification_type == ModificationType::Delete {
-        assoc.cancellations.retain(|(validity, _days_of_week)| !is_matching_assoc_for_modify_replacement_or_cancel(validity, begin, assoc.day_diff, use_rev));
+        assoc.replacements.retain(|assoc| {
+            !is_matching_assoc_for_modify_replacement_or_cancel(
+                &assoc.validity[0],
+                begin,
+                assoc.day_diff,
+                use_rev,
+            )
+        });
+    } else if *stp_modification_type == ModificationType::Delete {
+        assoc.cancellations.retain(|(validity, _days_of_week)| {
+            !is_matching_assoc_for_modify_replacement_or_cancel(
+                validity,
+                begin,
+                assoc.day_diff,
+                use_rev,
+            )
+        });
     }
 }
 
-fn delete_single_vec_assocs(assocs: &mut Vec<AssociationNode>, other_train_id: &str, begin: &DateTime::<Tz>, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool, use_rev: bool) {
+fn delete_single_vec_assocs(
+    assocs: &mut Vec<AssociationNode>,
+    other_train_id: &str,
+    begin: &DateTime<Tz>,
+    other_train_location_suffix: &Option<String>,
+    stp_modification_type: &ModificationType,
+    is_stp: bool,
+    use_rev: bool,
+) {
     if *stp_modification_type == ModificationType::Insert {
-        assocs.retain(|assoc| !is_matching_assoc_for_modify_insertion(assoc, other_train_id, begin, other_train_location_suffix, is_stp, use_rev));
-    }
-    else {
+        assocs.retain(|assoc| {
+            !is_matching_assoc_for_modify_insertion(
+                assoc,
+                other_train_id,
+                begin,
+                other_train_location_suffix,
+                is_stp,
+                use_rev,
+            )
+        });
+    } else {
         for ref mut assoc in assocs.iter_mut() {
-            delete_single_assoc_replacements_cancellations(assoc, other_train_id, begin, other_train_location_suffix, stp_modification_type, use_rev);
+            delete_single_assoc_replacements_cancellations(
+                assoc,
+                other_train_id,
+                begin,
+                other_train_location_suffix,
+                stp_modification_type,
+                use_rev,
+            );
         }
     }
 }
 
-fn amend_individual_assoc(assoc: &mut AssociationNode, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, day_diff: i8, for_passengers: bool) {
+fn amend_individual_assoc(
+    assoc: &mut AssociationNode,
+    begin: &DateTime<Tz>,
+    end: &DateTime<Tz>,
+    days_of_week: &DaysOfWeek,
+    day_diff: i8,
+    for_passengers: bool,
+) {
     assoc.validity = vec![TrainValidityPeriod {
         valid_begin: begin.clone(),
         valid_end: end.clone(),
@@ -289,18 +409,36 @@ fn amend_individual_assoc(assoc: &mut AssociationNode, begin: &DateTime::<Tz>, e
     assoc.for_passengers = for_passengers;
 }
 
-fn amend_single_assoc_replacements_cancellations(assoc: &mut AssociationNode, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, day_diff: i8, for_passengers: bool) {
-    if assoc.other_train_id != other_train_id || assoc.other_train_location_id_suffix != *other_train_location_suffix {
+fn amend_single_assoc_replacements_cancellations(
+    assoc: &mut AssociationNode,
+    other_train_id: &str,
+    begin: &DateTime<Tz>,
+    end: &DateTime<Tz>,
+    days_of_week: &DaysOfWeek,
+    other_train_location_suffix: &Option<String>,
+    stp_modification_type: &ModificationType,
+    day_diff: i8,
+    for_passengers: bool,
+) {
+    if assoc.other_train_id != other_train_id
+        || assoc.other_train_location_id_suffix != *other_train_location_suffix
+    {
         return;
     }
     if *stp_modification_type == ModificationType::Amend {
         for replacement in assoc.replacements.iter_mut() {
             if replacement.validity[0].valid_begin == *begin {
-                amend_individual_assoc(replacement, begin, end, days_of_week, day_diff, for_passengers);
+                amend_individual_assoc(
+                    replacement,
+                    begin,
+                    end,
+                    days_of_week,
+                    day_diff,
+                    for_passengers,
+                );
             }
         }
-    }
-    else if *stp_modification_type == ModificationType::Delete {
+    } else if *stp_modification_type == ModificationType::Delete {
         for (cancellation, old_days_of_week) in assoc.cancellations.iter_mut() {
             if cancellation.valid_begin == *begin {
                 *cancellation = TrainValidityPeriod {
@@ -313,50 +451,127 @@ fn amend_single_assoc_replacements_cancellations(assoc: &mut AssociationNode, ot
     }
 }
 
-fn amend_single_vec_assocs(assocs: &mut Vec<AssociationNode>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool, day_diff: i8, for_passengers: bool) {
+fn amend_single_vec_assocs(
+    assocs: &mut Vec<AssociationNode>,
+    other_train_id: &str,
+    begin: &DateTime<Tz>,
+    end: &DateTime<Tz>,
+    days_of_week: &DaysOfWeek,
+    other_train_location_suffix: &Option<String>,
+    stp_modification_type: &ModificationType,
+    is_stp: bool,
+    day_diff: i8,
+    for_passengers: bool,
+) {
     for ref mut assoc in assocs.iter_mut() {
         if *stp_modification_type == ModificationType::Insert {
-            if is_matching_assoc_for_modify_insertion(assoc, other_train_id, begin, other_train_location_suffix, is_stp, false) {
+            if is_matching_assoc_for_modify_insertion(
+                assoc,
+                other_train_id,
+                begin,
+                other_train_location_suffix,
+                is_stp,
+                false,
+            ) {
                 amend_individual_assoc(assoc, begin, end, days_of_week, day_diff, for_passengers);
             }
-        }
-        else {
-            amend_single_assoc_replacements_cancellations(assoc, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, day_diff, for_passengers);
+        } else {
+            amend_single_assoc_replacements_cancellations(
+                assoc,
+                other_train_id,
+                begin,
+                end,
+                days_of_week,
+                other_train_location_suffix,
+                stp_modification_type,
+                day_diff,
+                for_passengers,
+            );
         }
     }
 }
 
-fn cancel_single_assoc(assoc: &mut AssociationNode, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, other_train_location_suffix: &Option<String>, use_rev: bool) {
-    if other_train_id == assoc.other_train_id && *other_train_location_suffix == assoc.other_train_location_id_suffix {
+fn cancel_single_assoc(
+    assoc: &mut AssociationNode,
+    other_train_id: &str,
+    begin: &DateTime<Tz>,
+    end: &DateTime<Tz>,
+    days_of_week: &DaysOfWeek,
+    other_train_location_suffix: &Option<String>,
+    use_rev: bool,
+) {
+    if other_train_id == assoc.other_train_id
+        && *other_train_location_suffix == assoc.other_train_location_id_suffix
+    {
         let (rev_begin, rev_end, rev_days_of_week) = if use_rev {
-            (rev_date(&begin, assoc.day_diff), rev_date(&end, assoc.day_diff), rev_days(&days_of_week, assoc.day_diff))
-        }
-        else {
+            (
+                rev_date(&begin, assoc.day_diff),
+                rev_date(&end, assoc.day_diff),
+                rev_days(&days_of_week, assoc.day_diff),
+            )
+        } else {
             (*begin, *end, *days_of_week)
         };
 
-        if !check_date_applicability(&assoc.validity[0], &assoc.days, rev_begin, rev_end, &rev_days_of_week) {
+        if !check_date_applicability(
+            &assoc.validity[0],
+            &assoc.days,
+            rev_begin,
+            rev_end,
+            &rev_days_of_week,
+        ) {
             return;
         }
         let new_cancel = TrainValidityPeriod {
             valid_begin: rev_begin,
             valid_end: rev_end,
         };
-        assoc.cancellations.push((new_cancel, rev_days_of_week.clone()))
+        assoc
+            .cancellations
+            .push((new_cancel, rev_days_of_week.clone()))
     }
 }
 
-fn cancel_single_vec_assocs(assocs: &mut Vec<AssociationNode>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, other_train_location_suffix: &Option<String>, use_rev: bool) {
+fn cancel_single_vec_assocs(
+    assocs: &mut Vec<AssociationNode>,
+    other_train_id: &str,
+    begin: &DateTime<Tz>,
+    end: &DateTime<Tz>,
+    days_of_week: &DaysOfWeek,
+    other_train_location_suffix: &Option<String>,
+    use_rev: bool,
+) {
     for ref mut assoc in assocs.iter_mut() {
-        cancel_single_assoc(assoc, other_train_id, begin, end, days_of_week, other_train_location_suffix, use_rev);
+        cancel_single_assoc(
+            assoc,
+            other_train_id,
+            begin,
+            end,
+            days_of_week,
+            other_train_location_suffix,
+            use_rev,
+        );
     }
 }
 
-fn replace_single_vec_assocs(assocs: &mut Vec<AssociationNode>, other_train_id: &str, other_train_location_suffix: &Option<String>, new_assoc: &AssociationNode) {
+fn replace_single_vec_assocs(
+    assocs: &mut Vec<AssociationNode>,
+    other_train_id: &str,
+    other_train_location_suffix: &Option<String>,
+    new_assoc: &AssociationNode,
+) {
     for ref mut assoc in assocs.iter_mut() {
-        if other_train_id == assoc.other_train_id && *other_train_location_suffix == assoc.other_train_location_id_suffix {
+        if other_train_id == assoc.other_train_id
+            && *other_train_location_suffix == assoc.other_train_location_id_suffix
+        {
             // check for no overlapping days at all
-            if !check_date_applicability(&assoc.validity[0], &assoc.days, new_assoc.validity[0].valid_begin, new_assoc.validity[0].valid_end, &new_assoc.days) {
+            if !check_date_applicability(
+                &assoc.validity[0],
+                &assoc.days,
+                new_assoc.validity[0].valid_begin,
+                new_assoc.validity[0].valid_end,
+                &new_assoc.days,
+            ) {
                 continue;
             }
             assoc.replacements.push(new_assoc.clone());
@@ -364,7 +579,10 @@ fn replace_single_vec_assocs(assocs: &mut Vec<AssociationNode>, other_train_id: 
     }
 }
 
-fn find_replacement_train<'a>(trains: &'a mut Vec<Train>, begin: &DateTime::<Tz>) -> Option<&'a mut Train> {
+fn find_replacement_train<'a>(
+    trains: &'a mut Vec<Train>,
+    begin: &DateTime<Tz>,
+) -> Option<&'a mut Train> {
     for train in trains.iter_mut() {
         for replacement_train in train.replacements.iter_mut() {
             if replacement_train.validity[0].valid_begin == *begin {
@@ -375,20 +593,70 @@ fn find_replacement_train<'a>(trains: &'a mut Vec<Train>, begin: &DateTime::<Tz>
     None
 }
 
-fn trains_delete_assoc(trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool) {
+fn trains_delete_assoc(
+    trains: &mut Vec<Train>,
+    other_train_id: &str,
+    begin: &DateTime<Tz>,
+    location: &str,
+    location_suffix: &Option<String>,
+    other_train_location_suffix: &Option<String>,
+    stp_modification_type: &ModificationType,
+    is_stp: bool,
+) {
     for ref mut train in trains.iter_mut() {
         // recurse on replacements
-        trains_delete_assoc(&mut train.replacements, &other_train_id, &begin, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp);
+        trains_delete_assoc(
+            &mut train.replacements,
+            &other_train_id,
+            &begin,
+            &location,
+            &location_suffix,
+            &other_train_location_suffix,
+            &stp_modification_type,
+            is_stp,
+        );
 
         for ref mut train_location in train.route.iter_mut() {
             if train_location.id != location || train_location.id_suffix != *location_suffix {
                 continue;
             }
-            delete_single_vec_assocs(&mut train_location.divides_to_form, other_train_id, begin, other_train_location_suffix, stp_modification_type, is_stp, false);
-            delete_single_vec_assocs(&mut train_location.joins_to, other_train_id, begin, other_train_location_suffix, stp_modification_type, is_stp, false);
+            delete_single_vec_assocs(
+                &mut train_location.divides_to_form,
+                other_train_id,
+                begin,
+                other_train_location_suffix,
+                stp_modification_type,
+                is_stp,
+                false,
+            );
+            delete_single_vec_assocs(
+                &mut train_location.joins_to,
+                other_train_id,
+                begin,
+                other_train_location_suffix,
+                stp_modification_type,
+                is_stp,
+                false,
+            );
             if let Some(ref mut assoc) = &mut train_location.becomes {
-                delete_single_assoc_replacements_cancellations(assoc, other_train_id, begin, other_train_location_suffix, stp_modification_type, false);
-                if *stp_modification_type == ModificationType::Insert && is_matching_assoc_for_modify_insertion(assoc, other_train_id, begin, other_train_location_suffix, is_stp, false) {
+                delete_single_assoc_replacements_cancellations(
+                    assoc,
+                    other_train_id,
+                    begin,
+                    other_train_location_suffix,
+                    stp_modification_type,
+                    false,
+                );
+                if *stp_modification_type == ModificationType::Insert
+                    && is_matching_assoc_for_modify_insertion(
+                        assoc,
+                        other_train_id,
+                        begin,
+                        other_train_location_suffix,
+                        is_stp,
+                        false,
+                    )
+                {
                     train_location.becomes = None;
                 }
             }
@@ -396,20 +664,70 @@ fn trains_delete_assoc(trains: &mut Vec<Train>, other_train_id: &str, begin: &Da
     }
 }
 
-fn trains_delete_rev_assoc(trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool) {
+fn trains_delete_rev_assoc(
+    trains: &mut Vec<Train>,
+    other_train_id: &str,
+    begin: &DateTime<Tz>,
+    location: &str,
+    location_suffix: &Option<String>,
+    other_train_location_suffix: &Option<String>,
+    stp_modification_type: &ModificationType,
+    is_stp: bool,
+) {
     for ref mut train in trains.iter_mut() {
         // recurse on replacements
-        trains_delete_rev_assoc(&mut train.replacements, &other_train_id, &begin, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp);
+        trains_delete_rev_assoc(
+            &mut train.replacements,
+            &other_train_id,
+            &begin,
+            &location,
+            &location_suffix,
+            &other_train_location_suffix,
+            &stp_modification_type,
+            is_stp,
+        );
 
         for ref mut train_location in train.route.iter_mut() {
             if train_location.id != location || train_location.id_suffix != *location_suffix {
                 continue;
             }
-            delete_single_vec_assocs(&mut train_location.divides_from, other_train_id, begin, other_train_location_suffix, stp_modification_type, is_stp, true);
-            delete_single_vec_assocs(&mut train_location.is_joined_to_by, other_train_id, begin, other_train_location_suffix, stp_modification_type, is_stp, true);
+            delete_single_vec_assocs(
+                &mut train_location.divides_from,
+                other_train_id,
+                begin,
+                other_train_location_suffix,
+                stp_modification_type,
+                is_stp,
+                true,
+            );
+            delete_single_vec_assocs(
+                &mut train_location.is_joined_to_by,
+                other_train_id,
+                begin,
+                other_train_location_suffix,
+                stp_modification_type,
+                is_stp,
+                true,
+            );
             if let Some(ref mut assoc) = &mut train_location.forms_from {
-                delete_single_assoc_replacements_cancellations(assoc, other_train_id, begin, other_train_location_suffix, stp_modification_type, true);
-                if *stp_modification_type == ModificationType::Insert && is_matching_assoc_for_modify_insertion(assoc, other_train_id, begin, other_train_location_suffix, is_stp, true) {
+                delete_single_assoc_replacements_cancellations(
+                    assoc,
+                    other_train_id,
+                    begin,
+                    other_train_location_suffix,
+                    stp_modification_type,
+                    true,
+                );
+                if *stp_modification_type == ModificationType::Insert
+                    && is_matching_assoc_for_modify_insertion(
+                        assoc,
+                        other_train_id,
+                        begin,
+                        other_train_location_suffix,
+                        is_stp,
+                        true,
+                    )
+                {
                     train_location.forms_from = None;
                 }
             }
@@ -417,95 +735,359 @@ fn trains_delete_rev_assoc(trains: &mut Vec<Train>, other_train_id: &str, begin:
     }
 }
 
-fn trains_amend_assoc(trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool, day_diff: i8, for_passengers: bool) {
+fn trains_amend_assoc(
+    trains: &mut Vec<Train>,
+    other_train_id: &str,
+    begin: &DateTime<Tz>,
+    end: &DateTime<Tz>,
+    days_of_week: &DaysOfWeek,
+    location: &str,
+    location_suffix: &Option<String>,
+    other_train_location_suffix: &Option<String>,
+    stp_modification_type: &ModificationType,
+    is_stp: bool,
+    day_diff: i8,
+    for_passengers: bool,
+) {
     for ref mut train in trains.iter_mut() {
         // recurse on replacements
-        trains_amend_assoc(&mut train.replacements, &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp, day_diff, for_passengers);
+        trains_amend_assoc(
+            &mut train.replacements,
+            &other_train_id,
+            &begin,
+            &end,
+            &days_of_week,
+            &location,
+            &location_suffix,
+            &other_train_location_suffix,
+            &stp_modification_type,
+            is_stp,
+            day_diff,
+            for_passengers,
+        );
 
         for ref mut train_location in train.route.iter_mut() {
             if train_location.id != location || train_location.id_suffix != *location_suffix {
                 continue;
             }
-            amend_single_vec_assocs(&mut train_location.divides_to_form, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, is_stp, day_diff, for_passengers);
-            amend_single_vec_assocs(&mut train_location.joins_to, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, is_stp, day_diff, for_passengers);
+            amend_single_vec_assocs(
+                &mut train_location.divides_to_form,
+                other_train_id,
+                begin,
+                end,
+                days_of_week,
+                other_train_location_suffix,
+                stp_modification_type,
+                is_stp,
+                day_diff,
+                for_passengers,
+            );
+            amend_single_vec_assocs(
+                &mut train_location.joins_to,
+                other_train_id,
+                begin,
+                end,
+                days_of_week,
+                other_train_location_suffix,
+                stp_modification_type,
+                is_stp,
+                day_diff,
+                for_passengers,
+            );
             if let Some(ref mut assoc) = &mut train_location.becomes {
-                if *stp_modification_type == ModificationType::Insert && is_matching_assoc_for_modify_insertion(assoc, other_train_id, begin, other_train_location_suffix, is_stp, false) {
-                    amend_individual_assoc(assoc, begin, end, days_of_week, day_diff, for_passengers);
+                if *stp_modification_type == ModificationType::Insert
+                    && is_matching_assoc_for_modify_insertion(
+                        assoc,
+                        other_train_id,
+                        begin,
+                        other_train_location_suffix,
+                        is_stp,
+                        false,
+                    )
+                {
+                    amend_individual_assoc(
+                        assoc,
+                        begin,
+                        end,
+                        days_of_week,
+                        day_diff,
+                        for_passengers,
+                    );
                 }
-                amend_single_assoc_replacements_cancellations(assoc, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, day_diff, for_passengers);
+                amend_single_assoc_replacements_cancellations(
+                    assoc,
+                    other_train_id,
+                    begin,
+                    end,
+                    days_of_week,
+                    other_train_location_suffix,
+                    stp_modification_type,
+                    day_diff,
+                    for_passengers,
+                );
             }
         }
     }
 }
 
-fn trains_amend_rev_assoc(trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool, day_diff: i8, for_passengers: bool) {
+fn trains_amend_rev_assoc(
+    trains: &mut Vec<Train>,
+    other_train_id: &str,
+    begin: &DateTime<Tz>,
+    end: &DateTime<Tz>,
+    days_of_week: &DaysOfWeek,
+    location: &str,
+    location_suffix: &Option<String>,
+    other_train_location_suffix: &Option<String>,
+    stp_modification_type: &ModificationType,
+    is_stp: bool,
+    day_diff: i8,
+    for_passengers: bool,
+) {
     for ref mut train in trains.iter_mut() {
         // recurse on replacements
-        trains_amend_rev_assoc(&mut train.replacements, &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp, day_diff, for_passengers);
+        trains_amend_rev_assoc(
+            &mut train.replacements,
+            &other_train_id,
+            &begin,
+            &end,
+            &days_of_week,
+            &location,
+            &location_suffix,
+            &other_train_location_suffix,
+            &stp_modification_type,
+            is_stp,
+            day_diff,
+            for_passengers,
+        );
 
         for ref mut train_location in train.route.iter_mut() {
             if train_location.id != location || train_location.id_suffix != *location_suffix {
                 continue;
             }
-            amend_single_vec_assocs(&mut train_location.divides_from, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, is_stp, day_diff, for_passengers);
-            amend_single_vec_assocs(&mut train_location.is_joined_to_by, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, is_stp, day_diff, for_passengers);
+            amend_single_vec_assocs(
+                &mut train_location.divides_from,
+                other_train_id,
+                begin,
+                end,
+                days_of_week,
+                other_train_location_suffix,
+                stp_modification_type,
+                is_stp,
+                day_diff,
+                for_passengers,
+            );
+            amend_single_vec_assocs(
+                &mut train_location.is_joined_to_by,
+                other_train_id,
+                begin,
+                end,
+                days_of_week,
+                other_train_location_suffix,
+                stp_modification_type,
+                is_stp,
+                day_diff,
+                for_passengers,
+            );
             if let Some(ref mut assoc) = &mut train_location.forms_from {
-                if *stp_modification_type == ModificationType::Insert && is_matching_assoc_for_modify_insertion(assoc, other_train_id, begin, other_train_location_suffix, is_stp, false) {
-                    amend_individual_assoc(assoc, begin, end, days_of_week, day_diff, for_passengers);
+                if *stp_modification_type == ModificationType::Insert
+                    && is_matching_assoc_for_modify_insertion(
+                        assoc,
+                        other_train_id,
+                        begin,
+                        other_train_location_suffix,
+                        is_stp,
+                        false,
+                    )
+                {
+                    amend_individual_assoc(
+                        assoc,
+                        begin,
+                        end,
+                        days_of_week,
+                        day_diff,
+                        for_passengers,
+                    );
                 }
-                amend_single_assoc_replacements_cancellations(assoc, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, day_diff, for_passengers);
+                amend_single_assoc_replacements_cancellations(
+                    assoc,
+                    other_train_id,
+                    begin,
+                    end,
+                    days_of_week,
+                    other_train_location_suffix,
+                    stp_modification_type,
+                    day_diff,
+                    for_passengers,
+                );
             }
         }
     }
 }
 
-fn trains_cancel_assoc(trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>) {
+fn trains_cancel_assoc(
+    trains: &mut Vec<Train>,
+    other_train_id: &str,
+    begin: &DateTime<Tz>,
+    end: &DateTime<Tz>,
+    days_of_week: &DaysOfWeek,
+    location: &str,
+    location_suffix: &Option<String>,
+    other_train_location_suffix: &Option<String>,
+) {
     for ref mut train in trains.iter_mut() {
         // recurse on replacements
-        trains_cancel_assoc(&mut train.replacements, &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix);
+        trains_cancel_assoc(
+            &mut train.replacements,
+            &other_train_id,
+            &begin,
+            &end,
+            &days_of_week,
+            &location,
+            &location_suffix,
+            &other_train_location_suffix,
+        );
 
         for ref mut train_location in train.route.iter_mut() {
             if train_location.id == location && train_location.id_suffix == *location_suffix {
-                cancel_single_vec_assocs(&mut train_location.divides_to_form, other_train_id, begin, end, days_of_week, other_train_location_suffix, false);
-                cancel_single_vec_assocs(&mut train_location.joins_to, other_train_id, begin, end, days_of_week, other_train_location_suffix, false);
+                cancel_single_vec_assocs(
+                    &mut train_location.divides_to_form,
+                    other_train_id,
+                    begin,
+                    end,
+                    days_of_week,
+                    other_train_location_suffix,
+                    false,
+                );
+                cancel_single_vec_assocs(
+                    &mut train_location.joins_to,
+                    other_train_id,
+                    begin,
+                    end,
+                    days_of_week,
+                    other_train_location_suffix,
+                    false,
+                );
                 if let Some(assoc) = &mut train_location.becomes {
-                    cancel_single_assoc(assoc, other_train_id, begin, end, days_of_week, other_train_location_suffix, false);
+                    cancel_single_assoc(
+                        assoc,
+                        other_train_id,
+                        begin,
+                        end,
+                        days_of_week,
+                        other_train_location_suffix,
+                        false,
+                    );
                 }
             }
         }
     }
 }
 
-fn trains_cancel_rev_assoc(trains: &mut Vec<Train>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>) {
+fn trains_cancel_rev_assoc(
+    trains: &mut Vec<Train>,
+    other_train_id: &str,
+    begin: &DateTime<Tz>,
+    end: &DateTime<Tz>,
+    days_of_week: &DaysOfWeek,
+    location: &str,
+    location_suffix: &Option<String>,
+    other_train_location_suffix: &Option<String>,
+) {
     for ref mut train in trains.iter_mut() {
         // recurse on replacements
-        trains_cancel_rev_assoc(&mut train.replacements, &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix);
+        trains_cancel_rev_assoc(
+            &mut train.replacements,
+            &other_train_id,
+            &begin,
+            &end,
+            &days_of_week,
+            &location,
+            &location_suffix,
+            &other_train_location_suffix,
+        );
 
         for ref mut train_location in train.route.iter_mut() {
             if train_location.id == location && train_location.id_suffix == *location_suffix {
-                cancel_single_vec_assocs(&mut train_location.divides_from, other_train_id, begin, end, days_of_week, other_train_location_suffix, true);
-                cancel_single_vec_assocs(&mut train_location.is_joined_to_by, other_train_id, begin, end, days_of_week, other_train_location_suffix, true);
+                cancel_single_vec_assocs(
+                    &mut train_location.divides_from,
+                    other_train_id,
+                    begin,
+                    end,
+                    days_of_week,
+                    other_train_location_suffix,
+                    true,
+                );
+                cancel_single_vec_assocs(
+                    &mut train_location.is_joined_to_by,
+                    other_train_id,
+                    begin,
+                    end,
+                    days_of_week,
+                    other_train_location_suffix,
+                    true,
+                );
                 if let Some(assoc) = &mut train_location.forms_from {
-                    cancel_single_assoc(assoc, other_train_id, begin, end, days_of_week, other_train_location_suffix, true);
+                    cancel_single_assoc(
+                        assoc,
+                        other_train_id,
+                        begin,
+                        end,
+                        days_of_week,
+                        other_train_location_suffix,
+                        true,
+                    );
                 }
             }
         }
     }
 }
 
-fn trains_replace_assoc(trains: &mut Vec<Train>, other_train_id: &str, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, new_assoc: &AssociationNode) {
+fn trains_replace_assoc(
+    trains: &mut Vec<Train>,
+    other_train_id: &str,
+    location: &str,
+    location_suffix: &Option<String>,
+    other_train_location_suffix: &Option<String>,
+    new_assoc: &AssociationNode,
+) {
     for ref mut train in trains.iter_mut() {
         // recurse on replacements
-        trains_replace_assoc(&mut train.replacements, &other_train_id, &location, &location_suffix, &other_train_location_suffix, &new_assoc);
+        trains_replace_assoc(
+            &mut train.replacements,
+            &other_train_id,
+            &location,
+            &location_suffix,
+            &other_train_location_suffix,
+            &new_assoc,
+        );
 
         for ref mut train_location in train.route.iter_mut() {
             if train_location.id == location && train_location.id_suffix == *location_suffix {
-                replace_single_vec_assocs(&mut train_location.divides_to_form, other_train_id, other_train_location_suffix, new_assoc);
-                replace_single_vec_assocs(&mut train_location.joins_to, other_train_id, other_train_location_suffix, new_assoc);
+                replace_single_vec_assocs(
+                    &mut train_location.divides_to_form,
+                    other_train_id,
+                    other_train_location_suffix,
+                    new_assoc,
+                );
+                replace_single_vec_assocs(
+                    &mut train_location.joins_to,
+                    other_train_id,
+                    other_train_location_suffix,
+                    new_assoc,
+                );
                 if let Some(assoc) = &mut train_location.becomes {
-                    if other_train_id == assoc.other_train_id && *other_train_location_suffix == assoc.other_train_location_id_suffix {
+                    if other_train_id == assoc.other_train_id
+                        && *other_train_location_suffix == assoc.other_train_location_id_suffix
+                    {
                         // check for no overlapping days at all
-                        if !check_date_applicability(&assoc.validity[0], &assoc.days, new_assoc.validity[0].valid_begin, new_assoc.validity[0].valid_end, &new_assoc.days) {
+                        if !check_date_applicability(
+                            &assoc.validity[0],
+                            &assoc.days,
+                            new_assoc.validity[0].valid_begin,
+                            new_assoc.validity[0].valid_end,
+                            &new_assoc.days,
+                        ) {
                             continue;
                         }
                         assoc.replacements.push(new_assoc.clone());
@@ -516,19 +1098,51 @@ fn trains_replace_assoc(trains: &mut Vec<Train>, other_train_id: &str, location:
     }
 }
 
-fn trains_replace_rev_assoc(trains: &mut Vec<Train>, other_train_id: &str, location: &str, location_suffix: &Option<String>, other_train_location_suffix: &Option<String>, new_assoc: &AssociationNode) {
+fn trains_replace_rev_assoc(
+    trains: &mut Vec<Train>,
+    other_train_id: &str,
+    location: &str,
+    location_suffix: &Option<String>,
+    other_train_location_suffix: &Option<String>,
+    new_assoc: &AssociationNode,
+) {
     for ref mut train in trains.iter_mut() {
         // recurse on replacements
-        trains_replace_rev_assoc(&mut train.replacements, &other_train_id, &location, &location_suffix, &other_train_location_suffix, &new_assoc);
+        trains_replace_rev_assoc(
+            &mut train.replacements,
+            &other_train_id,
+            &location,
+            &location_suffix,
+            &other_train_location_suffix,
+            &new_assoc,
+        );
 
         for ref mut train_location in train.route.iter_mut() {
             if train_location.id == location && train_location.id_suffix == *location_suffix {
-                replace_single_vec_assocs(&mut train_location.divides_from, other_train_id, other_train_location_suffix, new_assoc);
-                replace_single_vec_assocs(&mut train_location.is_joined_to_by, other_train_id, other_train_location_suffix, new_assoc);
+                replace_single_vec_assocs(
+                    &mut train_location.divides_from,
+                    other_train_id,
+                    other_train_location_suffix,
+                    new_assoc,
+                );
+                replace_single_vec_assocs(
+                    &mut train_location.is_joined_to_by,
+                    other_train_id,
+                    other_train_location_suffix,
+                    new_assoc,
+                );
                 if let Some(assoc) = &mut train_location.forms_from {
-                    if other_train_id == assoc.other_train_id && *other_train_location_suffix == assoc.other_train_location_id_suffix {
+                    if other_train_id == assoc.other_train_id
+                        && *other_train_location_suffix == assoc.other_train_location_id_suffix
+                    {
                         // check for no overlapping days at all
-                        if !check_date_applicability(&assoc.validity[0], &assoc.days, new_assoc.validity[0].valid_begin, new_assoc.validity[0].valid_end, &new_assoc.days) {
+                        if !check_date_applicability(
+                            &assoc.validity[0],
+                            &assoc.days,
+                            new_assoc.validity[0].valid_begin,
+                            new_assoc.validity[0].valid_end,
+                            &new_assoc.days,
+                        ) {
                             continue;
                         }
                         assoc.replacements.push(new_assoc.clone());
@@ -539,31 +1153,58 @@ fn trains_replace_rev_assoc(trains: &mut Vec<Train>, other_train_id: &str, locat
     }
 }
 
-fn produce_cif_error_closure(number: u64, column: usize) -> Box<dyn FnOnce(CifErrorType) -> CifError> {
-    Box::new(move |x| CifError { error_type: x, line: number, column: column })
+fn produce_cif_error_closure(
+    number: u64,
+    column: usize,
+) -> Box<dyn FnOnce(CifErrorType) -> CifError> {
+    Box::new(move |x| CifError {
+        error_type: x,
+        line: number,
+        column: column,
+    })
 }
 
-fn produce_nr_json_error_closure(field_name: String) -> Box<dyn FnOnce(CifErrorType) -> NrJsonError> {
-    Box::new(move |x| NrJsonError { error_type: x, field_name: field_name })
+fn produce_nr_json_error_closure(
+    field_name: String,
+) -> Box<dyn FnOnce(CifErrorType) -> NrJsonError> {
+    Box::new(move |x| NrJsonError {
+        error_type: x,
+        field_name: field_name,
+    })
 }
 
-fn read_modification_type<F, T>(modification_slice: &str, error_logic: F) -> Result<ModificationType, T> where F: FnOnce(CifErrorType) -> T {
+fn read_modification_type<F, T>(
+    modification_slice: &str,
+    error_logic: F,
+) -> Result<ModificationType, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     match modification_slice {
         "N" => Ok(ModificationType::Insert),
         "D" => Ok(ModificationType::Delete),
         "R" => Ok(ModificationType::Amend),
-        x => Err(error_logic(CifErrorType::InvalidTransactionType(x.to_string()))),
+        x => Err(error_logic(CifErrorType::InvalidTransactionType(
+            x.to_string(),
+        ))),
     }
 }
 
-fn read_stp_indicator<F, T>(stp_slice: &str, error_logic: F) -> Result<(ModificationType, bool), T> where F: FnOnce(CifErrorType) -> T {
+fn read_stp_indicator<F, T>(stp_slice: &str, error_logic: F) -> Result<(ModificationType, bool), T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     let stp_modification_type = match stp_slice.trim() {
         "" => ModificationType::Insert,
         "P" => ModificationType::Insert,
         "N" => ModificationType::Insert,
         "O" => ModificationType::Amend,
         "C" => ModificationType::Delete,
-        x => return Err(error_logic(CifErrorType::InvalidStpIndicator(x.to_string()))),
+        x => {
+            return Err(error_logic(CifErrorType::InvalidStpIndicator(
+                x.to_string(),
+            )))
+        }
     };
     let is_stp = match stp_slice.trim() {
         " " => false,
@@ -571,53 +1212,78 @@ fn read_stp_indicator<F, T>(stp_slice: &str, error_logic: F) -> Result<(Modifica
         "N" => true,
         "O" => true,
         "C" => true,
-        x => return Err(error_logic(CifErrorType::InvalidStpIndicator(x.to_string()))),
+        x => {
+            return Err(error_logic(CifErrorType::InvalidStpIndicator(
+                x.to_string(),
+            )))
+        }
     };
 
-    return Ok((stp_modification_type, is_stp))
+    return Ok((stp_modification_type, is_stp));
 }
 
-fn read_date<F, T>(date_slice: &str, error_logic: F) -> Result<DateTime::<Tz>, T> where F: FnOnce(CifErrorType) -> T {
+fn read_date<F, T>(date_slice: &str, error_logic: F) -> Result<DateTime<Tz>, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     let parsed_date = NaiveDate::parse_from_str(date_slice, "%y%m%d");
     let parsed_date = match parsed_date {
         Ok(x) => x,
         Err(x) => return Err(error_logic(CifErrorType::ChronoParseError(x))),
     };
-    Ok(London.from_local_datetime(&parsed_date.and_hms_opt(0, 0, 0).unwrap()).unwrap())
+    Ok(London
+        .from_local_datetime(&parsed_date.and_hms_opt(0, 0, 0).unwrap())
+        .unwrap())
 }
 
-fn read_backwards_date<F, T>(date_slice: &str, error_logic: F) -> Result<DateTime::<Tz>, T> where F: FnOnce(CifErrorType) -> T {
+fn read_backwards_date<F, T>(date_slice: &str, error_logic: F) -> Result<DateTime<Tz>, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     let parsed_date = NaiveDate::parse_from_str(date_slice, "%d%m%y");
     let parsed_date = match parsed_date {
         Ok(x) => x,
         Err(x) => return Err(error_logic(CifErrorType::ChronoParseError(x))),
     };
-    Ok(London.from_local_datetime(&parsed_date.and_hms_opt(0, 0, 0).unwrap()).unwrap())
+    Ok(London
+        .from_local_datetime(&parsed_date.and_hms_opt(0, 0, 0).unwrap())
+        .unwrap())
 }
 
-fn read_vstp_date<F, T>(date_slice: &str, error_logic: F) -> Result<DateTime::<Tz>, T> where F: FnOnce(CifErrorType) -> T {
+fn read_vstp_date<F, T>(date_slice: &str, error_logic: F) -> Result<DateTime<Tz>, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     let parsed_date = NaiveDate::parse_from_str(date_slice, "%Y-%m-%d");
     let parsed_date = match parsed_date {
         Ok(x) => x,
         Err(x) => return Err(error_logic(CifErrorType::ChronoParseError(x))),
     };
-    Ok(London.from_local_datetime(&parsed_date.and_hms_opt(0, 0, 0).unwrap()).unwrap())
+    Ok(London
+        .from_local_datetime(&parsed_date.and_hms_opt(0, 0, 0).unwrap())
+        .unwrap())
 }
 
 fn read_optional_string(slice: &str) -> Option<String> {
     if slice.chars().fold(true, |acc, x| acc && x == ' ') {
         None
-    }
-    else {
+    } else {
         Some(slice.to_string())
     }
 }
 
-fn read_days_of_week<F, T>(slice: &str, error_logic: F) -> Result<DaysOfWeek, T> where F: FnOnce(CifErrorType) -> T {
-    if slice.chars().fold(false, |acc, x| acc || (x != '0' && x != '1')) {
-        Err(error_logic(CifErrorType::InvalidDaysOfWeek(slice.to_string())))
-    }
-    else {
+fn read_days_of_week<F, T>(slice: &str, error_logic: F) -> Result<DaysOfWeek, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
+    if slice
+        .chars()
+        .fold(false, |acc, x| acc || (x != '0' && x != '1'))
+    {
+        Err(error_logic(CifErrorType::InvalidDaysOfWeek(
+            slice.to_string(),
+        )))
+    } else {
         Ok(DaysOfWeek {
             monday: &slice[0..1] == "1",
             tuesday: &slice[1..2] == "1",
@@ -630,7 +1296,10 @@ fn read_days_of_week<F, T>(slice: &str, error_logic: F) -> Result<DaysOfWeek, T>
     }
 }
 
-fn read_train_type<F, T>(slice: &str, error_logic: F) -> Result<Option<TrainType>, T> where F: FnOnce(CifErrorType) -> T {
+fn read_train_type<F, T>(slice: &str, error_logic: F) -> Result<Option<TrainType>, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     match slice.trim() {
         "OL" => Ok(Some(TrainType::Metro)),
         "OU" => Ok(Some(TrainType::UnadvertisedPassenger)),
@@ -687,11 +1356,20 @@ fn read_train_type<F, T>(slice: &str, error_logic: F) -> Result<Option<TrainType
         "H5" => Ok(Some(TrainType::FreightInternationalHaulmark)),
         "H6" => Ok(Some(TrainType::FreightInternationalJointVenture)),
         "" => Ok(None),
-        x => Err(error_logic(CifErrorType::InvalidTrainCategory(x.to_string()))),
+        x => Err(error_logic(CifErrorType::InvalidTrainCategory(
+            x.to_string(),
+        ))),
     }
 }
 
-fn read_power_type<F, T>(power_type: &str, timing_load: &str, error_logic: F) -> Result<Option<TrainPower>, T> where F: FnOnce(CifErrorType) -> T {
+fn read_power_type<F, T>(
+    power_type: &str,
+    timing_load: &str,
+    error_logic: F,
+) -> Result<Option<TrainPower>, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     match power_type.trim() {
         "D" => Ok(Some(TrainPower::DieselLocomotive)),
         "DEM" => Ok(Some(TrainPower::DieselElectricMultipleUnit)),
@@ -702,7 +1380,7 @@ fn read_power_type<F, T>(power_type: &str, timing_load: &str, error_logic: F) ->
                 "V" => Ok(Some(TrainPower::DieselElectricMultipleUnit)),
                 "7" => Ok(Some(TrainPower::ElectricAndDieselMultipleUnit)),
                 "8" => Ok(Some(TrainPower::ElectricAndDieselMultipleUnit)),
-                _   => Ok(Some(TrainPower::DieselHydraulicMultipleUnit)),
+                _ => Ok(Some(TrainPower::DieselHydraulicMultipleUnit)),
             },
         },
         "E" => Ok(Some(TrainPower::ElectricLocomotive)),
@@ -715,7 +1393,10 @@ fn read_power_type<F, T>(power_type: &str, timing_load: &str, error_logic: F) ->
     }
 }
 
-fn read_speed<F, T>(slice: &str, error_logic: F) -> Result<Option<f64>, T> where F: FnOnce(CifErrorType) -> T {
+fn read_speed<F, T>(slice: &str, error_logic: F) -> Result<Option<f64>, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     let speed_mph = match slice {
         "   " => None,
         x => match x.parse::<u16>() {
@@ -730,8 +1411,16 @@ fn read_speed<F, T>(slice: &str, error_logic: F) -> Result<Option<f64>, T> where
     }
 }
 
-fn read_operating_characteristics<F, T>(slice: &str, error_logic: F) -> Result<(OperatingCharacteristics, bool), T> where F: FnOnce(CifErrorType) -> T {
-    let mut operating_characteristics = OperatingCharacteristics { ..Default::default() };
+fn read_operating_characteristics<F, T>(
+    slice: &str,
+    error_logic: F,
+) -> Result<(OperatingCharacteristics, bool), T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
+    let mut operating_characteristics = OperatingCharacteristics {
+        ..Default::default()
+    };
     let mut runs_as_required = false;
 
     for chr in slice.chars() {
@@ -749,25 +1438,41 @@ fn read_operating_characteristics<F, T>(slice: &str, error_logic: F) -> Result<(
             'Y' => operating_characteristics.runs_to_locations_as_required = true,
             'Z' => operating_characteristics.sb1c_gauge = true,
             ' ' => (),
-            x => return Err(error_logic(CifErrorType::InvalidOperatingCharacteristic(x.to_string()))),
+            x => {
+                return Err(error_logic(CifErrorType::InvalidOperatingCharacteristic(
+                    x.to_string(),
+                )))
+            }
         }
     }
 
     Ok((operating_characteristics, runs_as_required))
 }
 
-fn read_timing_load<F, T>(power_type: &str, timing_load: &str, br_mark_four_coaches: bool, error_logic: F) -> Result<Option<String>, T> where F: FnOnce(CifErrorType) -> T {
+fn read_timing_load<F, T>(
+    power_type: &str,
+    timing_load: &str,
+    br_mark_four_coaches: bool,
+    error_logic: F,
+) -> Result<Option<String>, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     Ok(match power_type.trim() {
-        "D"       => match timing_load.trim() {
+        "D" => match timing_load.trim() {
             "" => None,
-            x      => if br_mark_four_coaches {
-                Some(format!("Diesel locomotive hauling {} tons of BR Mark 4 Coaches", x))
+            x => {
+                if br_mark_four_coaches {
+                    Some(format!(
+                        "Diesel locomotive hauling {} tons of BR Mark 4 Coaches",
+                        x
+                    ))
+                } else {
+                    Some(format!("Diesel locomotive hauling {} tons", x))
+                }
             }
-            else {
-                Some(format!("Diesel locomotive hauling {} tons", x))
-            },
         },
-        "DEM"|"DMU" => match timing_load.trim() {
+        "DEM" | "DMU" => match timing_load.trim() {
             "69" => Some("Class 172/0, 172/1, or 172/2 'Turbostar' DMU".to_string()),
             "A" => Some("Class 14x 2-axle 'Pacer' DMU".to_string()),
             "E" => Some("Class 158, 168, 170, 172, or 175 'Express' DMU".to_string()),
@@ -785,32 +1490,42 @@ fn read_timing_load<F, T>(power_type: &str, timing_load: &str, br_mark_four_coac
             "755" => Some("Class 755 'FLIRT' bi-mode running on diesel".to_string()),
             "777" => Some("Class 777/1 'METRO' bi-mode running on battery".to_string()),
             "800" => Some("Class 800 'Azuma' bi-mode running on diesel".to_string()),
-            "802" => Some("Class 800/802 'IET/Nova 1/Paragon' bi-mode running on diesel".to_string()),
+            "802" => {
+                Some("Class 800/802 'IET/Nova 1/Paragon' bi-mode running on diesel".to_string())
+            }
             "805" => Some("Class 805 'Hitachi AT300' bi-mode running on diesel".to_string()),
             "1400" => Some("Diesel locomotive hauling 1400 tons".to_string()), // lol
             "" => None,
             x => return Err(error_logic(CifErrorType::InvalidTimingLoad(x.to_string()))),
         },
-        "E"       => match timing_load.trim() {
+        "E" => match timing_load.trim() {
             "325" => Some("Class 325 Parcels EMU".to_string()),
             "" => None,
-            x      => if br_mark_four_coaches {
-                Some(format!("Electric locomotive hauling {} tons of BR Mark 4 Coaches", x))
+            x => {
+                if br_mark_four_coaches {
+                    Some(format!(
+                        "Electric locomotive hauling {} tons of BR Mark 4 Coaches",
+                        x
+                    ))
+                } else {
+                    Some(format!("Electric locomotive hauling {} tons", x))
+                }
             }
-            else {
-                Some(format!("Electric locomotive hauling {} tons", x))
-            },
         },
-        "ED"       => match timing_load.trim() {
+        "ED" => match timing_load.trim() {
             "" => None,
-            x      => if br_mark_four_coaches {
-                Some(format!("Electric and diesel locomotive hauling {} tons of BR Mark 4 Coaches", x))
+            x => {
+                if br_mark_four_coaches {
+                    Some(format!(
+                        "Electric and diesel locomotive hauling {} tons of BR Mark 4 Coaches",
+                        x
+                    ))
+                } else {
+                    Some(format!("Electric and diesel locomotive hauling {} tons", x))
+                }
             }
-            else {
-                Some(format!("Electric and diesel locomotive hauling {} tons", x))
-            },
         },
-        "EML"|"EMU" => match timing_load.trim() {
+        "EML" | "EMU" => match timing_load.trim() {
             "AT" => Some("EMU with accelerated timings".to_string()),
             "E" => Some("Class 458 EMU".to_string()),
             "0" => Some("Class 380 EMU".to_string()),
@@ -818,8 +1533,8 @@ fn read_timing_load<F, T>(power_type: &str, timing_load: &str, br_mark_four_coac
             "" => None,
             x => Some(format!("Class {} EMU", x)),
         },
-        "HST"       => Some("High Speed Train (IC125)".to_string()),
-        ""       => None,
+        "HST" => Some("High Speed Train (IC125)".to_string()),
+        "" => None,
         x => return Err(error_logic(CifErrorType::InvalidTrainPower(x.to_string()))),
     })
 }
@@ -841,10 +1556,33 @@ fn classes_to_bools(class: Class) -> (bool, bool) {
     (first, standard)
 }
 
-fn read_seating_class<F, T>(slice: &str, train_type: TrainType, error_logic: F) -> Result<(bool, bool), T> where F: FnOnce(CifErrorType) -> T {
+fn read_seating_class<F, T>(
+    slice: &str,
+    train_type: TrainType,
+    error_logic: F,
+) -> Result<(bool, bool), T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     let seating_class = match slice.trim() {
         "" => match train_type {
-            TrainType::Bus|TrainType::ServiceBus|TrainType::ReplacementBus|TrainType::OrdinaryPassenger|TrainType::ExpressPassenger|TrainType::InternationalPassenger|TrainType::SleeperPassenger|TrainType::InternationalSleeperPassenger|TrainType::CarCarryingPassenger|TrainType::UnadvertisedPassenger|TrainType::UnadvertisedExpressPassenger|TrainType::Staff|TrainType::EmptyPassengerAndStaff|TrainType::Mixed|TrainType::Metro|TrainType::PassengerParcels|TrainType::Ship => Class::Both,
+            TrainType::Bus
+            | TrainType::ServiceBus
+            | TrainType::ReplacementBus
+            | TrainType::OrdinaryPassenger
+            | TrainType::ExpressPassenger
+            | TrainType::InternationalPassenger
+            | TrainType::SleeperPassenger
+            | TrainType::InternationalSleeperPassenger
+            | TrainType::CarCarryingPassenger
+            | TrainType::UnadvertisedPassenger
+            | TrainType::UnadvertisedExpressPassenger
+            | TrainType::Staff
+            | TrainType::EmptyPassengerAndStaff
+            | TrainType::Mixed
+            | TrainType::Metro
+            | TrainType::PassengerParcels
+            | TrainType::Ship => Class::Both,
             _ => Class::None,
         },
         "B" => Class::Both,
@@ -856,7 +1594,10 @@ fn read_seating_class<F, T>(slice: &str, train_type: TrainType, error_logic: F) 
     Ok(classes_to_bools(seating_class))
 }
 
-fn read_sleeper_class<F, T>(slice: &str, error_logic: F) -> Result<(bool, bool), T> where F: FnOnce(CifErrorType) -> T {
+fn read_sleeper_class<F, T>(slice: &str, error_logic: F) -> Result<(bool, bool), T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     let seating_class = match slice.trim() {
         "" => Class::None,
         "B" => Class::Both,
@@ -868,8 +1609,13 @@ fn read_sleeper_class<F, T>(slice: &str, error_logic: F) -> Result<(bool, bool),
     Ok(classes_to_bools(seating_class))
 }
 
-fn read_catering<F, T>(slice: &str, error_logic: F) -> Result<(Catering, bool), T> where F: FnOnce(CifErrorType) -> T {
-    let mut catering = Catering { ..Default::default() };
+fn read_catering<F, T>(slice: &str, error_logic: F) -> Result<(Catering, bool), T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
+    let mut catering = Catering {
+        ..Default::default()
+    };
     let mut wheelchair_reservations = false;
 
     for chr in slice.chars() {
@@ -889,48 +1635,137 @@ fn read_catering<F, T>(slice: &str, error_logic: F) -> Result<(Catering, bool), 
     Ok((catering, wheelchair_reservations))
 }
 
-fn read_reservations<F, T>(slice: &str, wheelchair_reservations: bool, first_seating: bool, standard_seating: bool, first_sleepers: bool, standard_sleepers: bool, train_type: TrainType, error_logic: F) -> Result<Reservations, T> where F: FnOnce(CifErrorType) -> T {
+fn read_reservations<F, T>(
+    slice: &str,
+    wheelchair_reservations: bool,
+    first_seating: bool,
+    standard_seating: bool,
+    first_sleepers: bool,
+    standard_sleepers: bool,
+    train_type: TrainType,
+    error_logic: F,
+) -> Result<Reservations, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     match slice.trim() {
         "A" => Ok(Reservations {
-            seats: if first_seating || standard_seating { ReservationField::Mandatory } else { ReservationField::NotApplicable },
+            seats: if first_seating || standard_seating {
+                ReservationField::Mandatory
+            } else {
+                ReservationField::NotApplicable
+            },
             bicycles: ReservationField::Mandatory,
-            sleepers: if first_sleepers || standard_sleepers { ReservationField::Mandatory } else { ReservationField::NotApplicable },
-            vehicles: if train_type == TrainType::CarCarryingPassenger { ReservationField::Mandatory } else { ReservationField::NotApplicable },
+            sleepers: if first_sleepers || standard_sleepers {
+                ReservationField::Mandatory
+            } else {
+                ReservationField::NotApplicable
+            },
+            vehicles: if train_type == TrainType::CarCarryingPassenger {
+                ReservationField::Mandatory
+            } else {
+                ReservationField::NotApplicable
+            },
             wheelchairs: ReservationField::Mandatory,
         }),
         "E" => Ok(Reservations {
-            seats: if first_seating || standard_seating { ReservationField::NotMandatory } else { ReservationField::NotApplicable },
+            seats: if first_seating || standard_seating {
+                ReservationField::NotMandatory
+            } else {
+                ReservationField::NotApplicable
+            },
             bicycles: ReservationField::Mandatory,
-            sleepers: if first_sleepers || standard_sleepers { ReservationField::NotMandatory } else { ReservationField::NotApplicable },
-            vehicles: if train_type == TrainType::CarCarryingPassenger { ReservationField::Mandatory } else { ReservationField::NotApplicable },
-            wheelchairs: if wheelchair_reservations { ReservationField::Possible } else { ReservationField::NotMandatory },
+            sleepers: if first_sleepers || standard_sleepers {
+                ReservationField::NotMandatory
+            } else {
+                ReservationField::NotApplicable
+            },
+            vehicles: if train_type == TrainType::CarCarryingPassenger {
+                ReservationField::Mandatory
+            } else {
+                ReservationField::NotApplicable
+            },
+            wheelchairs: if wheelchair_reservations {
+                ReservationField::Possible
+            } else {
+                ReservationField::NotMandatory
+            },
         }),
         "R" => Ok(Reservations {
-            seats: if first_seating || standard_seating { ReservationField::Recommended } else { ReservationField::NotApplicable },
+            seats: if first_seating || standard_seating {
+                ReservationField::Recommended
+            } else {
+                ReservationField::NotApplicable
+            },
             bicycles: ReservationField::NotMandatory,
-            sleepers: if first_sleepers || standard_sleepers { ReservationField::Recommended } else { ReservationField::NotApplicable },
-            vehicles: if train_type == TrainType::CarCarryingPassenger { ReservationField::Mandatory } else { ReservationField::NotApplicable },
+            sleepers: if first_sleepers || standard_sleepers {
+                ReservationField::Recommended
+            } else {
+                ReservationField::NotApplicable
+            },
+            vehicles: if train_type == TrainType::CarCarryingPassenger {
+                ReservationField::Mandatory
+            } else {
+                ReservationField::NotApplicable
+            },
             wheelchairs: ReservationField::Recommended,
         }),
         "S" => Ok(Reservations {
-            seats: if first_seating || standard_seating { ReservationField::Possible } else { ReservationField::NotApplicable },
+            seats: if first_seating || standard_seating {
+                ReservationField::Possible
+            } else {
+                ReservationField::NotApplicable
+            },
             bicycles: ReservationField::NotMandatory,
-            sleepers: if first_sleepers || standard_sleepers { ReservationField::Possible } else { ReservationField::NotApplicable },
-            vehicles: if train_type == TrainType::CarCarryingPassenger { ReservationField::Mandatory } else { ReservationField::NotApplicable },
+            sleepers: if first_sleepers || standard_sleepers {
+                ReservationField::Possible
+            } else {
+                ReservationField::NotApplicable
+            },
+            vehicles: if train_type == TrainType::CarCarryingPassenger {
+                ReservationField::Mandatory
+            } else {
+                ReservationField::NotApplicable
+            },
             wheelchairs: ReservationField::Possible,
         }),
         "" => Ok(Reservations {
-            seats: if first_seating || standard_seating { ReservationField::Impossible } else { ReservationField::NotApplicable },
+            seats: if first_seating || standard_seating {
+                ReservationField::Impossible
+            } else {
+                ReservationField::NotApplicable
+            },
             bicycles: ReservationField::NotMandatory,
-            sleepers: if first_sleepers || standard_sleepers { ReservationField::Impossible } else { ReservationField::NotApplicable },
-            vehicles: if train_type == TrainType::CarCarryingPassenger { ReservationField::Mandatory } else { ReservationField::NotApplicable },
-            wheelchairs: if wheelchair_reservations { ReservationField::Possible } else { if first_seating || standard_seating || first_sleepers || standard_sleepers { ReservationField::Impossible } else { ReservationField::NotApplicable } },
+            sleepers: if first_sleepers || standard_sleepers {
+                ReservationField::Impossible
+            } else {
+                ReservationField::NotApplicable
+            },
+            vehicles: if train_type == TrainType::CarCarryingPassenger {
+                ReservationField::Mandatory
+            } else {
+                ReservationField::NotApplicable
+            },
+            wheelchairs: if wheelchair_reservations {
+                ReservationField::Possible
+            } else {
+                if first_seating || standard_seating || first_sleepers || standard_sleepers {
+                    ReservationField::Impossible
+                } else {
+                    ReservationField::NotApplicable
+                }
+            },
         }),
-        x => Err(error_logic(CifErrorType::InvalidReservationType(x.to_string()))),
+        x => Err(error_logic(CifErrorType::InvalidReservationType(
+            x.to_string(),
+        ))),
     }
 }
 
-fn read_brand<F, T>(slice: &str, error_logic: F) -> Result<Option<String>, T> where F: FnOnce(CifErrorType) -> T {
+fn read_brand<F, T>(slice: &str, error_logic: F) -> Result<Option<String>, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     let mut brand = None;
     for chr in slice.chars() {
         match chr {
@@ -953,40 +1788,57 @@ fn amend_train(train: &mut Train, new_train: Train) {
     train.variable_train = new_train.variable_train;
 }
 
-fn read_mandatory_wtt_time<F, T>(slice: &str, error_logic: F) -> Result<NaiveTime, T> where F: FnOnce(CifErrorType) -> T {
+fn read_mandatory_wtt_time<F, T>(slice: &str, error_logic: F) -> Result<NaiveTime, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     let wtt = NaiveTime::parse_from_str(&slice[0..4], "%H%M");
     let wtt = match wtt {
         Ok(x) => x,
         Err(x) => return Err(error_logic(CifErrorType::ChronoParseError(x))),
     };
-    Ok(wtt + match &slice[4..5] {
-        "H" => Duration::seconds(30),
-        " " => Duration::seconds(0),
-        x => return Err(error_logic(CifErrorType::InvalidMinuteFraction(x.to_string()))),
-    })
+    Ok(wtt
+        + match &slice[4..5] {
+            "H" => Duration::seconds(30),
+            " " => Duration::seconds(0),
+            x => {
+                return Err(error_logic(CifErrorType::InvalidMinuteFraction(
+                    x.to_string(),
+                )))
+            }
+        })
 }
 
-fn read_optional_wtt_time<F, T>(slice: &str, error_logic: F) -> Result<Option<NaiveTime>, T> where F: FnOnce(CifErrorType) -> T {
+fn read_optional_wtt_time<F, T>(slice: &str, error_logic: F) -> Result<Option<NaiveTime>, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     Ok(match slice {
         "     " => None,
         x => Some(read_mandatory_wtt_time(x, error_logic)?),
     })
 }
 
-fn read_vstp_time<F, T>(slice: &Option<String>, error_logic: F) -> Result<Option<NaiveTime>, T> where F: FnOnce(CifErrorType) -> T {
+fn read_vstp_time<F, T>(slice: &Option<String>, error_logic: F) -> Result<Option<NaiveTime>, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     Ok(match slice {
         Some(x) => match x.trim() {
-                "" => None,
-                x => Some(match NaiveTime::parse_from_str(x, "%H%M%S") {
-                    Ok(x) => x,
-                    Err(x) => return Err(error_logic(CifErrorType::ChronoParseError(x))),
-                }),
-            }
+            "" => None,
+            x => Some(match NaiveTime::parse_from_str(x, "%H%M%S") {
+                Ok(x) => x,
+                Err(x) => return Err(error_logic(CifErrorType::ChronoParseError(x))),
+            }),
+        },
         None => None,
     })
 }
 
-fn read_public_time<F, T>(slice: &str, error_logic: F) -> Result<Option<NaiveTime>, T> where F: FnOnce(CifErrorType) -> T {
+fn read_public_time<F, T>(slice: &str, error_logic: F) -> Result<Option<NaiveTime>, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     let pub_dep = NaiveTime::parse_from_str(slice, "%H%M");
     let pub_dep = match pub_dep {
         Ok(x) => x,
@@ -995,13 +1847,15 @@ fn read_public_time<F, T>(slice: &str, error_logic: F) -> Result<Option<NaiveTim
     // amazingly, public departure times of midnight are impossible in Britain!
     Ok(if pub_dep == NaiveTime::from_hms_opt(0, 0, 0).unwrap() {
         None
-    }
-    else {
+    } else {
         Some(pub_dep)
     })
 }
 
-fn read_allowance<F, T>(slice: &str, error_logic: F) -> Result<u32, T> where F: FnOnce(CifErrorType) -> T {
+fn read_allowance<F, T>(slice: &str, error_logic: F) -> Result<u32, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     let (eng_minutes, eng_seconds) = match (&slice[0..1], &slice[1..2], &slice[0..2]) {
         (_, _, "  ") => (Ok(0), 0),
         (_, _, " H") => (Ok(0), 30),
@@ -1011,15 +1865,29 @@ fn read_allowance<F, T>(slice: &str, error_logic: F) -> Result<u32, T> where F: 
     };
     let eng_minutes = match eng_minutes {
         Ok(x) => x,
-        Err(_) => return Err(error_logic(CifErrorType::InvalidAllowance(slice.to_string()))),
+        Err(_) => {
+            return Err(error_logic(CifErrorType::InvalidAllowance(
+                slice.to_string(),
+            )))
+        }
     };
     Ok(eng_minutes * 60 + eng_seconds)
 }
 
-fn read_activities<F, T>(slice: &str, error_logic: F) -> Result<Activities, T> where F: FnOnce(CifErrorType) -> T {
-    let mut activities = Activities { ..Default::default() };
+fn read_activities<F, T>(slice: &str, error_logic: F) -> Result<Activities, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
+    let mut activities = Activities {
+        ..Default::default()
+    };
 
-    for activity in slice.chars().chunks(2).into_iter().map(|chunk| chunk.collect::<String>()) {
+    for activity in slice
+        .chars()
+        .chunks(2)
+        .into_iter()
+        .map(|chunk| chunk.collect::<String>())
+    {
         match activity.as_str() {
             "A " => activities.other_trains_pass = true,
             "AE" => activities.attach_or_detach_assisting_loco = true,
@@ -1059,12 +1927,15 @@ fn read_activities<F, T>(slice: &str, error_logic: F) -> Result<Activities, T> w
             "  " => (),
             x => return Err(error_logic(CifErrorType::InvalidActivity(x.to_string()))),
         };
-    };
+    }
 
     Ok(activities)
 }
 
-fn read_train_status<F, T>(slice: &str, error_logic: F) -> Result<TrainStatus, T> where F: FnOnce(CifErrorType) -> T {
+fn read_train_status<F, T>(slice: &str, error_logic: F) -> Result<TrainStatus, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     Ok(match slice.trim() {
         "B" => TrainStatus::Bus,
         "F" => TrainStatus::Freight,
@@ -1081,7 +1952,10 @@ fn read_train_status<F, T>(slice: &str, error_logic: F) -> Result<TrainStatus, T
     })
 }
 
-fn read_train_operator<F, T>(slice: &str, error_logic: F) -> Result<Option<String>, T> where F: FnOnce(CifErrorType) -> T {
+fn read_train_operator<F, T>(slice: &str, error_logic: F) -> Result<Option<String>, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     Ok(match slice {
         "EU" => Some("Virtual European Path".to_string()),
         "AR" => Some("Alliance Rail".to_string()),
@@ -1133,11 +2007,18 @@ fn read_train_operator<F, T>(slice: &str, error_logic: F) -> Result<Option<Strin
         "YG" => Some("Hanson & Hall".to_string()),
         "ZZ" => None,
         "#|" => None,
-        x => return Err(error_logic(CifErrorType::InvalidTrainOperator(x.to_string()))),
+        x => {
+            return Err(error_logic(CifErrorType::InvalidTrainOperator(
+                x.to_string(),
+            )))
+        }
     })
 }
 
-fn read_ats_code<F, T>(slice: &str, error_logic: F) -> Result<bool, T> where F: FnOnce(CifErrorType) -> T {
+fn read_ats_code<F, T>(slice: &str, error_logic: F) -> Result<bool, T>
+where
+    F: FnOnce(CifErrorType) -> T,
+{
     match slice {
         "Y" => Ok(true),
         "N" => Ok(false),
@@ -1150,62 +2031,158 @@ fn get_working_time(location: &TrainLocation) -> (NaiveTime, u8) {
     // checked for validity as they are written
     match location.working_dep {
         Some(x) => (x, location.working_dep_day.unwrap()),
-        None => (location.working_pass.unwrap(), location.working_pass_day.unwrap()),
+        None => (
+            location.working_pass.unwrap(),
+            location.working_pass_day.unwrap(),
+        ),
     }
 }
 
-fn calculate_day(time: &Option<NaiveTime>, last_wtt_time: &NaiveTime, last_wtt_day: u8) -> Option<u8> {
+fn calculate_day(
+    time: &Option<NaiveTime>,
+    last_wtt_time: &NaiveTime,
+    last_wtt_day: u8,
+) -> Option<u8> {
     match time {
-        Some(x) => if x < last_wtt_time {
-            Some(last_wtt_day + 1)
+        Some(x) => {
+            if x < last_wtt_time {
+                Some(last_wtt_day + 1)
+            } else {
+                Some(last_wtt_day)
+            }
         }
-        else {
-            Some(last_wtt_day)
-        },
         None => None,
     }
 }
 
 impl CifImporter {
     pub fn new() -> CifImporter {
-        CifImporter { ..Default::default() }
+        CifImporter {
+            ..Default::default()
+        }
     }
 
-    fn delete_unwritten_assocs(&mut self, main_train_id: &str, location: &str, location_suffix: &Option<String>, other_train_id: &str, begin: &DateTime::<Tz>, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool, use_rev: bool) {
-        let old_assoc = self.unwritten_assocs.remove(&(main_train_id.to_string(), location.to_string(), location_suffix.clone()));
+    fn delete_unwritten_assocs(
+        &mut self,
+        main_train_id: &str,
+        location: &str,
+        location_suffix: &Option<String>,
+        other_train_id: &str,
+        begin: &DateTime<Tz>,
+        other_train_location_suffix: &Option<String>,
+        stp_modification_type: &ModificationType,
+        is_stp: bool,
+        use_rev: bool,
+    ) {
+        let old_assoc = self.unwritten_assocs.remove(&(
+            main_train_id.to_string(),
+            location.to_string(),
+            location_suffix.clone(),
+        ));
         let mut old_assoc = match old_assoc {
             None => vec![],
             Some(x) => x,
         };
 
         if *stp_modification_type == ModificationType::Insert {
-            old_assoc.retain(|(assoc, _category)| !is_matching_assoc_for_modify_insertion(assoc, other_train_id, &begin, &other_train_location_suffix, is_stp, use_rev));
-        }
-        else {
+            old_assoc.retain(|(assoc, _category)| {
+                !is_matching_assoc_for_modify_insertion(
+                    assoc,
+                    other_train_id,
+                    &begin,
+                    &other_train_location_suffix,
+                    is_stp,
+                    use_rev,
+                )
+            });
+        } else {
             for (ref mut assoc, ref _category) in old_assoc.iter_mut() {
-                delete_single_assoc_replacements_cancellations(assoc, other_train_id, &begin, &other_train_location_suffix, &stp_modification_type, use_rev);
+                delete_single_assoc_replacements_cancellations(
+                    assoc,
+                    other_train_id,
+                    &begin,
+                    &other_train_location_suffix,
+                    &stp_modification_type,
+                    use_rev,
+                );
             }
         }
 
-        self.unwritten_assocs.insert((main_train_id.to_string(), location.to_string(), location_suffix.clone()), old_assoc);
+        self.unwritten_assocs.insert(
+            (
+                main_train_id.to_string(),
+                location.to_string(),
+                location_suffix.clone(),
+            ),
+            old_assoc,
+        );
     }
 
-    fn cancel_unwritten_assocs(&mut self, main_train_id: &str, location: &str, location_suffix: &Option<String>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, other_train_location_suffix: &Option<String>, use_rev: bool) {
-        let old_assoc = self.unwritten_assocs.remove(&(main_train_id.to_string(), location.to_string(), location_suffix.clone()));
+    fn cancel_unwritten_assocs(
+        &mut self,
+        main_train_id: &str,
+        location: &str,
+        location_suffix: &Option<String>,
+        other_train_id: &str,
+        begin: &DateTime<Tz>,
+        end: &DateTime<Tz>,
+        days_of_week: &DaysOfWeek,
+        other_train_location_suffix: &Option<String>,
+        use_rev: bool,
+    ) {
+        let old_assoc = self.unwritten_assocs.remove(&(
+            main_train_id.to_string(),
+            location.to_string(),
+            location_suffix.clone(),
+        ));
         let mut old_assoc = match old_assoc {
             None => vec![],
             Some(x) => x,
         };
 
         for (ref mut assoc, ref _category) in old_assoc.iter_mut() {
-            cancel_single_assoc(assoc, other_train_id, begin, end, days_of_week, other_train_location_suffix, use_rev);
+            cancel_single_assoc(
+                assoc,
+                other_train_id,
+                begin,
+                end,
+                days_of_week,
+                other_train_location_suffix,
+                use_rev,
+            );
         }
 
-        self.unwritten_assocs.insert((main_train_id.to_string(), location.to_string(), location_suffix.clone()), old_assoc);
+        self.unwritten_assocs.insert(
+            (
+                main_train_id.to_string(),
+                location.to_string(),
+                location_suffix.clone(),
+            ),
+            old_assoc,
+        );
     }
 
-    fn amend_unwritten_assocs(&mut self, main_train_id: &str, location: &str, location_suffix: &Option<String>, other_train_id: &str, begin: &DateTime::<Tz>, end: &DateTime::<Tz>, days_of_week: &DaysOfWeek, other_train_location_suffix: &Option<String>, stp_modification_type: &ModificationType, is_stp: bool, day_diff: i8, for_passengers: bool, category: &AssociationCategory) {
-        let old_assoc = self.unwritten_assocs.remove(&(main_train_id.to_string(), location.to_string(), location_suffix.clone()));
+    fn amend_unwritten_assocs(
+        &mut self,
+        main_train_id: &str,
+        location: &str,
+        location_suffix: &Option<String>,
+        other_train_id: &str,
+        begin: &DateTime<Tz>,
+        end: &DateTime<Tz>,
+        days_of_week: &DaysOfWeek,
+        other_train_location_suffix: &Option<String>,
+        stp_modification_type: &ModificationType,
+        is_stp: bool,
+        day_diff: i8,
+        for_passengers: bool,
+        category: &AssociationCategory,
+    ) {
+        let old_assoc = self.unwritten_assocs.remove(&(
+            main_train_id.to_string(),
+            location.to_string(),
+            location_suffix.clone(),
+        ));
         let mut old_assoc = match old_assoc {
             None => vec![],
             Some(x) => x,
@@ -1213,48 +2190,125 @@ impl CifImporter {
 
         for (ref mut assoc, ref mut old_category) in old_assoc.iter_mut() {
             if *stp_modification_type == ModificationType::Insert {
-                if is_matching_assoc_for_modify_insertion(assoc, other_train_id, begin, other_train_location_suffix, is_stp, false) {
-                    amend_individual_assoc(assoc, begin, end, days_of_week, day_diff, for_passengers);
+                if is_matching_assoc_for_modify_insertion(
+                    assoc,
+                    other_train_id,
+                    begin,
+                    other_train_location_suffix,
+                    is_stp,
+                    false,
+                ) {
+                    amend_individual_assoc(
+                        assoc,
+                        begin,
+                        end,
+                        days_of_week,
+                        day_diff,
+                        for_passengers,
+                    );
                     *old_category = *category
                 }
-            }
-            else {
-                amend_single_assoc_replacements_cancellations(assoc, other_train_id, begin, end, days_of_week, other_train_location_suffix, stp_modification_type, day_diff, for_passengers);
+            } else {
+                amend_single_assoc_replacements_cancellations(
+                    assoc,
+                    other_train_id,
+                    begin,
+                    end,
+                    days_of_week,
+                    other_train_location_suffix,
+                    stp_modification_type,
+                    day_diff,
+                    for_passengers,
+                );
             }
         }
 
-        self.unwritten_assocs.insert((main_train_id.to_string(), location.to_string(), location_suffix.clone()), old_assoc);
+        self.unwritten_assocs.insert(
+            (
+                main_train_id.to_string(),
+                location.to_string(),
+                location_suffix.clone(),
+            ),
+            old_assoc,
+        );
     }
 
-    fn replace_unwritten_assocs(&mut self, main_train_id: &str, location: &str, location_suffix: &Option<String>, other_train_id: &str, other_train_location_suffix: &Option<String>, new_assoc: &AssociationNode) {
-        let old_assoc = self.unwritten_assocs.remove(&(main_train_id.to_string(), location.to_string(), location_suffix.clone()));
+    fn replace_unwritten_assocs(
+        &mut self,
+        main_train_id: &str,
+        location: &str,
+        location_suffix: &Option<String>,
+        other_train_id: &str,
+        other_train_location_suffix: &Option<String>,
+        new_assoc: &AssociationNode,
+    ) {
+        let old_assoc = self.unwritten_assocs.remove(&(
+            main_train_id.to_string(),
+            location.to_string(),
+            location_suffix.clone(),
+        ));
         let mut old_assoc = match old_assoc {
             None => vec![],
             Some(x) => x,
         };
 
         for (ref mut assoc, ref _category) in old_assoc.iter_mut() {
-            if other_train_id == assoc.other_train_id && *other_train_location_suffix == assoc.other_train_location_id_suffix {
+            if other_train_id == assoc.other_train_id
+                && *other_train_location_suffix == assoc.other_train_location_id_suffix
+            {
                 // check for no overlapping days at all
-                if !check_date_applicability(&assoc.validity[0], &assoc.days, new_assoc.validity[0].valid_begin, new_assoc.validity[0].valid_end, &new_assoc.days) {
+                if !check_date_applicability(
+                    &assoc.validity[0],
+                    &assoc.days,
+                    new_assoc.validity[0].valid_begin,
+                    new_assoc.validity[0].valid_end,
+                    &new_assoc.days,
+                ) {
                     continue;
                 }
                 assoc.replacements.push(new_assoc.clone());
             }
         }
 
-        self.unwritten_assocs.insert((main_train_id.to_string(), location.to_string(), location_suffix.clone()), old_assoc);
+        self.unwritten_assocs.insert(
+            (
+                main_train_id.to_string(),
+                location.to_string(),
+                location_suffix.clone(),
+            ),
+            old_assoc,
+        );
     }
 
-    fn get_last_train<'a>(&'a mut self, schedule: &'a mut Schedule, number: u64, record_type: &str) -> Result<&'a mut Train, CifError> {
+    fn get_last_train<'a>(
+        &'a mut self,
+        schedule: &'a mut Schedule,
+        number: u64,
+        record_type: &str,
+    ) -> Result<&'a mut Train, CifError> {
         let (main_train_id, begin, stp_modification_type, is_stp) = match &self.last_train {
             Some(x) => x,
-            None => return Err(CifError { error_type: CifErrorType::UnexpectedRecordType(record_type.to_string(), "No preceding BS".to_string()), line: number, column: 0 } ),
+            None => {
+                return Err(CifError {
+                    error_type: CifErrorType::UnexpectedRecordType(
+                        record_type.to_string(),
+                        "No preceding BS".to_string(),
+                    ),
+                    line: number,
+                    column: 0,
+                })
+            }
         };
 
-        let trains = match (schedule.trains.get_mut(main_train_id), &stp_modification_type) {
+        let trains = match (
+            schedule.trains.get_mut(main_train_id),
+            &stp_modification_type,
+        ) {
             (Some(x), _) => x,
-            (None, ModificationType::Amend) => match self.orphaned_overlay_trains.get_mut(&(main_train_id.clone(), begin.clone())) {
+            (None, ModificationType::Amend) => match self
+                .orphaned_overlay_trains
+                .get_mut(&(main_train_id.clone(), begin.clone()))
+            {
                 Some(x) => return Ok(x),
                 None => panic!("Unable to find last-written train, even in orphaned overlays"),
             },
@@ -1262,15 +2316,24 @@ impl CifImporter {
         };
 
         let train = match (&stp_modification_type, &is_stp) {
-            (ModificationType::Insert, false) => trains.iter_mut().find(|train| train.source.unwrap() == TrainSource::LongTerm && train.validity[0].valid_begin == *begin),
-            (ModificationType::Insert, true) => trains.iter_mut().find(|train| train.source.unwrap() == TrainSource::ShortTerm && train.validity[0].valid_begin == *begin),
+            (ModificationType::Insert, false) => trains.iter_mut().find(|train| {
+                train.source.unwrap() == TrainSource::LongTerm
+                    && train.validity[0].valid_begin == *begin
+            }),
+            (ModificationType::Insert, true) => trains.iter_mut().find(|train| {
+                train.source.unwrap() == TrainSource::ShortTerm
+                    && train.validity[0].valid_begin == *begin
+            }),
             (ModificationType::Amend, _) => find_replacement_train(trains, begin),
             (ModificationType::Delete, _) => panic!("Unexpected train modification type"),
         };
 
         Ok(match (train, &stp_modification_type) {
             (Some(x), _) => x,
-            (None, ModificationType::Amend) => match self.orphaned_overlay_trains.get_mut(&(main_train_id.clone(), begin.clone())) {
+            (None, ModificationType::Amend) => match self
+                .orphaned_overlay_trains
+                .get_mut(&(main_train_id.clone(), begin.clone()))
+            {
                 Some(x) => x,
                 None => panic!("Unable to find last-written train, even in orphaned overlays"),
             },
@@ -1278,18 +2341,42 @@ impl CifImporter {
         })
     }
 
-    fn validate_change_en_route_location(&self, location_id: &str, location_suffix: &Option<String>, number: u64, column: usize) -> Result<(), CifError> {
+    fn validate_change_en_route_location(
+        &self,
+        location_id: &str,
+        location_suffix: &Option<String>,
+        number: u64,
+        column: usize,
+    ) -> Result<(), CifError> {
         Ok(match self.change_en_route {
-            Some(_) => if (location_id.to_string(), location_suffix.clone()) != *self.cr_location.as_ref().unwrap() {
-                return Err(CifError { error_type: CifErrorType::ChangeEnRouteLocationUnmatched((location_id.to_string(), location_suffix.clone()), self.cr_location.clone().unwrap()), line: number, column: column });
-            },
+            Some(_) => {
+                if (location_id.to_string(), location_suffix.clone())
+                    != *self.cr_location.as_ref().unwrap()
+                {
+                    return Err(CifError {
+                        error_type: CifErrorType::ChangeEnRouteLocationUnmatched(
+                            (location_id.to_string(), location_suffix.clone()),
+                            self.cr_location.clone().unwrap(),
+                        ),
+                        line: number,
+                        column: column,
+                    });
+                }
+            }
             None => (),
         })
     }
 
-    fn read_association(&mut self, line: &str, mut schedule: Schedule, number: u64) -> Result<Schedule, CifError> {
-        let modification_type = read_modification_type(&line[2..3], produce_cif_error_closure(number, 2))?;
-        let (stp_modification_type, is_stp) = read_stp_indicator(&line[79..80], produce_cif_error_closure(number, 79))?;
+    fn read_association(
+        &mut self,
+        line: &str,
+        mut schedule: Schedule,
+        number: u64,
+    ) -> Result<Schedule, CifError> {
+        let modification_type =
+            read_modification_type(&line[2..3], produce_cif_error_closure(number, 2))?;
+        let (stp_modification_type, is_stp) =
+            read_stp_indicator(&line[79..80], produce_cif_error_closure(number, 79))?;
 
         let main_train_id = &line[3..9];
         let other_train_id = &line[9..15];
@@ -1303,12 +2390,58 @@ impl CifImporter {
         // Note these are NOT the same as STP cancels and indeed handled completely differently
         if modification_type == ModificationType::Delete {
             // first find any committed associations and delete
-            trains_delete_assoc(schedule.trains.get_mut(main_train_id).as_mut().unwrap_or(&mut &mut vec![]), &other_train_id, &begin, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp);
-            trains_delete_rev_assoc(schedule.trains.get_mut(other_train_id).as_mut().unwrap_or(&mut &mut vec![]), &main_train_id, &begin, &location, &other_train_location_suffix, &location_suffix, &stp_modification_type, is_stp);
+            trains_delete_assoc(
+                schedule
+                    .trains
+                    .get_mut(main_train_id)
+                    .as_mut()
+                    .unwrap_or(&mut &mut vec![]),
+                &other_train_id,
+                &begin,
+                &location,
+                &location_suffix,
+                &other_train_location_suffix,
+                &stp_modification_type,
+                is_stp,
+            );
+            trains_delete_rev_assoc(
+                schedule
+                    .trains
+                    .get_mut(other_train_id)
+                    .as_mut()
+                    .unwrap_or(&mut &mut vec![]),
+                &main_train_id,
+                &begin,
+                &location,
+                &other_train_location_suffix,
+                &location_suffix,
+                &stp_modification_type,
+                is_stp,
+            );
 
             // now delete from unwritten associations
-            self.delete_unwritten_assocs(main_train_id, location, &location_suffix, other_train_id, &begin, &other_train_location_suffix, &stp_modification_type, is_stp, false);
-            self.delete_unwritten_assocs(other_train_id, location, &other_train_location_suffix, main_train_id, &begin, &location_suffix, &stp_modification_type, is_stp, true);
+            self.delete_unwritten_assocs(
+                main_train_id,
+                location,
+                &location_suffix,
+                other_train_id,
+                &begin,
+                &other_train_location_suffix,
+                &stp_modification_type,
+                is_stp,
+                false,
+            );
+            self.delete_unwritten_assocs(
+                other_train_id,
+                location,
+                &other_train_location_suffix,
+                main_train_id,
+                &begin,
+                &location_suffix,
+                &stp_modification_type,
+                is_stp,
+                true,
+            );
 
             return Ok(schedule);
         }
@@ -1318,14 +2451,62 @@ impl CifImporter {
 
         // Now we handle STP cancellations; these are where long-running
         // associations are deleted as a one-off
-        if stp_modification_type == ModificationType::Delete && modification_type == ModificationType::Insert {
+        if stp_modification_type == ModificationType::Delete
+            && modification_type == ModificationType::Insert
+        {
             // cancel written ones
-            trains_cancel_assoc(schedule.trains.get_mut(main_train_id).as_mut().unwrap_or(&mut &mut vec![]), &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix);
-            trains_cancel_rev_assoc(schedule.trains.get_mut(other_train_id).as_mut().unwrap_or(&mut &mut vec![]), &main_train_id, &begin, &end, &days_of_week, &location, &other_train_location_suffix, &location_suffix);
+            trains_cancel_assoc(
+                schedule
+                    .trains
+                    .get_mut(main_train_id)
+                    .as_mut()
+                    .unwrap_or(&mut &mut vec![]),
+                &other_train_id,
+                &begin,
+                &end,
+                &days_of_week,
+                &location,
+                &location_suffix,
+                &other_train_location_suffix,
+            );
+            trains_cancel_rev_assoc(
+                schedule
+                    .trains
+                    .get_mut(other_train_id)
+                    .as_mut()
+                    .unwrap_or(&mut &mut vec![]),
+                &main_train_id,
+                &begin,
+                &end,
+                &days_of_week,
+                &location,
+                &other_train_location_suffix,
+                &location_suffix,
+            );
 
             // now cancel from unwritten associations
-            self.cancel_unwritten_assocs(main_train_id, location, &location_suffix, other_train_id, &begin, &end, &days_of_week, &other_train_location_suffix, false);
-            self.cancel_unwritten_assocs(other_train_id, location, &other_train_location_suffix, main_train_id, &begin, &end, &days_of_week, &location_suffix, true);
+            self.cancel_unwritten_assocs(
+                main_train_id,
+                location,
+                &location_suffix,
+                other_train_id,
+                &begin,
+                &end,
+                &days_of_week,
+                &other_train_location_suffix,
+                false,
+            );
+            self.cancel_unwritten_assocs(
+                other_train_id,
+                location,
+                &other_train_location_suffix,
+                main_train_id,
+                &begin,
+                &end,
+                &days_of_week,
+                &location_suffix,
+                true,
+            );
 
             return Ok(schedule);
         }
@@ -1334,19 +2515,37 @@ impl CifImporter {
             "S" => 0,
             "N" => 1,
             "P" => -1,
-            x => return Err(CifError { error_type: CifErrorType::InvalidAssociationDateIndicator(x.to_string()), line: number, column: 36 } ),
+            x => {
+                return Err(CifError {
+                    error_type: CifErrorType::InvalidAssociationDateIndicator(x.to_string()),
+                    line: number,
+                    column: 36,
+                })
+            }
         };
         let for_passengers = match &line[47..48] {
             "P" => true,
             "O" => false,
-            x => return Err(CifError { error_type: CifErrorType::InvalidAssociationType(x.to_string()), line: number, column: 47 } ),
+            x => {
+                return Err(CifError {
+                    error_type: CifErrorType::InvalidAssociationType(x.to_string()),
+                    line: number,
+                    column: 47,
+                })
+            }
         };
 
         let category = match &line[34..36] {
             "JJ" => AssociationCategory::Join,
             "VV" => AssociationCategory::Divide,
             "NP" => AssociationCategory::Next,
-            x => return Err(CifError { error_type: CifErrorType::InvalidAssociationCategory(x.to_string()), line: number, column: 34 } ),
+            x => {
+                return Err(CifError {
+                    error_type: CifErrorType::InvalidAssociationCategory(x.to_string()),
+                    line: number,
+                    column: 34,
+                })
+            }
         };
 
         let rev_days_of_week = rev_days(&days_of_week, day_diff);
@@ -1356,17 +2555,79 @@ impl CifImporter {
             AssociationCategory::Join => AssociationCategory::IsJoinedToBy,
             AssociationCategory::Divide => AssociationCategory::DividesFrom,
             AssociationCategory::Next => AssociationCategory::FormsFrom,
-            _ => panic!("Invalid association category")
+            _ => panic!("Invalid association category"),
         };
 
         if modification_type == ModificationType::Amend {
             // first find any committed associations and modify
-            trains_amend_assoc(schedule.trains.get_mut(main_train_id).as_mut().unwrap_or(&mut &mut vec![]), &other_train_id, &begin, &end, &days_of_week, &location, &location_suffix, &other_train_location_suffix, &stp_modification_type, is_stp, day_diff, for_passengers);
-            trains_amend_rev_assoc(schedule.trains.get_mut(other_train_id).as_mut().unwrap_or(&mut &mut vec![]), &main_train_id, &rev_begin, &rev_end, &rev_days_of_week, &location, &other_train_location_suffix, &location_suffix, &stp_modification_type, is_stp, -day_diff, for_passengers);
+            trains_amend_assoc(
+                schedule
+                    .trains
+                    .get_mut(main_train_id)
+                    .as_mut()
+                    .unwrap_or(&mut &mut vec![]),
+                &other_train_id,
+                &begin,
+                &end,
+                &days_of_week,
+                &location,
+                &location_suffix,
+                &other_train_location_suffix,
+                &stp_modification_type,
+                is_stp,
+                day_diff,
+                for_passengers,
+            );
+            trains_amend_rev_assoc(
+                schedule
+                    .trains
+                    .get_mut(other_train_id)
+                    .as_mut()
+                    .unwrap_or(&mut &mut vec![]),
+                &main_train_id,
+                &rev_begin,
+                &rev_end,
+                &rev_days_of_week,
+                &location,
+                &other_train_location_suffix,
+                &location_suffix,
+                &stp_modification_type,
+                is_stp,
+                -day_diff,
+                for_passengers,
+            );
 
             // now amend unwritten associations
-            self.amend_unwritten_assocs(main_train_id, location, &location_suffix, other_train_id, &begin, &end, &days_of_week, &other_train_location_suffix, &stp_modification_type, is_stp, day_diff, for_passengers, &category);
-            self.amend_unwritten_assocs(other_train_id, location, &other_train_location_suffix, main_train_id, &rev_begin, &rev_end, &rev_days_of_week, &location_suffix, &stp_modification_type, is_stp, -day_diff, for_passengers, &rev_category);
+            self.amend_unwritten_assocs(
+                main_train_id,
+                location,
+                &location_suffix,
+                other_train_id,
+                &begin,
+                &end,
+                &days_of_week,
+                &other_train_location_suffix,
+                &stp_modification_type,
+                is_stp,
+                day_diff,
+                for_passengers,
+                &category,
+            );
+            self.amend_unwritten_assocs(
+                other_train_id,
+                location,
+                &other_train_location_suffix,
+                main_train_id,
+                &rev_begin,
+                &rev_end,
+                &rev_days_of_week,
+                &location_suffix,
+                &stp_modification_type,
+                is_stp,
+                -day_diff,
+                for_passengers,
+                &rev_category,
+            );
 
             return Ok(schedule);
         }
@@ -1384,7 +2645,11 @@ impl CifImporter {
             days: days_of_week,
             day_diff,
             for_passengers,
-            source: Some(if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }),
+            source: Some(if is_stp {
+                TrainSource::ShortTerm
+            } else {
+                TrainSource::LongTerm
+            }),
         };
 
         let new_rev_assoc = AssociationNode {
@@ -1399,25 +2664,80 @@ impl CifImporter {
             days: rev_days_of_week,
             day_diff: -day_diff,
             for_passengers,
-            source: Some(if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }),
+            source: Some(if is_stp {
+                TrainSource::ShortTerm
+            } else {
+                TrainSource::LongTerm
+            }),
         };
 
-
-        if modification_type == ModificationType::Insert && stp_modification_type == ModificationType::Insert {
+        if modification_type == ModificationType::Insert
+            && stp_modification_type == ModificationType::Insert
+        {
             // As trains might not all have appeared yet, we temporarily add to unwritten_assocs
-            self.unwritten_assocs.entry((main_train_id.to_string(), location.to_string(), location_suffix)).or_insert(vec![]).push((new_assoc, category));
-            self.unwritten_assocs.entry((other_train_id.to_string(), location.to_string(), other_train_location_suffix)).or_insert(vec![]).push((new_rev_assoc, rev_category));
+            self.unwritten_assocs
+                .entry((
+                    main_train_id.to_string(),
+                    location.to_string(),
+                    location_suffix,
+                ))
+                .or_insert(vec![])
+                .push((new_assoc, category));
+            self.unwritten_assocs
+                .entry((
+                    other_train_id.to_string(),
+                    location.to_string(),
+                    other_train_location_suffix,
+                ))
+                .or_insert(vec![])
+                .push((new_rev_assoc, rev_category));
 
             return Ok(schedule);
         }
 
         if stp_modification_type == ModificationType::Amend {
             // first find any committed associations and modify
-            trains_replace_assoc(schedule.trains.get_mut(main_train_id).as_mut().unwrap_or(&mut &mut vec![]), &other_train_id, &location, &location_suffix, &other_train_location_suffix, &new_assoc);
-            trains_replace_rev_assoc(schedule.trains.get_mut(other_train_id).as_mut().unwrap_or(&mut &mut vec![]), &main_train_id, &location, &other_train_location_suffix, &location_suffix, &new_rev_assoc);
+            trains_replace_assoc(
+                schedule
+                    .trains
+                    .get_mut(main_train_id)
+                    .as_mut()
+                    .unwrap_or(&mut &mut vec![]),
+                &other_train_id,
+                &location,
+                &location_suffix,
+                &other_train_location_suffix,
+                &new_assoc,
+            );
+            trains_replace_rev_assoc(
+                schedule
+                    .trains
+                    .get_mut(other_train_id)
+                    .as_mut()
+                    .unwrap_or(&mut &mut vec![]),
+                &main_train_id,
+                &location,
+                &other_train_location_suffix,
+                &location_suffix,
+                &new_rev_assoc,
+            );
 
-            self.replace_unwritten_assocs(&main_train_id, &location, &location_suffix, &other_train_id, &other_train_location_suffix, &new_assoc);
-            self.replace_unwritten_assocs(&other_train_id, &location, &other_train_location_suffix, &main_train_id, &location_suffix, &new_rev_assoc);
+            self.replace_unwritten_assocs(
+                &main_train_id,
+                &location,
+                &location_suffix,
+                &other_train_id,
+                &other_train_location_suffix,
+                &new_assoc,
+            );
+            self.replace_unwritten_assocs(
+                &other_train_id,
+                &location,
+                &other_train_location_suffix,
+                &main_train_id,
+                &location_suffix,
+                &new_rev_assoc,
+            );
 
             return Ok(schedule);
         }
@@ -1425,9 +2745,16 @@ impl CifImporter {
         Ok(schedule)
     }
 
-    fn read_basic_schedule(&mut self, line: &str, mut schedule: Schedule, number: u64) -> Result<Schedule, CifError> {
-        let modification_type = read_modification_type(&line[2..3], produce_cif_error_closure(number, 2))?;
-        let (stp_modification_type, is_stp) = read_stp_indicator(&line[79..80], produce_cif_error_closure(number, 79))?;
+    fn read_basic_schedule(
+        &mut self,
+        line: &str,
+        mut schedule: Schedule,
+        number: u64,
+    ) -> Result<Schedule, CifError> {
+        let modification_type =
+            read_modification_type(&line[2..3], produce_cif_error_closure(number, 2))?;
+        let (stp_modification_type, is_stp) =
+            read_stp_indicator(&line[79..80], produce_cif_error_closure(number, 79))?;
 
         let main_train_id = &line[3..9];
         let begin = read_date(&line[9..15], produce_cif_error_closure(number, 9))?;
@@ -1446,23 +2773,38 @@ impl CifImporter {
                 // first we delete main trains
                 old_trains.retain(|train| {
                     match is_stp {
-                        false => train.source.unwrap() != TrainSource::LongTerm || train.validity[0].valid_begin != begin, // delete the entire train for deleted inserts
-                        true => train.source.unwrap() != TrainSource::ShortTerm || train.validity[0].valid_begin != begin,
+                        false => {
+                            train.source.unwrap() != TrainSource::LongTerm
+                                || train.validity[0].valid_begin != begin
+                        } // delete the entire train for deleted inserts
+                        true => {
+                            train.source.unwrap() != TrainSource::ShortTerm
+                                || train.validity[0].valid_begin != begin
+                        }
                     }
                 });
-            }
-            else {
+            } else {
                 // now we clean up modifications/cancellations
                 for ref mut train in old_trains.iter_mut() {
                     match stp_modification_type {
-                        ModificationType::Insert => panic!("Insert found where Amend or Cancel expected"),
-                        ModificationType::Amend => train.replacements.retain(|replacement| replacement.validity[0].valid_begin != begin),
-                        ModificationType::Delete => train.cancellations.retain(|(cancellation, _days_of_week)| cancellation.valid_begin != begin),
+                        ModificationType::Insert => {
+                            panic!("Insert found where Amend or Cancel expected")
+                        }
+                        ModificationType::Amend => train
+                            .replacements
+                            .retain(|replacement| replacement.validity[0].valid_begin != begin),
+                        ModificationType::Delete => {
+                            train.cancellations.retain(|(cancellation, _days_of_week)| {
+                                cancellation.valid_begin != begin
+                            })
+                        }
                     }
                 }
             }
 
-            schedule.trains.insert(main_train_id.to_string(), old_trains);
+            schedule
+                .trains
+                .insert(main_train_id.to_string(), old_trains);
 
             return Ok(schedule);
         }
@@ -1472,7 +2814,9 @@ impl CifImporter {
 
         // Now we handle STP cancellations; these are where long-running
         // trains are deleted as a one-off
-        if stp_modification_type == ModificationType::Delete && modification_type == ModificationType::Insert {
+        if stp_modification_type == ModificationType::Delete
+            && modification_type == ModificationType::Insert
+        {
             let old_trains = schedule.trains.remove(main_train_id);
             let mut old_trains = match old_trains {
                 None => return Ok(schedule),
@@ -1481,7 +2825,13 @@ impl CifImporter {
 
             // we cancel main trains
             for train in old_trains.iter_mut() {
-                if !check_date_applicability(&train.validity[0], &train.days_of_week, begin, end, &days_of_week) {
+                if !check_date_applicability(
+                    &train.validity[0],
+                    &train.days_of_week,
+                    begin,
+                    end,
+                    &days_of_week,
+                ) {
                     continue;
                 }
                 let new_cancel = TrainValidityPeriod {
@@ -1491,48 +2841,85 @@ impl CifImporter {
                 train.cancellations.push((new_cancel, days_of_week.clone()))
             }
 
-            schedule.trains.insert(main_train_id.to_string(), old_trains);
+            schedule
+                .trains
+                .insert(main_train_id.to_string(), old_trains);
 
             return Ok(schedule);
         }
 
         let train_status = read_train_status(&line[29..30], produce_cif_error_closure(number, 29))?;
 
-        let train_type = match read_train_type(&line[30..32], produce_cif_error_closure(number, 30))? {
-            Some(x) => x,
-            None => match train_status {
-                TrainStatus::Bus => TrainType::Bus,
-                TrainStatus::Freight => TrainType::Freight,
-                TrainStatus::PassengerParcels => TrainType::PassengerParcels,
-                TrainStatus::Ship => TrainType::Ship,
-                TrainStatus::Trip => TrainType::Trip,
-                TrainStatus::StpPassengerParcels => TrainType::PassengerParcels,
-                TrainStatus::StpFreight => TrainType::Freight,
-                TrainStatus::StpTrip => TrainType::Trip,
-                TrainStatus::StpShip => TrainType::Ship,
-                TrainStatus::StpBus => TrainType::Bus,
-                TrainStatus::VstpNone => return Err(CifError { error_type: CifErrorType::InvalidTrainStatus(format!("{:#?}", train_status)), line: number, column: 29 } ),
-            },
-        };
+        let train_type =
+            match read_train_type(&line[30..32], produce_cif_error_closure(number, 30))? {
+                Some(x) => x,
+                None => match train_status {
+                    TrainStatus::Bus => TrainType::Bus,
+                    TrainStatus::Freight => TrainType::Freight,
+                    TrainStatus::PassengerParcels => TrainType::PassengerParcels,
+                    TrainStatus::Ship => TrainType::Ship,
+                    TrainStatus::Trip => TrainType::Trip,
+                    TrainStatus::StpPassengerParcels => TrainType::PassengerParcels,
+                    TrainStatus::StpFreight => TrainType::Freight,
+                    TrainStatus::StpTrip => TrainType::Trip,
+                    TrainStatus::StpShip => TrainType::Ship,
+                    TrainStatus::StpBus => TrainType::Bus,
+                    TrainStatus::VstpNone => {
+                        return Err(CifError {
+                            error_type: CifErrorType::InvalidTrainStatus(format!(
+                                "{:#?}",
+                                train_status
+                            )),
+                            line: number,
+                            column: 29,
+                        })
+                    }
+                },
+            };
 
         let public_id = &line[32..36];
         let headcode = read_optional_string(&line[36..40]);
         let service_group = &line[41..49];
 
-        let power_type = read_power_type(&line[50..53], &line[53..57], produce_cif_error_closure(number, 50))?;
+        let power_type = read_power_type(
+            &line[50..53],
+            &line[53..57],
+            produce_cif_error_closure(number, 50),
+        )?;
         let speed_m_per_s = read_speed(&line[57..60], produce_cif_error_closure(number, 57))?;
 
-        let (operating_characteristics, runs_as_required) = read_operating_characteristics(&line[60..66], produce_cif_error_closure(number, 60))?;
+        let (operating_characteristics, runs_as_required) =
+            read_operating_characteristics(&line[60..66], produce_cif_error_closure(number, 60))?;
 
-        let timing_load_str = read_timing_load(&line[50..53], &line[53..57], operating_characteristics.br_mark_four_coaches, produce_cif_error_closure(number, 50))?;
+        let timing_load_str = read_timing_load(
+            &line[50..53],
+            &line[53..57],
+            operating_characteristics.br_mark_four_coaches,
+            produce_cif_error_closure(number, 50),
+        )?;
         let timing_load_id = &line[50..57];
 
-        let (first_seating, standard_seating) = read_seating_class(&line[66..67], train_type, produce_cif_error_closure(number, 66))?;
-        let (first_sleepers, standard_sleepers) = read_sleeper_class(&line[67..68], produce_cif_error_closure(number, 67))?;
+        let (first_seating, standard_seating) = read_seating_class(
+            &line[66..67],
+            train_type,
+            produce_cif_error_closure(number, 66),
+        )?;
+        let (first_sleepers, standard_sleepers) =
+            read_sleeper_class(&line[67..68], produce_cif_error_closure(number, 67))?;
 
-        let (catering, wheelchair_reservations) = read_catering(&line[70..74], produce_cif_error_closure(number, 70))?;
+        let (catering, wheelchair_reservations) =
+            read_catering(&line[70..74], produce_cif_error_closure(number, 70))?;
 
-        let reservations = read_reservations(&line[68..69], wheelchair_reservations, first_seating, standard_seating, first_sleepers, standard_sleepers, train_type, produce_cif_error_closure(number, 68))?;
+        let reservations = read_reservations(
+            &line[68..69],
+            wheelchair_reservations,
+            first_seating,
+            standard_seating,
+            first_sleepers,
+            standard_sleepers,
+            train_type,
+            produce_cif_error_closure(number, 68),
+        )?;
 
         let brand = read_brand(&line[74..78], produce_cif_error_closure(number, 74))?;
 
@@ -1575,7 +2962,11 @@ impl CifImporter {
                 uic_code: None,
                 operator: None,
             },
-            source: Some(if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }),
+            source: Some(if is_stp {
+                TrainSource::ShortTerm
+            } else {
+                TrainSource::LongTerm
+            }),
             runs_as_required,
             performance_monitoring: None,
             route: vec![],
@@ -1583,7 +2974,12 @@ impl CifImporter {
 
         if modification_type == ModificationType::Amend {
             // we can write a (partial) train now, and continue updating it later.
-            self.last_train = Some((main_train_id.to_string(), begin, stp_modification_type, is_stp));
+            self.last_train = Some((
+                main_train_id.to_string(),
+                begin,
+                stp_modification_type,
+                is_stp,
+            ));
 
             let old_trains = schedule.trains.remove(main_train_id);
             let mut old_trains = match old_trains {
@@ -1595,14 +2991,19 @@ impl CifImporter {
             if stp_modification_type == ModificationType::Insert {
                 for ref mut train in old_trains.iter_mut() {
                     if match is_stp {
-                            false => train.source.unwrap() == TrainSource::LongTerm && train.validity[0].valid_begin == begin,
-                            true => train.source.unwrap() == TrainSource::ShortTerm && train.validity[0].valid_begin == begin,
-                        } {
+                        false => {
+                            train.source.unwrap() == TrainSource::LongTerm
+                                && train.validity[0].valid_begin == begin
+                        }
+                        true => {
+                            train.source.unwrap() == TrainSource::ShortTerm
+                                && train.validity[0].valid_begin == begin
+                        }
+                    } {
                         amend_train(train, new_train.clone());
                     }
                 }
-            }
-            else {
+            } else {
                 // now we clean up modifications/cancellations
                 for ref mut train in old_trains.iter_mut() {
                     if stp_modification_type == ModificationType::Amend {
@@ -1611,8 +3012,7 @@ impl CifImporter {
                                 amend_train(replacement, new_train.clone());
                             }
                         }
-                    }
-                    else if stp_modification_type == ModificationType::Delete {
+                    } else if stp_modification_type == ModificationType::Delete {
                         for (cancellation, old_days_of_week) in train.cancellations.iter_mut() {
                             if cancellation.valid_begin == begin {
                                 *cancellation = TrainValidityPeriod {
@@ -1626,37 +3026,62 @@ impl CifImporter {
                 }
             }
 
-            schedule.trains.insert(main_train_id.to_string(), old_trains);
+            schedule
+                .trains
+                .insert(main_train_id.to_string(), old_trains);
 
             return Ok(schedule);
         }
 
-        if modification_type == ModificationType::Insert && stp_modification_type == ModificationType::Insert {
+        if modification_type == ModificationType::Insert
+            && stp_modification_type == ModificationType::Insert
+        {
             // we can write a (partial) train now, and continue updating it later.
-            self.last_train = Some((main_train_id.to_string(), begin, stp_modification_type, is_stp));
+            self.last_train = Some((
+                main_train_id.to_string(),
+                begin,
+                stp_modification_type,
+                is_stp,
+            ));
 
-            schedule.trains.entry(main_train_id.to_string()).or_insert(vec![]).push(new_train);
+            schedule
+                .trains
+                .entry(main_train_id.to_string())
+                .or_insert(vec![])
+                .push(new_train);
 
             return Ok(schedule);
         }
-        
+
         if stp_modification_type == ModificationType::Amend {
             // we can write a (partial) train now, and continue updating it later.
-            self.last_train = Some((main_train_id.to_string(), begin, stp_modification_type, is_stp));
+            self.last_train = Some((
+                main_train_id.to_string(),
+                begin,
+                stp_modification_type,
+                is_stp,
+            ));
 
             let old_trains = schedule.trains.remove(main_train_id);
             let mut old_trains = match old_trains {
                 None => {
-                    self.orphaned_overlay_trains.insert((main_train_id.to_string(), begin), new_train);
+                    self.orphaned_overlay_trains
+                        .insert((main_train_id.to_string(), begin), new_train);
                     return Ok(schedule);
-                },
+                }
                 Some(x) => x,
             };
 
             // we replace main trains
             let mut replaced = false;
             for train in old_trains.iter_mut() {
-                if !check_date_applicability(&train.validity[0], &train.days_of_week, begin, end, &days_of_week) {
+                if !check_date_applicability(
+                    &train.validity[0],
+                    &train.days_of_week,
+                    begin,
+                    end,
+                    &days_of_week,
+                ) {
                     continue;
                 }
                 replaced = true;
@@ -1664,10 +3089,13 @@ impl CifImporter {
             }
 
             if !replaced {
-                self.orphaned_overlay_trains.insert((main_train_id.to_string(), begin), new_train);
+                self.orphaned_overlay_trains
+                    .insert((main_train_id.to_string(), begin), new_train);
             }
 
-            schedule.trains.insert(main_train_id.to_string(), old_trains);
+            schedule
+                .trains
+                .insert(main_train_id.to_string(), old_trains);
 
             return Ok(schedule);
         }
@@ -1675,7 +3103,12 @@ impl CifImporter {
         Ok(schedule)
     }
 
-    fn read_extended_schedule(&mut self, line: &str, mut schedule: Schedule, number: u64) -> Result<Schedule, CifError> {
+    fn read_extended_schedule(
+        &mut self,
+        line: &str,
+        mut schedule: Schedule,
+        number: u64,
+    ) -> Result<Schedule, CifError> {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
@@ -1683,9 +3116,11 @@ impl CifImporter {
 
         let atoc_code = &line[11..13];
 
-        let train_operator_desc = read_train_operator(atoc_code, produce_cif_error_closure(number, 11))?;
+        let train_operator_desc =
+            read_train_operator(atoc_code, produce_cif_error_closure(number, 11))?;
 
-        let performance_monitoring = read_ats_code(&line[13..14], produce_cif_error_closure(number, 13))?;
+        let performance_monitoring =
+            read_ats_code(&line[13..14], produce_cif_error_closure(number, 13))?;
 
         let train = self.get_last_train(&mut schedule, number, "BX")?;
 
@@ -1699,14 +3134,20 @@ impl CifImporter {
         Ok(schedule)
     }
 
-    fn read_location_origin(&mut self, line: &str, mut schedule: Schedule, number: u64) -> Result<Schedule, CifError> {
+    fn read_location_origin(
+        &mut self,
+        line: &str,
+        mut schedule: Schedule,
+        number: u64,
+    ) -> Result<Schedule, CifError> {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
         let location_id = &line[2..9];
         let location_suffix = read_optional_string(&line[9..10]);
 
-        let wtt_dep = read_mandatory_wtt_time(&line[10..15], produce_cif_error_closure(number, 10))?;
+        let wtt_dep =
+            read_mandatory_wtt_time(&line[10..15], produce_cif_error_closure(number, 10))?;
         let pub_dep = read_public_time(&line[15..19], produce_cif_error_closure(number, 15))?;
 
         let platform = read_optional_string(&line[19..22]);
@@ -1753,17 +3194,33 @@ impl CifImporter {
             let train = self.get_last_train(&mut schedule, number, "LI")?;
 
             if !train.route.is_empty() {
-                return Err(CifError { error_type: CifErrorType::UnexpectedRecordType("LO".to_string(), "Train route not empty".to_string()), line: number, column: 0 } );
+                return Err(CifError {
+                    error_type: CifErrorType::UnexpectedRecordType(
+                        "LO".to_string(),
+                        "Train route not empty".to_string(),
+                    ),
+                    line: number,
+                    column: 0,
+                });
             }
 
             train.route.push(new_location);
         }
-        schedule.trains_indexed_by_location.entry(location_id.to_string()).or_insert(HashSet::new()).insert(self.last_train.as_ref().unwrap().0.clone());
+        schedule
+            .trains_indexed_by_location
+            .entry(location_id.to_string())
+            .or_insert(HashSet::new())
+            .insert(self.last_train.as_ref().unwrap().0.clone());
 
         Ok(schedule)
     }
 
-    fn read_location_intermediate(&mut self, line: &str, mut schedule: Schedule, number: u64) -> Result<Schedule, CifError> {
+    fn read_location_intermediate(
+        &mut self,
+        line: &str,
+        mut schedule: Schedule,
+        number: u64,
+    ) -> Result<Schedule, CifError> {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
@@ -1774,12 +3231,19 @@ impl CifImporter {
 
         let wtt_arr = read_optional_wtt_time(&line[10..15], produce_cif_error_closure(number, 10))?;
         let wtt_dep = read_optional_wtt_time(&line[15..20], produce_cif_error_closure(number, 15))?;
-        let wtt_pass = read_optional_wtt_time(&line[20..25], produce_cif_error_closure(number, 20))?;
+        let wtt_pass =
+            read_optional_wtt_time(&line[20..25], produce_cif_error_closure(number, 20))?;
 
         match (wtt_arr, wtt_dep, wtt_pass) {
             (None, None, Some(_)) => (),
             (Some(_), Some(_), None) => (),
-            (_, _, _) => return Err(CifError { error_type: CifErrorType::InvalidWttTimesCombo, line: number, column: 10 }),
+            (_, _, _) => {
+                return Err(CifError {
+                    error_type: CifErrorType::InvalidWttTimesCombo,
+                    line: number,
+                    column: 10,
+                })
+            }
         };
 
         let pub_arr = read_public_time(&line[25..29], produce_cif_error_closure(number, 25))?;
@@ -1803,7 +3267,14 @@ impl CifImporter {
             let train = self.get_last_train(&mut schedule, number, "LI")?;
 
             if train.route.is_empty() {
-                return Err(CifError { error_type: CifErrorType::UnexpectedRecordType("LI".to_string(), "Train route is empty".to_string()), line: number, column: 0 } );
+                return Err(CifError {
+                    error_type: CifErrorType::UnexpectedRecordType(
+                        "LI".to_string(),
+                        "Train route is empty".to_string(),
+                    ),
+                    line: number,
+                    column: 0,
+                });
             }
 
             let (last_wtt_time, last_wtt_day) = get_working_time(train.route.last().unwrap());
@@ -1848,12 +3319,21 @@ impl CifImporter {
 
             train.route.push(new_location);
         }
-        schedule.trains_indexed_by_location.entry(location_id.to_string()).or_insert(HashSet::new()).insert(self.last_train.as_ref().unwrap().0.clone());
+        schedule
+            .trains_indexed_by_location
+            .entry(location_id.to_string())
+            .or_insert(HashSet::new())
+            .insert(self.last_train.as_ref().unwrap().0.clone());
 
         Ok(schedule)
     }
 
-    fn read_location_terminating(&mut self, line: &str, mut schedule: Schedule, number: u64) -> Result<Schedule, CifError> {
+    fn read_location_terminating(
+        &mut self,
+        line: &str,
+        mut schedule: Schedule,
+        number: u64,
+    ) -> Result<Schedule, CifError> {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
@@ -1862,7 +3342,8 @@ impl CifImporter {
 
         self.validate_change_en_route_location(location_id, &location_suffix, number, 2)?;
 
-        let wtt_arr = read_mandatory_wtt_time(&line[10..15], produce_cif_error_closure(number, 10))?;
+        let wtt_arr =
+            read_mandatory_wtt_time(&line[10..15], produce_cif_error_closure(number, 10))?;
         let pub_arr = read_public_time(&line[15..19], produce_cif_error_closure(number, 15))?;
 
         let platform = read_optional_string(&line[19..22]);
@@ -1877,7 +3358,14 @@ impl CifImporter {
             let train = self.get_last_train(&mut schedule, number, "LT")?;
 
             if train.route.is_empty() {
-                return Err(CifError { error_type: CifErrorType::UnexpectedRecordType("LT".to_string(), "Train route is empty".to_string()), line: number, column: 0 } );
+                return Err(CifError {
+                    error_type: CifErrorType::UnexpectedRecordType(
+                        "LT".to_string(),
+                        "Train route is empty".to_string(),
+                    ),
+                    line: number,
+                    column: 0,
+                });
             }
 
             let (last_wtt_time, last_wtt_day) = get_working_time(train.route.last().unwrap());
@@ -1917,7 +3405,11 @@ impl CifImporter {
 
             train.route.push(new_location);
         }
-        schedule.trains_indexed_by_location.entry(location_id.to_string()).or_insert(HashSet::new()).insert(self.last_train.as_ref().unwrap().0.clone());
+        schedule
+            .trains_indexed_by_location
+            .entry(location_id.to_string())
+            .or_insert(HashSet::new())
+            .insert(self.last_train.as_ref().unwrap().0.clone());
 
         // we can now unset the last_train as this should be the last message received for any
         // given train
@@ -1926,7 +3418,12 @@ impl CifImporter {
         Ok(schedule)
     }
 
-    fn read_change_en_route(&mut self, line: &str, mut schedule: Schedule, number: u64) -> Result<Schedule, CifError> {
+    fn read_change_en_route(
+        &mut self,
+        line: &str,
+        mut schedule: Schedule,
+        number: u64,
+    ) -> Result<Schedule, CifError> {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
@@ -1934,13 +3431,21 @@ impl CifImporter {
             let train = self.get_last_train(&mut schedule, number, "CR")?;
 
             if train.route.is_empty() {
-                return Err(CifError { error_type: CifErrorType::UnexpectedRecordType("CR".to_string(), "Train route is empty".to_string()), line: number, column: 0 } );
+                return Err(CifError {
+                    error_type: CifErrorType::UnexpectedRecordType(
+                        "CR".to_string(),
+                        "Train route is empty".to_string(),
+                    ),
+                    line: number,
+                    column: 0,
+                });
             }
 
-            let train_type = match read_train_type(&line[10..12], produce_cif_error_closure(number, 10))? {
-                Some(x) => x,
-                None => train.variable_train.train_type, // should only really happen for ships
-            };
+            let train_type =
+                match read_train_type(&line[10..12], produce_cif_error_closure(number, 10))? {
+                    Some(x) => x,
+                    None => train.variable_train.train_type, // should only really happen for ships
+                };
 
             (train_type, train.variable_train.operator.clone())
         };
@@ -1954,21 +3459,46 @@ impl CifImporter {
         let headcode = read_optional_string(&line[16..20]);
         let service_group = &line[21..29];
 
-        let power_type = read_power_type(&line[30..33], &line[33..37], produce_cif_error_closure(number, 30))?;
+        let power_type = read_power_type(
+            &line[30..33],
+            &line[33..37],
+            produce_cif_error_closure(number, 30),
+        )?;
 
         let speed_m_per_s = read_speed(&line[37..40], produce_cif_error_closure(number, 37))?;
 
-        let (operating_characteristics, _runs_as_required) = read_operating_characteristics(&line[40..46], produce_cif_error_closure(number, 40))?;
+        let (operating_characteristics, _runs_as_required) =
+            read_operating_characteristics(&line[40..46], produce_cif_error_closure(number, 40))?;
 
-        let timing_load_str = read_timing_load(&line[30..33], &line[33..37], operating_characteristics.br_mark_four_coaches, produce_cif_error_closure(number, 30))?;
+        let timing_load_str = read_timing_load(
+            &line[30..33],
+            &line[33..37],
+            operating_characteristics.br_mark_four_coaches,
+            produce_cif_error_closure(number, 30),
+        )?;
         let timing_load_id = &line[30..37];
 
-        let (first_seating, standard_seating) = read_seating_class(&line[46..47], train_type, produce_cif_error_closure(number, 46))?;
-        let (first_sleepers, standard_sleepers) = read_sleeper_class(&line[47..48], produce_cif_error_closure(number, 47))?;
+        let (first_seating, standard_seating) = read_seating_class(
+            &line[46..47],
+            train_type,
+            produce_cif_error_closure(number, 46),
+        )?;
+        let (first_sleepers, standard_sleepers) =
+            read_sleeper_class(&line[47..48], produce_cif_error_closure(number, 47))?;
 
-        let (catering, wheelchair_reservations) = read_catering(&line[50..54], produce_cif_error_closure(number, 50))?;
+        let (catering, wheelchair_reservations) =
+            read_catering(&line[50..54], produce_cif_error_closure(number, 50))?;
 
-        let reservations = read_reservations(&line[48..49], wheelchair_reservations, first_seating, standard_seating, first_sleepers, standard_sleepers, train_type, produce_cif_error_closure(number, 48))?;
+        let reservations = read_reservations(
+            &line[48..49],
+            wheelchair_reservations,
+            first_seating,
+            standard_seating,
+            first_sleepers,
+            standard_sleepers,
+            train_type,
+            produce_cif_error_closure(number, 48),
+        )?;
 
         let brand = read_brand(&line[54..58], produce_cif_error_closure(number, 54))?;
 
@@ -2007,7 +3537,13 @@ impl CifImporter {
         Ok(schedule)
     }
 
-    fn read_tiploc(&self, line: &str, mut schedule: Schedule, number: u64, modification_type: ModificationType) -> Result<Schedule, CifError> {
+    fn read_tiploc(
+        &self,
+        line: &str,
+        mut schedule: Schedule,
+        number: u64,
+        modification_type: ModificationType,
+    ) -> Result<Schedule, CifError> {
         let tiploc = &line[2..9];
         let name = &line[18..44];
         let opt_crs = read_optional_string(&line[53..56]);
@@ -2021,43 +3557,77 @@ impl CifImporter {
             ModificationType::Amend => {
                 let location = schedule.locations.remove(tiploc);
                 let mut location = match location {
-                    None => return Err(CifError { error_type: CifErrorType::LocationNotFound(tiploc.to_string()), line: number, column: 2 }),
+                    None => {
+                        return Err(CifError {
+                            error_type: CifErrorType::LocationNotFound(tiploc.to_string()),
+                            line: number,
+                            column: 2,
+                        })
+                    }
                     Some(x) => x,
                 };
                 location.id = tiploc.to_string();
                 location.name = name.to_string();
                 location.public_id = opt_crs;
                 location
-            },
+            }
             ModificationType::Delete => {
                 schedule.locations.remove(tiploc); // it's OK if the TIPLOC isn't found
-                return Ok(schedule)
-            },
+                return Ok(schedule);
+            }
         };
         schedule.locations.insert(tiploc.to_string(), location);
         Ok(schedule)
     }
 
-    fn read_header(&self, line: &str, mut schedule: Schedule, number: u64) -> Result<Schedule, CifError> {
+    fn read_header(
+        &self,
+        line: &str,
+        mut schedule: Schedule,
+        number: u64,
+    ) -> Result<Schedule, CifError> {
         schedule.their_id = Some(line[2..22].to_string());
         let parsed_datetime = NaiveDateTime::parse_from_str(&line[22..32], "%y%m%d%H%M");
         let parsed_datetime = match parsed_datetime {
             Ok(x) => x,
-            Err(x) => return Err(CifError { error_type: CifErrorType::ChronoParseError(x), line: number, column: 22 }),
+            Err(x) => {
+                return Err(CifError {
+                    error_type: CifErrorType::ChronoParseError(x),
+                    line: number,
+                    column: 22,
+                })
+            }
         };
         schedule.last_updated = Some(London.from_local_datetime(&parsed_datetime).unwrap());
         if &line[46..47] == "F" {
-            schedule.valid_begin = Some(read_backwards_date(&line[48..54], produce_cif_error_closure(number, 48))?);
-            schedule.valid_end = Some(read_backwards_date(&line[54..60], produce_cif_error_closure(number, 48))?);
+            schedule.valid_begin = Some(read_backwards_date(
+                &line[48..54],
+                produce_cif_error_closure(number, 48),
+            )?);
+            schedule.valid_end = Some(read_backwards_date(
+                &line[54..60],
+                produce_cif_error_closure(number, 48),
+            )?);
         }
         Ok(schedule)
     }
 
-    fn finalise(&mut self, _line: &str, mut schedule: Schedule, number: u64) -> Result<Schedule, CifError> {
+    fn finalise(
+        &mut self,
+        _line: &str,
+        mut schedule: Schedule,
+        number: u64,
+    ) -> Result<Schedule, CifError> {
         for ((train_id, location, location_suffix), assocs) in &self.unwritten_assocs {
             let mut trains = match schedule.trains.get_mut(train_id) {
                 Some(x) => x,
-                None => return Err(CifError { error_type: CifErrorType::TrainNotFound(train_id.clone()), line: number, column: 0 }),
+                None => {
+                    return Err(CifError {
+                        error_type: CifErrorType::TrainNotFound(train_id.clone()),
+                        line: number,
+                        column: 0,
+                    })
+                }
             };
 
             write_assocs_to_trains(&mut trains, &train_id, &location, &location_suffix, &assocs);
@@ -2073,7 +3643,13 @@ impl CifImporter {
 
             // we replace main trains
             for train in old_trains.iter_mut() {
-                if !check_date_applicability(&train.validity[0], &train.days_of_week, new_train.validity[0].valid_begin, new_train.validity[0].valid_end, &new_train.days_of_week) {
+                if !check_date_applicability(
+                    &train.validity[0],
+                    &train.days_of_week,
+                    new_train.validity[0].valid_begin,
+                    new_train.validity[0].valid_end,
+                    &new_train.days_of_week,
+                ) {
                     continue;
                 }
                 train.replacements.push(new_train.clone())
@@ -2087,12 +3663,21 @@ impl CifImporter {
         Ok(schedule)
     }
 
-    fn read_record(&mut self, line: String, schedule: Schedule, number: u64) -> Result<Schedule, CifError> {
+    fn read_record(
+        &mut self,
+        line: String,
+        schedule: Schedule,
+        number: u64,
+    ) -> Result<Schedule, CifError> {
         if line.is_empty() {
-            return Ok(schedule)
+            return Ok(schedule);
         }
         if line.len() != 80 {
-            return Err(CifError { error_type: CifErrorType::InvalidRecordLength(line.len()), line: number, column: 0});
+            return Err(CifError {
+                error_type: CifErrorType::InvalidRecordLength(line.len()),
+                line: number,
+                column: 0,
+            });
         }
         match &line[..2] {
             "HD" => Ok(self.read_header(&line, schedule, number)?),
@@ -2107,14 +3692,22 @@ impl CifImporter {
             "LT" => Ok(self.read_location_terminating(&line, schedule, number)?),
             "CR" => Ok(self.read_change_en_route(&line, schedule, number)?),
             "ZZ" => Ok(self.finalise(&line, schedule, number)?),
-            x => Err(CifError { error_type: CifErrorType::InvalidRecordType(x.to_string()), line: number, column: 0}),
+            x => Err(CifError {
+                error_type: CifErrorType::InvalidRecordType(x.to_string()),
+                line: number,
+                column: 0,
+            }),
         }
     }
 }
 
 #[async_trait]
 impl SlowImporter for CifImporter {
-    async fn overlay(&mut self, reader: impl AsyncBufReadExt + Unpin + Send, mut schedule: Schedule) -> Result<Schedule, Error> {
+    async fn overlay(
+        &mut self,
+        reader: impl AsyncBufReadExt + Unpin + Send,
+        mut schedule: Schedule,
+    ) -> Result<Schedule, Error> {
         let mut lines = reader.lines();
 
         let mut i: u64 = 0;
@@ -2123,103 +3716,107 @@ impl SlowImporter for CifImporter {
             i += 1;
             schedule = self.read_record(line, schedule, i)?;
         }
-        println!("Successfully loaded {} trains from {} lines of CIF", schedule.trains.len(), i);
+        println!(
+            "Successfully loaded {} trains from {} lines of CIF",
+            schedule.trains.len(),
+            i
+        );
         Ok(schedule)
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all="snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 struct NrJsonSender {
     organisation: String,
     application: String,
     component: String,
-    #[serde(rename="userID")]
+    #[serde(rename = "userID")]
     user_id: Option<String>,
-    #[serde(rename="sessionID")]
+    #[serde(rename = "sessionID")]
     session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all="snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 struct NrJsonTiploc {
     tiploc_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all="snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 struct NrJsonLocation {
     tiploc: NrJsonTiploc,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all="snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 struct NrJsonScheduleLocation {
     scheduled_arrival_time: Option<String>,
     scheduled_departure_time: Option<String>,
     scheduled_pass_time: Option<String>,
     public_arrival_time: Option<String>,
     public_departure_time: Option<String>,
-    #[serde(rename="CIF_platform")]
+    #[serde(rename = "CIF_platform")]
     cif_platform: Option<String>,
-    #[serde(rename="CIF_line")]
+    #[serde(rename = "CIF_line")]
     cif_line: Option<String>,
-    #[serde(rename="CIF_path")]
+    #[serde(rename = "CIF_path")]
     cif_path: Option<String>,
-    #[serde(rename="CIF_activity")]
+    #[serde(rename = "CIF_activity")]
     cif_activity: Option<String>,
-    #[serde(rename="CIF_engineering_allowance")]
+    #[serde(rename = "CIF_engineering_allowance")]
     cif_engineering_allowance: Option<String>,
-    #[serde(rename="CIF_pathing_allowance")]
+    #[serde(rename = "CIF_pathing_allowance")]
     cif_pathing_allowance: Option<String>,
-    #[serde(rename="CIF_performance_allowance")]
+    #[serde(rename = "CIF_performance_allowance")]
     cif_performance_allowance: Option<String>,
     location: NrJsonLocation,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all="snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 struct NrJsonScheduleSegment {
     signalling_id: String,
     uic_code: Option<String>,
     atoc_code: Option<String>,
-    #[serde(rename="CIF_train_category")]
+    #[serde(rename = "CIF_train_category")]
     cif_train_category: String,
-    #[serde(rename="CIF_headcode")]
+    #[serde(rename = "CIF_headcode")]
     cif_headcode: Option<String>,
-    #[serde(rename="CIF_course_indicator")]
+    #[serde(rename = "CIF_course_indicator")]
     cif_course_indicator: Option<String>,
-    #[serde(rename="CIF_train_service_code")]
+    #[serde(rename = "CIF_train_service_code")]
     cif_train_service_code: Option<String>,
-    #[serde(rename="CIF_business_sector")]
+    #[serde(rename = "CIF_business_sector")]
     cif_business_sector: Option<String>,
-    #[serde(rename="CIF_power_type")]
+    #[serde(rename = "CIF_power_type")]
     cif_power_type: Option<String>,
-    #[serde(rename="CIF_timing_load")]
+    #[serde(rename = "CIF_timing_load")]
     cif_timing_load: Option<String>,
-    #[serde(rename="CIF_speed")]
+    #[serde(rename = "CIF_speed")]
     cif_speed: Option<String>,
-    #[serde(rename="CIF_operating_characteristics")]
+    #[serde(rename = "CIF_operating_characteristics")]
     cif_operating_characteristics: Option<String>,
-    #[serde(rename="CIF_train_class")]
+    #[serde(rename = "CIF_train_class")]
     cif_train_class: Option<String>,
-    #[serde(rename="CIF_sleepers")]
+    #[serde(rename = "CIF_sleepers")]
     cif_sleepers: Option<String>,
-    #[serde(rename="CIF_reservations")]
+    #[serde(rename = "CIF_reservations")]
     cif_reservations: Option<String>,
-    #[serde(rename="CIF_connection_indicator")]
+    #[serde(rename = "CIF_connection_indicator")]
     cif_connection_indicator: Option<String>,
-    #[serde(rename="CIF_catering_code")]
+    #[serde(rename = "CIF_catering_code")]
     cif_catering_code: Option<String>,
-    #[serde(rename="CIF_service_branding")]
+    #[serde(rename = "CIF_service_branding")]
     cif_service_branding: Option<String>,
-    #[serde(rename="CIF_traction_class")]
+    #[serde(rename = "CIF_traction_class")]
     cif_traction_class: Option<String>,
     schedule_location: Vec<NrJsonScheduleLocation>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all="snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 struct NrJsonSchedule {
     schedule_id: Option<String>,
     transaction_type: String,
@@ -2227,34 +3824,34 @@ struct NrJsonSchedule {
     schedule_end_date: String,
     schedule_days_runs: String,
     applicable_timetable: Option<String>,
-    #[serde(rename="CIF_bank_holiday_running")]
+    #[serde(rename = "CIF_bank_holiday_running")]
     cif_bank_holiday_running: Option<String>,
-    #[serde(rename="CIF_train_uid")]
+    #[serde(rename = "CIF_train_uid")]
     cif_train_uid: String,
     train_status: String,
-    #[serde(rename="CIF_stp_indicator")]
+    #[serde(rename = "CIF_stp_indicator")]
     cif_stp_indicator: String,
     schedule_segment: Option<Vec<NrJsonScheduleSegment>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all="snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 struct NrJsonVstpCifMsgV1 {
-    #[serde(rename="schemaLocation")]
+    #[serde(rename = "schemaLocation")]
     schema_location: Option<String>,
     classification: String,
     timestamp: String,
     owner: String,
-    #[serde(rename="originMsgId")]
+    #[serde(rename = "originMsgId")]
     origin_msg_id: String,
-    #[serde(rename="Sender")]
+    #[serde(rename = "Sender")]
     sender: NrJsonSender,
     schedule: NrJsonSchedule,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct NrJsonVstp {
-    #[serde(rename="VSTPCIFMsgV1")]
+    #[serde(rename = "VSTPCIFMsgV1")]
     vstp_cif_msg_v1: NrJsonVstpCifMsgV1,
 }
 
@@ -2274,83 +3871,97 @@ impl NrJsonImporter {
         let mut previously_received = vec![];
         match &config.filename {
             None => (),
-            Some(filename) => {
-                 match fs::read_to_string(filename).await {
-                    Ok(contents) => {
-                        previously_received = serde_json::from_str::<Vec<NrJsonVstp>>(&contents)?;
-                    },
-                    Err(x) => {
-                        println!("WARNING: Failed to load previous VSTP workings: {}", x);
-                    }
+            Some(filename) => match fs::read_to_string(filename).await {
+                Ok(contents) => {
+                    previously_received = serde_json::from_str::<Vec<NrJsonVstp>>(&contents)?;
+                }
+                Err(x) => {
+                    println!("WARNING: Failed to load previous VSTP workings: {}", x);
                 }
             },
         }
         Ok(NrJsonImporter {
             previously_received: Arc::new(RwLock::new(previously_received)),
             config,
-            persister_mutex: Arc::new(Mutex::new(()))
+            persister_mutex: Arc::new(Mutex::new(())),
         })
     }
 
-    fn read_vstp_route(&self, schedule_segments: &Vec<NrJsonScheduleSegment>, train_status: &TrainStatus, train_id: &str, schedule: &mut Schedule) -> Result<Vec<TrainLocation>, NrJsonError> {
+    fn read_vstp_route(
+        &self,
+        schedule_segments: &Vec<NrJsonScheduleSegment>,
+        train_status: &TrainStatus,
+        train_id: &str,
+        schedule: &mut Schedule,
+    ) -> Result<Vec<TrainLocation>, NrJsonError> {
         let mut route = vec![];
         for (i, segment) in schedule_segments.iter().enumerate() {
             if segment.schedule_location.len() == 0 {
-                return Err(NrJsonError { error_type: CifErrorType::NotEnoughLocations, field_name: "schedule_location".to_string() } );
+                return Err(NrJsonError {
+                    error_type: CifErrorType::NotEnoughLocations,
+                    field_name: "schedule_location".to_string(),
+                });
             }
             for (j, location) in segment.schedule_location.iter().enumerate() {
                 // don't populate a change en route on the first segment as this
                 // will be populated quite happily in the main train's variable_train field.
                 let change_en_route = if i == 0 || j != 0 {
                     None
-                }
-                else {
+                } else {
                     Some(self.read_vstp_variable_train(segment, train_status)?)
                 };
 
-                let is_origin = if i == 0 && j == 0 {
-                    true
-                }
-                else {
-                    false
-                };
+                let is_origin = if i == 0 && j == 0 { true } else { false };
 
-                let is_destination = if i == schedule_segments.len() - 1 && j == segment.schedule_location.len() - 1 {
+                let is_destination = if i == schedule_segments.len() - 1
+                    && j == segment.schedule_location.len() - 1
+                {
                     true
-                }
-                else {
+                } else {
                     false
                 };
 
                 if is_origin && is_destination {
-                    return Err(NrJsonError { error_type: CifErrorType::NotEnoughLocations, field_name: "schedule_location".to_string() } );
+                    return Err(NrJsonError {
+                        error_type: CifErrorType::NotEnoughLocations,
+                        field_name: "schedule_location".to_string(),
+                    });
                 }
 
                 let (last_wtt_time, last_wtt_day) = match is_origin {
                     true => (None, None),
                     false => match get_working_time(route.last().unwrap()) {
                         (x, y) => (Some(x), Some(y)),
-                    }
+                    },
                 };
 
                 let location_id = &location.location.tiploc.tiploc_id;
                 let location_suffix = None; // doesn't appear to be in VSTP
 
-                let wtt_arr = read_vstp_time(&location.scheduled_arrival_time, produce_nr_json_error_closure("scheduled_arrival_time".to_string()))?;
+                let wtt_arr = read_vstp_time(
+                    &location.scheduled_arrival_time,
+                    produce_nr_json_error_closure("scheduled_arrival_time".to_string()),
+                )?;
                 let wtt_arr_day = match (&last_wtt_time, &wtt_arr) {
                     (Some(x), y) => calculate_day(y, x, last_wtt_day.unwrap()),
                     (None, Some(_)) => Some(0),
                     _ => None,
                 };
 
-                let wtt_dep = read_vstp_time(&location.scheduled_departure_time, produce_nr_json_error_closure("scheduled_departure_time".to_string()))?;
+                let wtt_dep = read_vstp_time(
+                    &location.scheduled_departure_time,
+                    produce_nr_json_error_closure("scheduled_departure_time".to_string()),
+                )?;
                 let wtt_dep_day = match (&last_wtt_time, &wtt_dep) {
                     (Some(x), y) => calculate_day(y, x, last_wtt_day.unwrap()),
                     (None, Some(_)) => Some(0),
                     _ => None,
                 };
 
-                let wtt_pass = read_vstp_time(&location.scheduled_pass_time, produce_nr_json_error_closure("scheduled_pass_time".to_string()))?;
+                let wtt_pass = read_vstp_time(
+                    &location.scheduled_pass_time,
+                    produce_nr_json_error_closure("scheduled_pass_time".to_string()),
+                )?;
                 let wtt_pass_day = match (&last_wtt_time, &wtt_pass) {
                     (Some(x), y) => calculate_day(y, x, last_wtt_day.unwrap()),
                     (None, Some(_)) => Some(0),
@@ -2362,10 +3973,18 @@ impl NrJsonImporter {
                     (Some(_), Some(_), None, false, false) => (),
                     (Some(_), None, None, false, true) => (),
                     (None, Some(_), None, true, false) => (),
-                    (_, _, _, _, _) => return Err(NrJsonError { error_type: CifErrorType::InvalidWttTimesCombo, field_name: "scheduled_*_time".to_string() }),
+                    (_, _, _, _, _) => {
+                        return Err(NrJsonError {
+                            error_type: CifErrorType::InvalidWttTimesCombo,
+                            field_name: "scheduled_*_time".to_string(),
+                        })
+                    }
                 };
 
-                let pub_arr = read_vstp_time(&location.public_arrival_time, produce_nr_json_error_closure("public_arrival_time".to_string()))?;
+                let pub_arr = read_vstp_time(
+                    &location.public_arrival_time,
+                    produce_nr_json_error_closure("public_arrival_time".to_string()),
+                )?;
                 // TODO maybe should change this to calculate based on last public time?
                 let pub_arr_day = match (&last_wtt_time, &pub_arr) {
                     (Some(x), y) => calculate_day(y, x, last_wtt_day.unwrap()),
@@ -2373,7 +3992,10 @@ impl NrJsonImporter {
                     _ => None,
                 };
 
-                let pub_dep = read_vstp_time(&location.public_departure_time, produce_nr_json_error_closure("public_departure_time".to_string()))?;
+                let pub_dep = read_vstp_time(
+                    &location.public_departure_time,
+                    produce_nr_json_error_closure("public_departure_time".to_string()),
+                )?;
                 let pub_dep_day = match (&last_wtt_time, &pub_dep) {
                     (Some(x), y) => calculate_day(y, x, last_wtt_day.unwrap()),
                     (None, Some(_)) => Some(0),
@@ -2394,20 +4016,34 @@ impl NrJsonImporter {
                 };
 
                 let activities = match &location.cif_activity {
-                    Some(x) => read_activities(format!("{: <12}", x).as_str(), produce_nr_json_error_closure("CIF_activity".to_string()))?,
-                    None => Activities { ..Default::default() },
+                    Some(x) => read_activities(
+                        format!("{: <12}", x).as_str(),
+                        produce_nr_json_error_closure("CIF_activity".to_string()),
+                    )?,
+                    None => Activities {
+                        ..Default::default()
+                    },
                 };
 
                 let eng_allowance = match &location.cif_engineering_allowance {
-                    Some(x) => Some(read_allowance(format!("{: <2}", x).as_str(), produce_nr_json_error_closure("CIF_engineering_allowance".to_string()))?),
+                    Some(x) => Some(read_allowance(
+                        format!("{: <2}", x).as_str(),
+                        produce_nr_json_error_closure("CIF_engineering_allowance".to_string()),
+                    )?),
                     None => None,
                 };
                 let path_allowance = match &location.cif_pathing_allowance {
-                    Some(x) => Some(read_allowance(format!("{: <2}", x).as_str(), produce_nr_json_error_closure("CIF_pathing_allowance".to_string()))?),
+                    Some(x) => Some(read_allowance(
+                        format!("{: <2}", x).as_str(),
+                        produce_nr_json_error_closure("CIF_pathing_allowance".to_string()),
+                    )?),
                     None => None,
                 };
                 let perf_allowance = match &location.cif_performance_allowance {
-                    Some(x) => Some(read_allowance(format!("{: <2}", x).as_str(), produce_nr_json_error_closure("CIF_performance_allowance".to_string()))?),
+                    Some(x) => Some(read_allowance(
+                        format!("{: <2}", x).as_str(),
+                        produce_nr_json_error_closure("CIF_performance_allowance".to_string()),
+                    )?),
                     None => None,
                 };
 
@@ -2442,14 +4078,25 @@ impl NrJsonImporter {
                 };
 
                 route.push(new_location);
-                schedule.trains_indexed_by_location.entry(location_id.to_string()).or_insert(HashSet::new()).insert(train_id.to_string());
+                schedule
+                    .trains_indexed_by_location
+                    .entry(location_id.to_string())
+                    .or_insert(HashSet::new())
+                    .insert(train_id.to_string());
             }
         }
         Ok(route)
     }
 
-    fn read_vstp_variable_train(&self, schedule_segment: &NrJsonScheduleSegment, train_status: &TrainStatus) -> Result<VariableTrain, NrJsonError> {
-        let train_type = match read_train_type(&schedule_segment.cif_train_category, produce_nr_json_error_closure("CIF_train_category".to_string()))? {
+    fn read_vstp_variable_train(
+        &self,
+        schedule_segment: &NrJsonScheduleSegment,
+        train_status: &TrainStatus,
+    ) -> Result<VariableTrain, NrJsonError> {
+        let train_type = match read_train_type(
+            &schedule_segment.cif_train_category,
+            produce_nr_json_error_closure("CIF_train_category".to_string()),
+        )? {
             Some(x) => x,
             None => match train_status {
                 TrainStatus::Bus => TrainType::Bus,
@@ -2473,10 +4120,21 @@ impl NrJsonImporter {
         };
         let service_group = &schedule_segment.cif_train_service_code;
 
-        let power_type = match (&schedule_segment.cif_power_type, &schedule_segment.cif_timing_load) {
+        let power_type = match (
+            &schedule_segment.cif_power_type,
+            &schedule_segment.cif_timing_load,
+        ) {
             (None, _) => None,
-            (Some(x), None) => read_power_type(x, "", produce_nr_json_error_closure("CIF_power_type or CIF_timing_load".to_string()))?,
-            (Some(x), Some(y)) => read_power_type(x, y, produce_nr_json_error_closure("CIF_power_type or CIF_timing_load".to_string()))?,
+            (Some(x), None) => read_power_type(
+                x,
+                "",
+                produce_nr_json_error_closure("CIF_power_type or CIF_timing_load".to_string()),
+            )?,
+            (Some(x), Some(y)) => read_power_type(
+                x,
+                y,
+                produce_nr_json_error_closure("CIF_power_type or CIF_timing_load".to_string()),
+            )?,
         };
         let speed_m_per_s = match schedule_segment.cif_speed.as_deref() {
             Some("022") => Some(22. * (1609.344 / (60. * 60.)) * (1609.344 / (60. * 60.))),
@@ -2505,16 +4163,40 @@ impl NrJsonImporter {
         };
 
         let (operating_characteristics, _) = match &schedule_segment.cif_operating_characteristics {
-            Some(x) => read_operating_characteristics(x, produce_nr_json_error_closure("CIF_operating_characteristics".to_string()))?,
-            None => (OperatingCharacteristics { ..Default::default() }, false),
+            Some(x) => read_operating_characteristics(
+                x,
+                produce_nr_json_error_closure("CIF_operating_characteristics".to_string()),
+            )?,
+            None => (
+                OperatingCharacteristics {
+                    ..Default::default()
+                },
+                false,
+            ),
         };
 
-        let timing_load_str = match (&schedule_segment.cif_power_type, &schedule_segment.cif_timing_load) {
+        let timing_load_str = match (
+            &schedule_segment.cif_power_type,
+            &schedule_segment.cif_timing_load,
+        ) {
             (None, _) => None,
-            (Some(x), None) => read_timing_load(x, "", operating_characteristics.br_mark_four_coaches, produce_nr_json_error_closure("CIF_power_type or CIF_timing_load".to_string()))?,
-            (Some(x), Some(y)) => read_timing_load(x, y, operating_characteristics.br_mark_four_coaches, produce_nr_json_error_closure("CIF_power_type or CIF_timing_load".to_string()))?,
+            (Some(x), None) => read_timing_load(
+                x,
+                "",
+                operating_characteristics.br_mark_four_coaches,
+                produce_nr_json_error_closure("CIF_power_type or CIF_timing_load".to_string()),
+            )?,
+            (Some(x), Some(y)) => read_timing_load(
+                x,
+                y,
+                operating_characteristics.br_mark_four_coaches,
+                produce_nr_json_error_closure("CIF_power_type or CIF_timing_load".to_string()),
+            )?,
         };
-        let timing_load_id = match (&schedule_segment.cif_power_type, &schedule_segment.cif_timing_load) {
+        let timing_load_id = match (
+            &schedule_segment.cif_power_type,
+            &schedule_segment.cif_timing_load,
+        ) {
             (None, None) => "       ".to_string(),
             (None, Some(x)) => format!("   {: <4}", x),
             (Some(x), None) => format!("{: <3}    ", x),
@@ -2522,27 +4204,58 @@ impl NrJsonImporter {
         };
 
         let (first_seating, standard_seating) = match &schedule_segment.cif_train_class {
-            Some(x) => read_seating_class(x, train_type, produce_nr_json_error_closure("CIF_train_class".to_string()))?,
-            None => read_seating_class("", train_type, produce_nr_json_error_closure("CIF_train_class".to_string()))?,
+            Some(x) => read_seating_class(
+                x,
+                train_type,
+                produce_nr_json_error_closure("CIF_train_class".to_string()),
+            )?,
+            None => read_seating_class(
+                "",
+                train_type,
+                produce_nr_json_error_closure("CIF_train_class".to_string()),
+            )?,
         };
         let (first_sleepers, standard_sleepers) = match &schedule_segment.cif_sleepers {
-            Some(x) => read_sleeper_class(x, produce_nr_json_error_closure("CIF_train_class".to_string()))?,
-            None => (false, false)
+            Some(x) => read_sleeper_class(
+                x,
+                produce_nr_json_error_closure("CIF_train_class".to_string()),
+            )?,
+            None => (false, false),
         };
 
         let (catering, wheelchair_reservations) = match &schedule_segment.cif_catering_code {
-            Some(x) => read_catering(x, produce_nr_json_error_closure("CIF_catering_code".to_string()))?,
-            None => (Catering { ..Default::default() }, false),
+            Some(x) => read_catering(
+                x,
+                produce_nr_json_error_closure("CIF_catering_code".to_string()),
+            )?,
+            None => (
+                Catering {
+                    ..Default::default()
+                },
+                false,
+            ),
         };
 
         let reservations_str = match &schedule_segment.cif_reservations {
             Some(x) => x,
             None => "",
         };
-        let reservations = read_reservations(reservations_str, wheelchair_reservations, first_seating, standard_seating, first_sleepers, standard_sleepers, train_type, produce_nr_json_error_closure("CIF_reservations".to_string()))?;
+        let reservations = read_reservations(
+            reservations_str,
+            wheelchair_reservations,
+            first_seating,
+            standard_seating,
+            first_sleepers,
+            standard_sleepers,
+            train_type,
+            produce_nr_json_error_closure("CIF_reservations".to_string()),
+        )?;
 
         let brand = match &schedule_segment.cif_service_branding {
-            Some(x) => read_brand(x, produce_nr_json_error_closure("CIF_service_branding".to_string()))?,
+            Some(x) => read_brand(
+                x,
+                produce_nr_json_error_closure("CIF_service_branding".to_string()),
+            )?,
             None => None,
         };
 
@@ -2558,7 +4271,10 @@ impl NrJsonImporter {
             None => "ZZ",
         };
 
-        let train_operator_desc = read_train_operator(atoc_code, produce_nr_json_error_closure("atoc_code".to_string()))?;
+        let train_operator_desc = read_train_operator(
+            atoc_code,
+            produce_nr_json_error_closure("atoc_code".to_string()),
+        )?;
 
         Ok(VariableTrain {
             train_type,
@@ -2594,22 +4310,50 @@ impl NrJsonImporter {
         })
     }
 
-    fn read_vstp_entry(&self, parsed_json: &NrJsonVstp, mut schedule: Schedule) -> Result<(Schedule, bool), NrJsonError> {
+    fn read_vstp_entry(
+        &self,
+        parsed_json: &NrJsonVstp,
+        mut schedule: Schedule,
+    ) -> Result<(Schedule, bool), NrJsonError> {
         println!("Input: {:#?}", parsed_json);
-        let modification_type = match parsed_json.vstp_cif_msg_v1.schedule.transaction_type.as_str() {
+        let modification_type = match parsed_json
+            .vstp_cif_msg_v1
+            .schedule
+            .transaction_type
+            .as_str()
+        {
             "Create" => ModificationType::Insert,
             "Delete" => ModificationType::Delete,
-            x => return Err(NrJsonError { error_type: CifErrorType::InvalidTransactionType(x.to_string()), field_name: "transaction_type".to_string() } ),
+            x => {
+                return Err(NrJsonError {
+                    error_type: CifErrorType::InvalidTransactionType(x.to_string()),
+                    field_name: "transaction_type".to_string(),
+                })
+            }
         };
-        let (stp_modification_type, is_stp) = read_stp_indicator(parsed_json.vstp_cif_msg_v1.schedule.cif_stp_indicator.as_str(), produce_nr_json_error_closure("CIF_stp_indicator".to_string()))?;
+        let (stp_modification_type, is_stp) = read_stp_indicator(
+            parsed_json
+                .vstp_cif_msg_v1
+                .schedule
+                .cif_stp_indicator
+                .as_str(),
+            produce_nr_json_error_closure("CIF_stp_indicator".to_string()),
+        )?;
 
         let main_train_id = parsed_json.vstp_cif_msg_v1.schedule.cif_train_uid.trim();
-        let begin = read_vstp_date(&parsed_json.vstp_cif_msg_v1.schedule.schedule_start_date, produce_nr_json_error_closure("schedule_start_date".to_string()))?;
+        let begin = read_vstp_date(
+            &parsed_json.vstp_cif_msg_v1.schedule.schedule_start_date,
+            produce_nr_json_error_closure("schedule_start_date".to_string()),
+        )?;
 
         // check that our schedule is the correct one
         if begin > *schedule.valid_end.as_ref().unwrap() {
-            println!("{} is later than {}, skipping...", begin, schedule.valid_end.as_ref().unwrap());
-            return Ok((schedule, false))
+            println!(
+                "{} is later than {}, skipping...",
+                begin,
+                schedule.valid_end.as_ref().unwrap()
+            );
+            return Ok((schedule, false));
         }
 
         // At this stage we have all the data we need for a simple delete, so handle this here
@@ -2626,41 +4370,68 @@ impl NrJsonImporter {
                 // first we delete main trains
                 old_trains.retain(|train| {
                     match is_stp {
-                        false => train.source.unwrap() != TrainSource::LongTerm || train.validity[0].valid_begin != begin, // delete the entire train for deleted inserts
-                        true => train.source.unwrap() == TrainSource::LongTerm || train.validity[0].valid_begin != begin,
+                        false => {
+                            train.source.unwrap() != TrainSource::LongTerm
+                                || train.validity[0].valid_begin != begin
+                        } // delete the entire train for deleted inserts
+                        true => {
+                            train.source.unwrap() == TrainSource::LongTerm
+                                || train.validity[0].valid_begin != begin
+                        }
                     }
                 });
-            }
-            else {
+            } else {
                 // now we clean up modifications/cancellations
                 for ref mut train in old_trains.iter_mut() {
                     match stp_modification_type {
-                        ModificationType::Insert => panic!("Insert found where Amend or Cancel expected"),
-                        ModificationType::Amend => train.replacements.retain(|replacement| replacement.validity[0].valid_begin != begin),
-                        ModificationType::Delete => train.cancellations.retain(|(cancellation, _days_of_week)| cancellation.valid_begin != begin),
+                        ModificationType::Insert => {
+                            panic!("Insert found where Amend or Cancel expected")
+                        }
+                        ModificationType::Amend => train
+                            .replacements
+                            .retain(|replacement| replacement.validity[0].valid_begin != begin),
+                        ModificationType::Delete => {
+                            train.cancellations.retain(|(cancellation, _days_of_week)| {
+                                cancellation.valid_begin != begin
+                            })
+                        }
                     }
                 }
             }
 
-            schedule.trains.insert(main_train_id.to_string(), old_trains);
+            schedule
+                .trains
+                .insert(main_train_id.to_string(), old_trains);
 
             println!("Successfully deleted train {}", main_train_id);
             return Ok((schedule, true));
         }
 
-        let end = read_vstp_date(&parsed_json.vstp_cif_msg_v1.schedule.schedule_end_date, produce_nr_json_error_closure("schedule_end_date".to_string()))?;
+        let end = read_vstp_date(
+            &parsed_json.vstp_cif_msg_v1.schedule.schedule_end_date,
+            produce_nr_json_error_closure("schedule_end_date".to_string()),
+        )?;
 
         // check that our schedule is the correct one
         if end < *schedule.valid_begin.as_ref().unwrap() {
-            println!("{} is earlier than {}, skipping...", begin, schedule.valid_end.as_ref().unwrap());
-            return Ok((schedule, false))
+            println!(
+                "{} is earlier than {}, skipping...",
+                begin,
+                schedule.valid_end.as_ref().unwrap()
+            );
+            return Ok((schedule, false));
         }
 
-        let days_of_week = read_days_of_week(&parsed_json.vstp_cif_msg_v1.schedule.schedule_days_runs, produce_nr_json_error_closure("schedule_days_runs".to_string()))?;
+        let days_of_week = read_days_of_week(
+            &parsed_json.vstp_cif_msg_v1.schedule.schedule_days_runs,
+            produce_nr_json_error_closure("schedule_days_runs".to_string()),
+        )?;
 
         // Now we handle STP cancellations; these are where long-running
         // trains are deleted as a one-off
-        if stp_modification_type == ModificationType::Delete && modification_type == ModificationType::Insert {
+        if stp_modification_type == ModificationType::Delete
+            && modification_type == ModificationType::Insert
+        {
             let old_trains = schedule.trains.remove(main_train_id);
             let mut old_trains = match old_trains {
                 None => return Ok((schedule, false)),
@@ -2669,7 +4440,13 @@ impl NrJsonImporter {
 
             // we cancel main trains
             for train in old_trains.iter_mut() {
-                if !check_date_applicability(&train.validity[0], &train.days_of_week, begin, end, &days_of_week) {
+                if !check_date_applicability(
+                    &train.validity[0],
+                    &train.days_of_week,
+                    begin,
+                    end,
+                    &days_of_week,
+                ) {
                     continue;
                 }
                 let new_cancel = TrainValidityPeriod {
@@ -2679,28 +4456,68 @@ impl NrJsonImporter {
                 train.cancellations.push((new_cancel, days_of_week.clone()))
             }
 
-            schedule.trains.insert(main_train_id.to_string(), old_trains);
+            schedule
+                .trains
+                .insert(main_train_id.to_string(), old_trains);
 
             println!("Successfully cancelled train {}", main_train_id);
             return Ok((schedule, true));
         }
 
-        let train_status = read_train_status(&parsed_json.vstp_cif_msg_v1.schedule.train_status, produce_nr_json_error_closure("train_status".to_string()))?;
+        let train_status = read_train_status(
+            &parsed_json.vstp_cif_msg_v1.schedule.train_status,
+            produce_nr_json_error_closure("train_status".to_string()),
+        )?;
 
-        if parsed_json.vstp_cif_msg_v1.schedule.schedule_segment.is_none() || parsed_json.vstp_cif_msg_v1.schedule.schedule_segment.as_ref().unwrap().len() == 0 {
-            return Err(NrJsonError { error_type: CifErrorType::NoScheduleSegments, field_name: "schedule_segment".to_string() } );
+        if parsed_json
+            .vstp_cif_msg_v1
+            .schedule
+            .schedule_segment
+            .is_none()
+            || parsed_json
+                .vstp_cif_msg_v1
+                .schedule
+                .schedule_segment
+                .as_ref()
+                .unwrap()
+                .len()
+                == 0
+        {
+            return Err(NrJsonError {
+                error_type: CifErrorType::NoScheduleSegments,
+                field_name: "schedule_segment".to_string(),
+            });
         }
 
         // actually in the variable train, but re-run it here to get runs as required
-        let (_, runs_as_required) = match &parsed_json.vstp_cif_msg_v1.schedule.schedule_segment.as_ref().unwrap()[0].cif_operating_characteristics {
-            Some(x) => read_operating_characteristics(x, produce_nr_json_error_closure("CIF_operating_characteristics".to_string()))?,
-            None => (OperatingCharacteristics { ..Default::default() }, false),
+        let (_, runs_as_required) = match &parsed_json
+            .vstp_cif_msg_v1
+            .schedule
+            .schedule_segment
+            .as_ref()
+            .unwrap()[0]
+            .cif_operating_characteristics
+        {
+            Some(x) => read_operating_characteristics(
+                x,
+                produce_nr_json_error_closure("CIF_operating_characteristics".to_string()),
+            )?,
+            None => (
+                OperatingCharacteristics {
+                    ..Default::default()
+                },
+                false,
+            ),
         };
 
-        let performance_monitoring = match &parsed_json.vstp_cif_msg_v1.schedule.applicable_timetable {
-            Some(x) => Some(read_ats_code(x, produce_nr_json_error_closure("applicable_timetable".to_string()))?),
-            None => None,
-        };
+        let performance_monitoring =
+            match &parsed_json.vstp_cif_msg_v1.schedule.applicable_timetable {
+                Some(x) => Some(read_ats_code(
+                    x,
+                    produce_nr_json_error_closure("applicable_timetable".to_string()),
+                )?),
+                None => None,
+            };
 
         // all of the below will use this so construct it now
         let new_train = Train {
@@ -2712,21 +4529,49 @@ impl NrJsonImporter {
             cancellations: vec![],
             replacements: vec![],
             days_of_week,
-            variable_train: self.read_vstp_variable_train(&parsed_json.vstp_cif_msg_v1.schedule.schedule_segment.as_ref().unwrap()[0], &train_status)?,
+            variable_train: self.read_vstp_variable_train(
+                &parsed_json
+                    .vstp_cif_msg_v1
+                    .schedule
+                    .schedule_segment
+                    .as_ref()
+                    .unwrap()[0],
+                &train_status,
+            )?,
             source: Some(TrainSource::VeryShortTerm),
             runs_as_required,
             performance_monitoring: performance_monitoring,
-            route: self.read_vstp_route(&parsed_json.vstp_cif_msg_v1.schedule.schedule_segment.as_ref().unwrap(), &train_status, main_train_id, &mut schedule)?,
+            route: self.read_vstp_route(
+                &parsed_json
+                    .vstp_cif_msg_v1
+                    .schedule
+                    .schedule_segment
+                    .as_ref()
+                    .unwrap(),
+                &train_status,
+                main_train_id,
+                &mut schedule,
+            )?,
         };
 
-        if modification_type == ModificationType::Insert && stp_modification_type == ModificationType::Insert {
-            println!("Successfully written train {} ({})", new_train.id, new_train.variable_train.public_id.as_ref().unwrap());
+        if modification_type == ModificationType::Insert
+            && stp_modification_type == ModificationType::Insert
+        {
+            println!(
+                "Successfully written train {} ({})",
+                new_train.id,
+                new_train.variable_train.public_id.as_ref().unwrap()
+            );
             println!("Output: {:#?}", new_train);
-            schedule.trains.entry(main_train_id.to_string()).or_insert(vec![]).push(new_train);
+            schedule
+                .trains
+                .entry(main_train_id.to_string())
+                .or_insert(vec![])
+                .push(new_train);
 
             return Ok((schedule, true));
         }
-        
+
         if stp_modification_type == ModificationType::Amend {
             let old_trains = schedule.trains.remove(main_train_id);
             let mut old_trains = match old_trains {
@@ -2736,14 +4581,22 @@ impl NrJsonImporter {
 
             // we replace main trains
             for train in old_trains.iter_mut() {
-                if !check_date_applicability(&train.validity[0], &train.days_of_week, begin, end, &days_of_week) {
+                if !check_date_applicability(
+                    &train.validity[0],
+                    &train.days_of_week,
+                    begin,
+                    end,
+                    &days_of_week,
+                ) {
                     continue;
                 }
                 train.replacements.push(new_train.clone())
             }
 
             println!("Successfully replaced train {}", main_train_id);
-            schedule.trains.insert(main_train_id.to_string(), old_trains);
+            schedule
+                .trains
+                .insert(main_train_id.to_string(), old_trains);
 
             return Ok((schedule, true));
         }
@@ -2768,7 +4621,7 @@ impl NrJsonImporter {
                 fs::rename(tmp_filename, filename).await?;
 
                 Ok(())
-            },
+            }
         }
     }
 }

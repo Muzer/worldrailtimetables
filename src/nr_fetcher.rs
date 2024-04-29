@@ -1,9 +1,9 @@
+use crate::error::Error;
+use crate::fetcher::Fetcher;
 use async_compression::tokio::bufread::GzipDecoder;
 use async_trait::async_trait;
-use reqwest::Client;
-use crate::fetcher::Fetcher;
-use crate::error::Error;
 use futures::stream::TryStreamExt;
+use reqwest::Client;
 use serde::Deserialize;
 
 use tokio::io::AsyncBufRead;
@@ -22,9 +22,7 @@ pub struct NrFetcherConfig {
 
 impl NrFetcher {
     pub fn new(config: NrFetcherConfig) -> Self {
-        Self {
-            config
-        }
+        Self { config }
     }
 }
 
