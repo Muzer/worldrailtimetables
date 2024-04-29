@@ -33,8 +33,8 @@
       <p>A site to allow you to browse train timetables of countries around the world, as long as they provide open data.</p>
       <p>Currently-supported namespaces:</p>
       <ul>
-        {% for namespace in namespaces %}
-        <li>{{ namespace }}</li>
+        {% for namespace, description in namespaces %}
+        <li>{{ namespace }}: {{ description }}</li>
         {% endfor %}
       </ul>
     </div>

@@ -12,6 +12,7 @@ pub struct Schedule {
     pub trains: HashMap<String, Vec<Train>>, // one ID could have multiple permanent schedules on
     // different dates
     pub namespace: String, // this is defined by me
+    pub description: String, // what this schedule actually is, again defined by me
     pub their_id: Option<String>,
     pub valid_begin: Option<DateTime<Tz>>,
     pub valid_end: Option<DateTime<Tz>>,
@@ -22,11 +23,12 @@ pub struct Schedule {
 }
 
 impl Schedule {
-    pub fn new(namespace: String) -> Self {
+    pub fn new(namespace: String, description: String) -> Self {
         Self {
             locations: HashMap::new(),
             trains: HashMap::new(),
-            namespace: namespace,
+            namespace,
+            description,
             their_id: None,
             valid_begin: None,
             valid_end: None,

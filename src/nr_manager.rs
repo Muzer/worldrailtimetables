@@ -54,7 +54,10 @@ impl NrManager<'_> {
             // lost
             let mut transaction = self.schedule_manager.transactional_write().await;
 
-            let mut schedule = Schedule::new("gbnr".to_string());
+            let mut schedule = Schedule::new(
+                "gbnr".to_string(),
+                "United Kingdom — Network Rail".to_string(),
+            );
 
             let mut reader = nr_fetcher.fetch().await?;
             schedule = cif_importer.overlay(&mut reader, schedule).await?;
@@ -81,7 +84,10 @@ impl NrManager<'_> {
                 let mut schedules = self.schedule_manager.immediate_write().await;
                 let mut schedule = match schedules.remove("gbnr") {
                     Some(x) => x,
-                    None => Schedule::new("gbnr".to_string()),
+                    None => Schedule::new(
+                        "gbnr".to_string(),
+                        "United Kingdom — Network Rail".to_string(),
+                    ),
                 };
                 schedule = nr_json_importer.overlay(res, schedule)?;
                 schedules.insert("gbnr".to_string(), schedule);

@@ -1,6 +1,7 @@
 use crate::nr_importer::CifError;
 use crate::nr_importer::NrJsonError;
 use crate::nr_vstp_subscriber::NrVstpError;
+use crate::webui::WebUiError;
 use anyhow;
 use config_file::ConfigFileError;
 use reqwest;
@@ -18,6 +19,7 @@ pub enum Error {
     NrVstpError(NrVstpError),
     SerdeJsonError(serde_json::Error),
     RocketError(rocket::Error),
+    WebUiError(WebUiError),
 }
 
 impl fmt::Display for Error {
