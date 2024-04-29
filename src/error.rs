@@ -17,6 +17,7 @@ pub enum Error {
     AnyhowError(anyhow::Error),
     NrVstpError(NrVstpError),
     SerdeJsonError(serde_json::Error),
+    RocketError(rocket::Error),
 }
 
 impl fmt::Display for Error {
@@ -72,5 +73,11 @@ impl From<NrVstpError> for Error {
 impl From<serde_json::Error> for Error {
     fn from(error: serde_json::Error) -> Self {
         Error::SerdeJsonError(error)
+    }
+}
+
+impl From<rocket::Error> for Error {
+    fn from(error: rocket::Error) -> Self {
+        Error::RocketError(error)
     }
 }
