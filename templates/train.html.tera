@@ -46,7 +46,29 @@
         </tr></thead>
         {% for location in train.route %}
         <tr style="border-bottom: none;">
-          <td style="border-bottom: none;">{{ locations[location.id].name }}{% if locations[location.id].public_id %} [{{ locations[location.id].public_id }}]{% endif %}</td>
+          {% if location.working_arr_day or location.working_arr_day == 0 %}
+            {% set day = location.working_arr_day %}
+          {% elif location.public_arr_day or location.public_arr_day == 0 %}
+            {% set day = location.public_arr_day %}
+          {% elif location.working_dep_day or location.working_dep_day == 0 %}
+            {% set day = location.working_dep_day %}
+          {% elif location.public_dep_day or location.public_dep_day == 0 %}
+            {% set day = location.public_dep_day %}
+          {% elif location.working_pass_day or location.working_pass_day == 0 %}
+            {% set day = location.working_pass_day %}
+          {% endif %}
+          {% if location.working_arr %}
+            {% set time = location.working_arr %}
+          {% elif location.public_arr %}
+            {% set time = location.public_arr %}
+          {% elif location.working_dep %}
+            {% set time = location.working_dep %}
+          {% elif location.public_dep %}
+            {% set time = location.public_dep %}
+          {% elif location.working_pass %}
+            {% set time = location.working_pass %}
+          {% endif %}
+          <td style="border-bottom: none;"><a href="/location{% if locations[location.id].public_id %}-public{% endif %}/{{ namespace }}/{% if locations[location.id].public_id %}{{ locations[location.id].public_id }}{% else %}{{ location.id }}{% endif %}/{{ dates[day] | split(pat="T") | first }}/{{ time | truncate(length=5, end="") }}">{{ locations[location.id].name }}{% if locations[location.id].public_id %} [{{ locations[location.id].public_id }}]{% endif %}</a></td>
           <td style="border-bottom: none;">{% if location.platform %}{{ location.platform }}{% endif %}</td>
           <td style="border-bottom: none;">{% if location.path %}{{ location.path }}&ndash;{% endif %}{% if location.line %}{{ location.line }}{% endif %}</td>
           <td style="border-bottom: none;">{% if location.working_arr %}{{ location.working_arr }}{% if location.working_arr_day > 0 %} +{{ location.working_arr_day }}{% endif %}{% endif %}</td>
@@ -103,6 +125,7 @@
         <li>Schedule ID: {{ train.id }}</li>
         <li>Valid: {% for validity in train.validity %}{{ validity.valid_begin | split(pat="T") | first }}&ndash;{{ validity.valid_end | split(pat="T") | first }}{% if not loop.last %}, {% endif %}{% endfor %}</li>
         <li>Valid days: {% if train.days_of_week.monday %}M{% endif %}{% if train.days_of_week.tuesday %}T{% endif %}{% if train.days_of_week.wednesday %}W{% endif %}{% if train.days_of_week.thursday %}Th{% endif %}{% if train.days_of_week.friday %}F{% endif %}{% if train.days_of_week.saturday %}S{% endif %}{% if train.days_of_week.sunday %}Su{% endif %}</li>
+        <li>Schedule: {{ namespace }} &mdash; {{ schedule_desc }}</li>
         <li>Source: {{ train.source }}</li>
         {% if train.runs_as_required %}
         <li>Runs as required</li>

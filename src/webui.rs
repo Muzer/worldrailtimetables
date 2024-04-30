@@ -1,4 +1,5 @@
 use chrono::{Datelike, NaiveDate, ParseError};
+use chrono::naive::Days;
 
 use crate::error::Error;
 use crate::schedule_manager::ScheduleManager;
@@ -7,8 +8,10 @@ use rocket::request::FromParam;
 use rocket::{get, routes, State};
 use rocket_dyn_templates::{context, Template};
 
+use std::cmp::max;
 use std::collections::HashMap;
 use std::fmt;
+use std::ops::Add;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -60,13 +63,13 @@ fn train(
     date: NaiveDateRocket,
     schedule_manager: &State<Arc<ScheduleManager>>,
 ) -> Option<Template> {
-    let (trains, locations) = {
+    let (trains, locations, schedule_desc) = {
         let schedule_manager = schedule_manager.read();
         match &schedule_manager.get(namespace) {
             None => return None,
             Some(schedule) => match schedule.trains.get(train_id) {
                 None => return None,
-                Some(train) => (train.clone(), schedule.locations.clone()),
+                Some(train) => (train.clone(), schedule.locations.clone(), schedule.description.clone()),
             },
         }
     };
@@ -104,12 +107,19 @@ fn train(
 
     match final_train {
         Some(train) => {
+            let mut dates = vec![];
+            for extra_days in 0..(max(train.route.last().unwrap().working_arr_day, train.route.last().unwrap().public_arr_day).unwrap() + 1) {
+                dates.push(date.add(Days::new(extra_days.into())));
+            }
+
             let context = context! {
                 train,
                 locations,
                 cancelled,
                 modified,
                 namespace: namespace.to_string(),
+                dates,
+                schedule_desc,
             };
 
             Some(Template::render("train", &context))
