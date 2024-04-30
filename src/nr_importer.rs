@@ -1500,6 +1500,7 @@ where
         },
         "E" => match timing_load.trim() {
             "325" => Some("Class 325 Parcels EMU".to_string()),
+            "92" => Some("Class 92 locomotive".to_string()),
             "" => None,
             x => {
                 if br_mark_four_coaches {
@@ -1783,9 +1784,10 @@ fn amend_train(train: &mut Train, new_train: Train) {
     train.validity = new_train.validity;
     train.days_of_week = new_train.days_of_week;
     train.runs_as_required = new_train.runs_as_required;
-    train.performance_monitoring = None;
-    train.route = vec![];
+    train.performance_monitoring = new_train.performance_monitoring;
+    train.route = new_train.route;
     train.variable_train = new_train.variable_train;
+    train.source = new_train.source;
 }
 
 fn read_mandatory_wtt_time<F, T>(slice: &str, error_logic: F) -> Result<NaiveTime, T>
@@ -3149,7 +3151,7 @@ impl CifImporter {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
-        let location_id = &line[2..9];
+        let location_id = &line[2..9].trim();
         let location_suffix = read_optional_string(&line[9..10]);
 
         let wtt_dep =
@@ -3230,7 +3232,7 @@ impl CifImporter {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
-        let location_id = &line[2..9];
+        let location_id = &line[2..9].trim();
         let location_suffix = read_optional_string(&line[9..10]);
 
         self.validate_change_en_route_location(location_id, &location_suffix, number, 2)?;
@@ -3343,7 +3345,7 @@ impl CifImporter {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
-        let location_id = &line[2..9];
+        let location_id = &line[2..9].trim();
         let location_suffix = read_optional_string(&line[9..10]);
 
         self.validate_change_en_route_location(location_id, &location_suffix, number, 2)?;
@@ -3456,7 +3458,7 @@ impl CifImporter {
             (train_type, train.variable_train.operator.clone())
         };
 
-        let location_id = &line[2..9];
+        let location_id = &line[2..9].trim();
         let location_suffix = read_optional_string(&line[9..10]);
 
         self.cr_location = Some((location_id.to_string(), location_suffix));
@@ -3550,8 +3552,8 @@ impl CifImporter {
         number: u64,
         modification_type: ModificationType,
     ) -> Result<Schedule, CifError> {
-        let tiploc = &line[2..9];
-        let name = &line[18..44];
+        let tiploc = &line[2..9].trim();
+        let name = &line[18..44].trim();
         let opt_crs = read_optional_string(&line[53..56]);
 
         let location = match modification_type {
@@ -3561,7 +3563,7 @@ impl CifImporter {
                 public_id: opt_crs.clone(),
             },
             ModificationType::Amend => {
-                let location = schedule.locations.remove(tiploc);
+                let location = schedule.locations.remove(*tiploc);
                 let mut location = match location {
                     None => {
                         return Err(CifError {
@@ -3578,7 +3580,7 @@ impl CifImporter {
                 location
             }
             ModificationType::Delete => {
-                schedule.locations.remove(tiploc); // it's OK if the TIPLOC isn't found
+                schedule.locations.remove(*tiploc); // it's OK if the TIPLOC isn't found
                 return Ok(schedule);
             }
         };
@@ -4340,6 +4342,7 @@ impl NrJsonImporter {
         {
             "Create" => ModificationType::Insert,
             "Delete" => ModificationType::Delete,
+            "Update" => ModificationType::Amend,
             x => {
                 return Err(NrJsonError {
                     error_type: CifErrorType::InvalidTransactionType(x.to_string()),
@@ -4587,7 +4590,59 @@ impl NrJsonImporter {
 
             return Ok((schedule, true));
         }
+        if modification_type == ModificationType::Amend {
+            let old_trains = schedule.trains.remove(main_train_id);
+            let mut old_trains = match old_trains {
+                None => return Ok((schedule, false)),
+                Some(x) => x,
+            };
 
+            // first we amend main trains
+            if stp_modification_type == ModificationType::Insert {
+                for ref mut train in old_trains.iter_mut() {
+                    if match is_stp {
+                        false => {
+                            train.source.unwrap() == TrainSource::LongTerm
+                                && train.validity[0].valid_begin == begin
+                        }
+                        true => {
+                            train.source.unwrap() != TrainSource::LongTerm
+                                && train.validity[0].valid_begin == begin
+                        }
+                    } {
+                        amend_train(train, new_train.clone());
+                    }
+                }
+            } else {
+                // now we clean up modifications/cancellations
+                for ref mut train in old_trains.iter_mut() {
+                    if stp_modification_type == ModificationType::Amend {
+                        for replacement in train.replacements.iter_mut() {
+                            if replacement.validity[0].valid_begin == begin {
+                                amend_train(replacement, new_train.clone());
+                            }
+                        }
+                    } else if stp_modification_type == ModificationType::Delete {
+                        for (cancellation, old_days_of_week) in train.cancellations.iter_mut() {
+                            if cancellation.valid_begin == begin {
+                                *cancellation = TrainValidityPeriod {
+                                    valid_begin: begin,
+                                    valid_end: end,
+                                };
+                                *old_days_of_week = days_of_week.clone();
+                            }
+                        }
+                    }
+                }
+            }
+
+            println!("Successfully updated train {}", main_train_id);
+            schedule
+                .trains
+                .insert(main_train_id.to_string(), old_trains);
+
+            return Ok((schedule, true));
+        }
         if stp_modification_type == ModificationType::Amend {
             let old_trains = schedule.trains.remove(main_train_id);
             let mut old_trains = match old_trains {

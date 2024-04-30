@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Train {% if train.variable_train.public_id %}{{ train.variable_train.public_id }}{% else %}{{ train.id }}{% endif %} &mdash; World Rail Timetables</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+  </head>
+  <body>
+    <nav class="navbar navbar-expand-lg bg-body-tertiary">
+      <div class="container-fluid">
+        <a class="navbar-brand" href="#">World Rail Timetables</a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
+          <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="navbarSupportedContent">
+          <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+            <li class="nav-item">
+              <a class="nav-link active" aria-current="page" href="#">Home</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" href="#">Search</a>
+            </li>
+          </ul>
+          <form class="d-flex" role="search">
+            <input class="form-control me-2" type="search" placeholder="Search" aria-label="Search">
+            <button class="btn btn-outline-success" type="submit">Search</button>
+          </form>
+        </div>
+      </div>
+    </nav>
+    <div class="container" role="main">
+      {% set train_first = train.route | first %}
+      {% set train_last = train.route | last %}
+      <h2>{{ namespace }}/{% if train.variable_train.public_id %}{{ train.variable_train.public_id }}{% endif %} {% if cancelled %} CANCELLED {% endif %}{% if modified %} MODIFIED {% endif %} {% if train.variable_train.name %}&ldquo;{{ train.variable_train.name }}&rdquo;{% endif %} {% if train_first.public_dep %}{{ train_first.public_dep | truncate(length=5, end="") }}{% else %}{{ train_first.working_dep }}{% endif %} {{ locations[train_first.id].name }} to {{ locations[train_last.id].name }}</h2>
+      <table class="table table-sm"><thead>
+        <tr>
+          <th>Station</th>
+          <th>Platform</th>
+          <th>Route</th>
+          <th>Working Arr</th>
+          <th>Working Pass</th>
+          <th>Working Dep</th>
+          <th>Public Arr</th>
+          <th>Public Dep</th>
+        </tr></thead>
+        {% for location in train.route %}
+        <tr style="border-bottom: none;">
+          <td style="border-bottom: none;">{{ locations[location.id].name }}{% if locations[location.id].public_id %} [{{ locations[location.id].public_id }}]{% endif %}</td>
+          <td style="border-bottom: none;">{% if location.platform %}{{ location.platform }}{% endif %}</td>
+          <td style="border-bottom: none;">{% if location.path %}{{ location.path }}&ndash;{% endif %}{% if location.line %}{{ location.line }}{% endif %}</td>
+          <td style="border-bottom: none;">{% if location.working_arr %}{{ location.working_arr }}{% if location.working_arr_day > 0 %} +{{ location.working_arr_day }}{% endif %}{% endif %}</td>
+          <td style="border-bottom: none;">{% if location.working_pass %}{{ location.working_pass }}{% if location.working_pass_day > 0 %} +{{ location.working_pass_day }}{% endif %}{% endif %}</td>
+          <td style="border-bottom: none;">{% if location.working_dep %}{{ location.working_dep }}{% if location.working_dep_day > 0 %} +{{ location.working_dep_day }}{% endif %}{% endif %}</td>
+          <td style="border-bottom: none;">{% if location.public_arr %}{{ location.public_arr | truncate(length=5, end="") }}{% if location.public_arr_day > 0 %} +{{ location.public_arr_day }}{% endif %}{% endif %}</td>
+          <td style="border-bottom: none;">{% if location.public_dep %}{{ location.public_dep | truncate(length=5, end="") }}{% if location.public_dep_day > 0 %} +{{ location.public_dep_day }}{% endif %}{% endif %}</td>
+        </tr>
+        <tr style="border-top: none;">
+          <td colspan="8" style="border-top: none;">{% if location.engineering_allowance_s and location.engineering_allowance_s > 0 %}Eng: {{ location.engineering_allowance_s / 60.0 }}min. {% endif %}{% if location.pathing_allowance_s and location.pathing_allowance_s > 0 %}Pth: {{ location.pathing_allowance_s / 60.0 }}min. {% endif %}{% if location.performance_allowance_s and location.performance_allowance_s > 0 %}Pfm: {{ location.performance_allowance_s / 60.0 }}min. {% endif %}
+            {% if location.activities %}
+              {% if location.activities.detach %}Detaches coaches.{% endif %}
+              {% if location.activities.attach %}Attaches coaches.{% endif %}
+              {% if location.activities.other_trains_pass %}Lets other trains pass.{% endif %}
+              {% if location.activities.attach_or_detach_assisting_loco %}Attaches or detaches an assisting locomotive.{% endif %}
+              {% if location.activities.x_on_arrival %}Shows X on arrival.{% endif %}
+              {% if location.activities.banking_loco %}Banking locomotive.{% endif %}
+              {% if location.activities.crew_change %}Crew change.{% endif %}
+              {% if location.activities.set_down_only %}Sets down passengers only.{% endif %}
+              {% if location.activities.examination %}Examination.{% endif %}
+              {% if location.activities.gbprtt %}GBPRTT.{% endif %}
+              {% if location.activities.prevent_column_merge %}Prevent column merge.{% endif %}
+              {% if location.activities.prevent_third_column_merge %}Prevent third column merge.{% endif %}
+              {% if location.activities.passenger_count %}Passenger count.{% endif %}
+              {% if location.activities.ticket_collection %}Ticket collection.{% endif %}
+              {% if location.activities.ticket_examination %}Ticket examination.{% endif %}
+              {% if location.activities.first_class_ticket_examination %}First class ticket examination.{% endif %}
+              {% if location.activities.selective_ticket_examination %}Selective ticket examination.{% endif %}
+              {% if location.activities.change_loco %}Changes locomotive.{% endif %}
+              {% if location.activities.unadvertised_stop %}Unadvertised.{% endif %}
+              {% if location.activities.operational_stop %}Operational.{% endif %}
+              {% if location.activities.train_locomotive_on_rear %}Train locomotive on rear.{% endif %}
+              {% if location.activities.propelling %}Propelling.{% endif %}
+              {% if location.activities.request_stop %}Request.{% endif %}
+              {% if location.activities.reversing_move %}Reversing move.{% endif %}
+              {% if location.activities.run_round %}Run round.{% endif %}
+              {% if location.activities.staff_stop %}Staff.{% endif %}
+              {% if location.activities.normal_passenger_stop %}Picks up and sets down passengers.{% endif %}
+              {% if location.activities.train_begins %}Train begins.{% endif %}
+              {% if location.activities.train_finishes %}Train finishes.{% endif %}
+              {% if location.activities.tops_reporting %}TOPS reporting.{% endif %}
+              {% if location.activities.token_etc %}Changes token/etc..{% endif %}
+              {% if location.activities.pick_up_only %}Picks up passengers only.{% endif %}
+              {% if location.activities.watering_stock %}Stock is watered.{% endif %}
+              {% if location.activities.cross_at_passing_point %}Crosses other trains at passing point.{% endif %}
+            {% endif %}
+            {% if location.change_en_route %}Train details change (see below).{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+      <h3>Train details</h3>
+      <ul>
+        <li>Schedule ID: {{ train.id }}</li>
+        <li>Valid: {% for validity in train.validity %}{{ validity.valid_begin | split(pat="T") | first }}&ndash;{{ validity.valid_end | split(pat="T") | first }}{% if not loop.last %}, {% endif %}{% endfor %}</li>
+        <li>Valid days: {% if train.days_of_week.monday %}M{% endif %}{% if train.days_of_week.tuesday %}T{% endif %}{% if train.days_of_week.wednesday %}W{% endif %}{% if train.days_of_week.thursday %}Th{% endif %}{% if train.days_of_week.friday %}F{% endif %}{% if train.days_of_week.saturday %}S{% endif %}{% if train.days_of_week.sunday %}Su{% endif %}</li>
+        <li>Source: {{ train.source }}</li>
+        {% if train.runs_as_required %}
+        <li>Runs as required</li>
+        {% endif %}
+        {% if train.performance_monitoring %}
+        <li>Performance monitored</li>
+        {% endif %}
+        <li>Train type: {{ train.variable_train.train_type }}</li>
+        {% if train.variable_train.public_id %}
+        <li>Public ID: {{ train.variable_train.public_id }}</li>
+        {% endif %}
+        {% if train.variable_train.headcode %}
+        <li>Headcode: {{ train.variable_train.headcode }}</li>
+        {% endif %}
+        {% if train.variable_train.service_group %}
+        <li>Service group: {{ train.variable_train.service_group }}</li>
+        {% endif %}
+        {% if train.variable_train.power_type %}
+        <li>Power type: {{ train.variable_train.power_type }}</li>
+        {% endif %}
+        {% if train.variable_train.timing_allocation %}
+        <li>Timing allocation: {{ train.variable_train.timing_allocation.id }} &mdash; {{ train.variable_train.timing_allocation.description }}</li> {# TODO vehicles #}
+        {% endif %}
+        {% if train.variable_train.actual_allocation %}
+        <li>Actual allocation: {{ train.variable_train.actual_allocation.id }} &mdash; {{ train.variable_train.actual_allocation.description }}</li> {# TODO vehicles #}
+        {% endif %}
+        {% if train.variable_train.timing_speed_m_per_s %}
+        <li>Timing speed: {{ train.variable_train.timing_speed_m_per_s }}m/s</li>
+        {% endif %}
+        {% if train.variable_train.operating_characteristics %}
+        <li>Operating characteristics: {% if train.variable_train.operating_characteristics.vacuum_braked %}Vacuum braked. {% endif %}{% if train.variable_train.operating_characteristics.one_hundred_mph %}100mph capable stock. {% endif %}{% if train.variable_train.operating_characteristics.driver_only_passenger %}Driver only-operated passenger train. {% endif %}{% if train.variable_train.operating_characteristics.br_mark_four_coaches %}Hauls British Rail Mk 4 coaches. {% endif %}{% if train.variable_train.operating_characteristics.guard_required %}Requires a guard. {% endif %}{% if train.variable_train.operating_characteristics.one_hundred_and_ten_mph %}110mph capable stock. {% endif %}{% if train.variable_train.operating_characteristics.push_pull %}Push-pull. {% endif %}{% if train.variable_train.operating_characteristics.air_conditioned_with_pa %}Air-conditioned with public address system. {% endif %}{% if train.variable_train.operating_characteristics.steam_heat %}Steam heated. {% endif %}{% if train.variable_train.operating_characteristics.runs_to_locations_as_required %}Runs to certain locations as required. {% endif %}{% if train.variable_train.operating_characteristics.sb1c_gauge %}Conveys SB1C gauge wagons. {% endif %}</li>
+        {% endif %}
+        {% if train.variable_train.has_first_class_seats or train.variable_train.has_second_class_seats %}
+        <li>Seating classes: {% if train.variable_train.has_first_class_seats %} 1 {% endif %}{% if train.variable_train.has_second_class_seats %} 2 {% endif %}</li>
+        {% endif %}
+        {% if train.variable_train.has_first_class_sleepers or train.variable_train.has_second_class_sleepers %}
+        <li>Sleeper classes: {% if train.variable_train.has_first_class_sleepers %} 1 {% endif %}{% if train.variable_train.has_second_class_sleepers %} 2 {% endif %}</li>
+        {% endif %}
+        {% if train.variable_train.carries_vehicles %}
+        <li>Carries road vehicles</li>
+        {% endif %}
+        {% if train.variable_train.reservations %}
+        <li>Reservations: Seats {{ train.variable_train.reservations.seats }}, Bicycles {{ train.variable_train.reservations.bicycles }}, Sleepers {{ train.variable_train.reservations.sleepers }}, Road Vehicles {{ train.variable_train.reservations.vehicles }}, Wheelchairs {{ train.variable_train.reservations.wheelchairs }}</li>
+        {% endif %}
+        {% if train.variable_train.catering %}
+        <li>Catering: {% if train.variable_train.catering.buffet %}Buffet service. {% endif %}{% if train.variable_train.catering.first_class_restaurant %}Restaurant for first class passengers. {% endif %}{% if train.variable_train.catering.hot_food %}Hot food. {% endif %}{% if train.variable_train.catering.first_class_meal %}Meal included for first class passengers. {% endif %}{% if train.variable_train.catering.restaurant %}Restaurant car. {% endif %}{% if train.variable_train.catering.trolley %}Trolley. {% endif %}</li>
+        {% endif %}
+        {% if train.variable_train.brand %}
+        <li>Brand: {{ train.variable_train.brand }}</li>
+        {% endif %}
+        {% if train.variable_train.name %}
+        <li>Name: {{ train.variable_train.name }}</li>
+        {% endif %}
+        {% if train.variable_train.uic_code %}
+        <li>UIC code: {{ train.variable_train.uic_code }}</li>
+        {% endif %}
+        {% if train.variable_train.operator %}
+        <li>Operator: {{ train.variable_train.operator.id }}{% if train.variable_train.operator.description %} &mdash; {{ train.variable_train.operator.description }}{% endif %}</li>
+        {% endif %}
+      </ul>
+      {% for location in train.route %}
+        {% if location.change_en_route %}
+          <h4>From {{ locations[location.id].name }}</h4>
+          <ul>
+            <li>Train type: {{ location.change_en_route.train_type }}</li>
+            {% if location.change_en_route.public_id %}
+            <li>Public ID: {{ location.change_en_route.public_id }}</li>
+            {% endif %}
+            {% if location.change_en_route.headcode %}
+            <li>Headcode: {{ location.change_en_route.headcode }}</li>
+            {% endif %}
+            {% if location.change_en_route.service_group %}
+            <li>Service group: {{ location.change_en_route.service_group }}</li>
+            {% endif %}
+            {% if location.change_en_route.power_type %}
+            <li>Power type: {{ location.change_en_route.power_type }}</li>
+            {% endif %}
+            {% if location.change_en_route.timing_allocation %}
+            <li>Timing allocation: {{ location.change_en_route.timing_allocation.id }} &mdash; {{ location.change_en_route.timing_allocation.description }}</li> {# TODO vehicles #}
+            {% endif %}
+            {% if location.change_en_route.actual_allocation %}
+            <li>Actual allocation: {{ location.change_en_route.actual_allocation.id }} &mdash; {{ location.change_en_route.actual_allocation.description }}</li> {# TODO vehicles #}
+            {% endif %}
+            {% if location.change_en_route.timing_speed_m_per_s %}
+            <li>Timing speed: {{ location.change_en_route.timing_speed_m_per_s }}m/s</li>
+            {% endif %}
+            {% if location.change_en_route.operating_characteristics %}
+            <li>Operating characteristics: {% if location.change_en_route.operating_characteristics.vacuum_braked %}Vacuum braked. {% endif %}{% if location.change_en_route.operating_characteristics.one_hundred_mph %}100mph capable stock. {% endif %}{% if location.change_en_route.operating_characteristics.driver_only_passenger %}Driver only-operated passenger train. {% endif %}{% if location.change_en_route.operating_characteristics.br_mark_four_coaches %}Hauls British Rail Mk 4 coaches. {% endif %}{% if location.change_en_route.operating_characteristics.guard_required %}Requires a guard. {% endif %}{% if location.change_en_route.operating_characteristics.one_hundred_and_ten_mph %}110mph capable stock. {% endif %}{% if location.change_en_route.operating_characteristics.push_pull %}Push-pull. {% endif %}{% if location.change_en_route.operating_characteristics.air_conditioned_with_pa %}Air-conditioned with public address system. {% endif %}{% if location.change_en_route.operating_characteristics.steam_heat %}Steam heated. {% endif %}{% if location.change_en_route.operating_characteristics.runs_to_locations_as_required %}Runs to certain locations as required. {% endif %}{% if location.change_en_route.operating_characteristics.sb1c_gauge %}Conveys SB1C gauge wagons. {% endif %}</li>
+            {% endif %}
+            {% if location.change_en_route.has_first_class_seats or location.change_en_route.has_second_class_seats %}
+            <li>Seating classes: {% if location.change_en_route.has_first_class_seats %} 1 {% endif %}{% if location.change_en_route.has_second_class_seats %} 2 {% endif %}</li>
+            {% endif %}
+            {% if location.change_en_route.has_first_class_sleepers or location.change_en_route.has_second_class_sleepers %}
+            <li>Sleeper classes: {% if location.change_en_route.has_first_class_sleepers %} 1 {% endif %}{% if location.change_en_route.has_second_class_sleepers %} 2 {% endif %}</li>
+            {% endif %}
+            {% if location.change_en_route.carries_vehicles %}
+            <li>Carries road vehicles</li>
+            {% endif %}
+            {% if location.change_en_route.reservations %}
+            <li>Reservations: Seats {{ location.change_en_route.reservations.seats }}, Bicycles {{ location.change_en_route.reservations.bicycles }}, Sleepers {{ location.change_en_route.reservations.sleepers }}, Road Vehicles {{ location.change_en_route.reservations.vehicles }}, Wheelchairs {{ location.change_en_route.reservations.wheelchairs }}</li>
+            {% endif %}
+            {% if location.change_en_route.catering %}
+            <li>Catering: {% if location.change_en_route.catering.buffet %}Buffet service. {% endif %}{% if location.change_en_route.catering.first_class_restaurant %}Restaurant for first class passengers. {% endif %}{% if location.change_en_route.catering.hot_food %}Hot food. {% endif %}{% if location.change_en_route.catering.first_class_meal %}Meal included for first class passengers. {% endif %}{% if location.change_en_route.catering.restaurant %}Restaurant car. {% endif %}{% if location.change_en_route.catering.trolley %}Trolley. {% endif %}</li>
+            {% endif %}
+            {% if location.change_en_route.brand %}
+            <li>Brand: {{ location.change_en_route.brand }}</li>
+            {% endif %}
+            {% if location.change_en_route.name %}
+            <li>Name: {{ location.change_en_route.name }}</li>
+            {% endif %}
+            {% if location.change_en_route.uic_code %}
+            <li>UIC code: {{ location.change_en_route.uic_code }}</li>
+            {% endif %}
+            {% if location.change_en_route.operator %}
+            <li>Operator: {{ location.change_en_route.operator.id }}{% if location.change_en_route.operator.description %} &mdash; {{ location.change_en_route.operator.description }}{% endif %}</li>
+            {% endif %}
+          </ul>
+        {% endif %}
+      {% endfor %}
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
+  </body>
+</html>
