@@ -32,7 +32,7 @@
     <div class="container" role="main">
       {% set train_first = train.route | first %}
       {% set train_last = train.route | last %}
-      <h2>{{ namespace }}/{% if train.variable_train.public_id %}{{ train.variable_train.public_id }}{% endif %} {% if cancelled %} CANCELLED {% endif %}{% if modified %} MODIFIED {% endif %} {% if train.variable_train.name %}&ldquo;{{ train.variable_train.name }}&rdquo;{% endif %} {% if train_first.public_dep %}{{ train_first.public_dep | truncate(length=5, end="") }}{% else %}{{ train_first.working_dep }}{% endif %} {{ locations[train_first.id].name }} to {{ locations[train_last.id].name }}</h2>
+      <h2>{{ namespace }}/{% if train.variable_train.public_id %}{{ train.variable_train.public_id }}{% else %}{{ train.id }}{% endif %} {% if cancelled %} CANCELLED {% endif %}{% if modified %} MODIFIED {% endif %} {% if train.variable_train.name %}&ldquo;{{ train.variable_train.name }}&rdquo;{% endif %} {% if train_first.public_dep %}{{ train_first.public_dep | truncate(length=5, end="") }}{% else %}{{ train_first.working_dep }}{% endif %} {{ locations[train_first.id].name }} to {{ locations[train_last.id].name }} on {{ dates | first | split(pat="T") | first }}</h2>
       <table class="table table-sm"><thead>
         <tr>
           <th>Station</th>
@@ -116,6 +116,27 @@
               {% if location.activities.cross_at_passing_point %}Crosses other trains at passing point.{% endif %}
             {% endif %}
             {% if location.change_en_route %}Train details change (see below).{% endif %}
+            {% set defaulted_suffix = location.id_suffix | default(value="") %}
+            {% set key = location.id ~ "|" ~ defaulted_suffix %}
+            {% if key in assoc_train_details %}
+              {% set assoc_trains = assoc_train_details[key] %}
+              {% for assoc_train in assoc_trains %}
+                {% if assoc_train.category == "Divide" %}
+                  Divides to form
+                {% elif assoc_train.category == "Join" %}
+                  Joins to
+                {% elif assoc_train.category == "Next" %}
+                  Forms next service
+                {% elif assoc_train.category == "DividesFrom" %}
+                  Divides from
+                {% elif assoc_train.category == "IsJoinedToBy" %}
+                  Is joined to by
+                {% else %}
+                  Forms from
+                {% endif %}
+                <a href="/train/{{ assoc_train.namespace }}/{{ assoc_train.id }}/{{ assoc_train.date | split(pat="T") | first }}">{{ namespace }}/{% if assoc_train.public_id %}{{ assoc_train.public_id }}{% else %}{{ assoc_train.id }}{% endif %} {% if assoc_train.name %}&ldquo;{{ assoc_train.name }}&rdquo;{% endif %} {{ assoc_train.dep_time | truncate(length=5, end="") }} {{ locations[assoc_train.origin_id].name }} to {{ locations[assoc_train.destination_id].name }}</a> {% if assoc_train.is_public %}for the public{% else %}for operational reasons{% endif %}.
+              {% endfor %}
+            {% endif %}
           </td>
         </tr>
         {% endfor %}

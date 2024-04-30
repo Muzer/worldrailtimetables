@@ -239,7 +239,6 @@ fn check_date_applicability(
 
 fn write_assocs_to_trains(
     trains: &mut Vec<Train>,
-    train_id: &str,
     location: &str,
     location_suffix: &Option<String>,
     assocs: &Vec<(AssociationNode, AssociationCategory)>,
@@ -248,7 +247,6 @@ fn write_assocs_to_trains(
         // recurse on replacements
         write_assocs_to_trains(
             &mut train.replacements,
-            &train_id,
             &location,
             &location_suffix,
             &assocs,
@@ -2385,7 +2383,7 @@ impl CifImporter {
         let main_train_id = &line[3..9];
         let other_train_id = &line[9..15];
         let begin = read_date(&line[15..21], produce_cif_error_closure(number, 15))?;
-        let location = &line[37..44];
+        let location = &line[37..44].trim();
         let location_suffix = read_optional_string(&line[44..45]);
         let other_train_location_suffix = read_optional_string(&line[45..46]);
 
@@ -3650,7 +3648,7 @@ impl CifImporter {
                 }
             };
 
-            write_assocs_to_trains(&mut trains, &train_id, &location, &location_suffix, &assocs);
+            write_assocs_to_trains(&mut trains, &location, &location_suffix, &assocs);
         }
         self.unwritten_assocs.clear();
 
@@ -4335,7 +4333,7 @@ impl NrJsonImporter {
         parsed_json: &NrJsonVstp,
         mut schedule: Schedule,
     ) -> Result<(Schedule, bool), NrJsonError> {
-        println!("Input: {:#?}", parsed_json);
+        //println!("Input: {:#?}", parsed_json);
         let modification_type = match parsed_json
             .vstp_cif_msg_v1
             .schedule
@@ -4583,7 +4581,7 @@ impl NrJsonImporter {
                 new_train.id,
                 new_train.variable_train.public_id.as_ref().unwrap()
             );
-            println!("Output: {:#?}", new_train);
+            //println!("Output: {:#?}", new_train);
             schedule
                 .trains
                 .entry(main_train_id.to_string())
