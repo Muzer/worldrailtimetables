@@ -1926,6 +1926,8 @@ where
             "-U" => activities.attach = true,
             "W " => activities.watering_stock = true,
             "X " => activities.cross_at_passing_point = true,
+            // found in VSTP, this is its meaning in paper WTTs
+            "* " => activities.other_trains_pass = true,
             "  " => (),
             x => return Err(error_logic(CifErrorType::InvalidActivity(x.to_string()))),
         };

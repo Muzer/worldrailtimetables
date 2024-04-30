@@ -1,5 +1,5 @@
-use chrono::{Datelike, NaiveDate, ParseError};
 use chrono::naive::Days;
+use chrono::{Datelike, NaiveDate, ParseError};
 
 use crate::error::Error;
 use crate::schedule_manager::ScheduleManager;
@@ -69,7 +69,11 @@ fn train(
             None => return None,
             Some(schedule) => match schedule.trains.get(train_id) {
                 None => return None,
-                Some(train) => (train.clone(), schedule.locations.clone(), schedule.description.clone()),
+                Some(train) => (
+                    train.clone(),
+                    schedule.locations.clone(),
+                    schedule.description.clone(),
+                ),
             },
         }
     };
@@ -81,12 +85,18 @@ fn train(
     let date = date.0;
     for train in &trains {
         for validity in &train.validity {
-            if validity.valid_begin.date_naive() <= date && validity.valid_end.date_naive() >= date && train.days_of_week.get_by_weekday(date.weekday()) {
+            if validity.valid_begin.date_naive() <= date
+                && validity.valid_end.date_naive() >= date
+                && train.days_of_week.get_by_weekday(date.weekday())
+            {
                 cancelled = false;
                 modified = false;
                 'replacement: for replacement in &train.replacements {
                     for validity in &replacement.validity {
-                        if validity.valid_begin.date_naive() <= date && validity.valid_end.date_naive() >= date && train.days_of_week.get_by_weekday(date.weekday()) {
+                        if validity.valid_begin.date_naive() <= date
+                            && validity.valid_end.date_naive() >= date
+                            && train.days_of_week.get_by_weekday(date.weekday())
+                        {
                             final_train = Some(replacement.clone());
                             modified = true;
                             break 'replacement;
@@ -97,7 +107,10 @@ fn train(
                     final_train = Some(train.clone());
                 }
                 for (cancellation, weekdays) in &train.cancellations {
-                    if cancellation.valid_begin.date_naive() <= date && cancellation.valid_end.date_naive() >= date && weekdays.get_by_weekday(date.weekday()) {
+                    if cancellation.valid_begin.date_naive() <= date
+                        && cancellation.valid_end.date_naive() >= date
+                        && weekdays.get_by_weekday(date.weekday())
+                    {
                         cancelled = true;
                     }
                 }
@@ -108,7 +121,13 @@ fn train(
     match final_train {
         Some(train) => {
             let mut dates = vec![];
-            for extra_days in 0..(max(train.route.last().unwrap().working_arr_day, train.route.last().unwrap().public_arr_day).unwrap() + 1) {
+            for extra_days in 0..(max(
+                train.route.last().unwrap().working_arr_day,
+                train.route.last().unwrap().public_arr_day,
+            )
+            .unwrap()
+                + 1)
+            {
                 dates.push(date.add(Days::new(extra_days.into())));
             }
 
@@ -123,7 +142,7 @@ fn train(
             };
 
             Some(Template::render("train", &context))
-        },
+        }
         None => None,
     }
 }

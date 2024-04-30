@@ -11,7 +11,7 @@ pub struct Schedule {
     pub locations: HashMap<String, Location>,
     pub trains: HashMap<String, Vec<Train>>, // one ID could have multiple permanent schedules on
     // different dates
-    pub namespace: String, // this is defined by me
+    pub namespace: String,   // this is defined by me
     pub description: String, // what this schedule actually is, again defined by me
     pub their_id: Option<String>,
     pub valid_begin: Option<DateTime<Tz>>,
