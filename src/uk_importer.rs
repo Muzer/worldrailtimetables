@@ -42,7 +42,7 @@ pub struct CifImporter {
     config: CifImporterConfig,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum CifErrorType {
     InvalidRecordType(String),
     InvalidRecordLength(usize),
@@ -1160,9 +1160,9 @@ fn trains_replace_rev_assoc(
 fn produce_cif_error_closure(
     number: u64,
     column: usize,
-) -> Box<dyn FnOnce(CifErrorType) -> CifError> {
+) -> Box<dyn Fn(CifErrorType) -> CifError> {
     Box::new(move |x| CifError {
-        error_type: x,
+        error_type: x.clone(),
         line: number,
         column: column,
     })
@@ -1170,10 +1170,10 @@ fn produce_cif_error_closure(
 
 fn produce_nr_json_error_closure(
     field_name: String,
-) -> Box<dyn FnOnce(CifErrorType) -> NrJsonError> {
+) -> Box<dyn Fn(CifErrorType) -> NrJsonError> {
     Box::new(move |x| NrJsonError {
-        error_type: x,
-        field_name: field_name,
+        error_type: x.clone(),
+        field_name: field_name.clone(),
     })
 }
 
@@ -3731,6 +3731,15 @@ impl CifImporter {
             }
         }
 
+        // can now validate locations
+        for (_id, trains) in &schedule.trains {
+            validate_train_locations(
+                &trains,
+                &schedule.locations,
+                &produce_cif_error_closure(0, 0),
+            )?;
+        }
+
         Ok(schedule)
     }
 
@@ -3771,6 +3780,41 @@ impl CifImporter {
             }),
         }
     }
+}
+
+fn validate_train_location<F, T>(
+    train: &Train,
+    locations: &HashMap<String, Location>,
+    error_logic: &F,
+) -> Result<(), T>
+where
+    F: Fn(CifErrorType) -> T,
+{
+    validate_train_locations(&train.replacements, &locations, error_logic)?;
+    for location in &train.route {
+        if !locations.contains_key(&location.id) {
+            return Err(error_logic(CifErrorType::LocationNotFound(
+                location.id.clone(),
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_train_locations<F, T>(
+    trains: &Vec<Train>,
+    locations: &HashMap<String, Location>,
+    error_logic: &F,
+) -> Result<(), T>
+where
+    F: Fn(CifErrorType) -> T,
+{
+    for train in trains {
+        validate_train_location(&train, &locations, error_logic)?;
+    }
+
+    Ok(())
 }
 
 #[async_trait]
@@ -4644,6 +4688,12 @@ impl NrJsonImporter {
                 &mut schedule,
             )?,
         };
+
+        validate_train_location(
+            &new_train,
+            &schedule.locations,
+            &produce_nr_json_error_closure("".to_string()),
+        )?;
 
         if modification_type == ModificationType::Insert
             && stp_modification_type == ModificationType::Insert
