@@ -1,0 +1,418 @@
+[
+  {
+    "id": "AD",
+    "name": "Adelaide",
+    "public_id": "ADE"
+  },
+  {
+    "id": "AN",
+    "name": "Antrim",
+    "public_id": "ANT"
+  },
+  {
+    "id": "BA",
+    "name": "Ballymena",
+    "public_id": "BAM"
+  },
+  {
+    "id": "BC",
+    "name": "Ballycarry",
+    "public_id": "BCY"
+  },
+  {
+    "id": "BE",
+    "name": "Titanic Quarter",
+    "public_id": "BRI"
+  },
+  {
+    "id": "BG",
+    "name": "Bleach Green Junction",
+    "public_id": "BGJ"
+  },
+  {
+    "id": "BL",
+    "name": "Balmoral",
+    "public_id": "BAL"
+  },
+  {
+    "id": "BN",
+    "name": "Bellarena",
+    "public_id": "BEL"
+  },
+  {
+    "id": "BR",
+    "name": "Bangor",
+    "public_id": "BGS"
+  },
+  {
+    "id": "BT",
+    "name": "Botanic",
+    "public_id": "BOT"
+  },
+  {
+    "id": "BW",
+    "name": "Bangor West",
+    "public_id": "BGW"
+  },
+  {
+    "id": "BY",
+    "name": "Ballymoney",
+    "public_id": "BMY"
+  },
+  {
+    "id": "CA",
+    "name": "Carnalea",
+    "public_id": "CAR"
+  },
+  {
+    "id": "CD",
+    "name": "Coleraie Fuel Siding",
+    "public_id": "CFS"
+  },
+  {
+    "id": "CE",
+    "name": "Coleraine",
+    "public_id": "COL"
+  },
+  {
+    "id": "CH",
+    "name": "City Hospital",
+    "public_id": "CYH"
+  },
+  {
+    "id": "CJ",
+    "name": "Central Junction",
+    "public_id": "CLJ"
+  },
+  {
+    "id": "CK",
+    "name": "Castlerock",
+    "public_id": "CAS"
+  },
+  {
+    "id": "CL",
+    "name": "Lanyon Place",
+    "public_id": "BFC"
+  },
+  {
+    "id": "CP",
+    "name": "Clipperstown",
+    "public_id": "CLT"
+  },
+  {
+    "id": "CS",
+    "name": "Carrickfergus",
+    "public_id": "CFS"
+  },
+  {
+    "id": "CT",
+    "name": "Cultra",
+    "public_id": "CUA"
+  },
+  {
+    "id": "CY",
+    "name": "Cullybackey",
+    "public_id": "CUL"
+  },
+  {
+    "id": "DH",
+    "name": "Derriaghy",
+    "public_id": "DER"
+  },
+  {
+    "id": "DM",
+    "name": "Dunmurry",
+    "public_id": "DUN"
+  },
+  {
+    "id": "DP",
+    "name": "Downshire",
+    "public_id": "DNS"
+  },
+  {
+    "id": "DQ",
+    "name": "Donegall Quay Loop",
+    "public_id": "DQL"
+  },
+  {
+    "id": "DV",
+    "name": "Dhu Varren",
+    "public_id": "DHV"
+  },
+  {
+    "id": "FY",
+    "name": "Finaghy",
+    "public_id": "FIN"
+  },
+  {
+    "id": "GD",
+    "name": "Greenisland",
+    "public_id": "GNI"
+  },
+  {
+    "id": "GN",
+    "name": "Glynn",
+    "public_id": "GLY"
+  },
+  {
+    "id": "HB",
+    "name": "Helen's Bay",
+    "public_id": "HEL"
+  },
+  {
+    "id": "HD",
+    "name": "Hilden",
+    "public_id": "HIL"
+  },
+  {
+    "id": "HW",
+    "name": "Holywood",
+    "public_id": "HOL"
+  },
+  {
+    "id": "JN",
+    "name": "Jordanstown",
+    "public_id": "JNT"
+  },
+  {
+    "id": "KN",
+    "name": "Killagan",
+    "public_id": "KIN"
+  },
+  {
+    "id": "KT",
+    "name": "Kilroot",
+    "public_id": "KIL"
+  },
+  {
+    "id": "LB",
+    "name": "Lisburn",
+    "public_id": "LIS"
+  },
+  {
+    "id": "LG",
+    "name": "Lambeg",
+    "public_id": "LAM"
+  },
+  {
+    "id": "LJ",
+    "name": "Lagan Junction",
+    "public_id": "LAJ"
+  },
+  {
+    "id": "LN",
+    "name": "Larne Town",
+    "public_id": "LRT"
+  },
+  {
+    "id": "LR",
+    "name": "Larne Harbour",
+    "public_id": "LRH"
+  },
+  {
+    "id": "LU",
+    "name": "Lurgan",
+    "public_id": "LUR"
+  },
+  {
+    "id": "LY",
+    "name": "Londonderry",
+    "public_id": "LDY"
+  },
+  {
+    "id": "MG",
+    "name": "Magherabeg",
+    "public_id": "MHG"
+  },
+  {
+    "id": "MM",
+    "name": "Magheramorne",
+    "public_id": "MAG"
+  },
+  {
+    "id": "MN",
+    "name": "Monkstown Junction",
+    "public_id": "MTJ"
+  },
+  {
+    "id": "MO",
+    "name": "Marino",
+    "public_id": "MAR"
+  },
+  {
+    "id": "MP",
+    "name": "Magheramorne Loop",
+    "public_id": "MAGL"
+  },
+  {
+    "id": "MR",
+    "name": "Moira",
+    "public_id": "MOI"
+  },
+  {
+    "id": "MW",
+    "name": "Mossley West",
+    "public_id": "MOW"
+  },
+  {
+    "id": "NY",
+    "name": "Newry",
+    "public_id": "NRY"
+  },
+  {
+    "id": "PD",
+    "name": "Portadown",
+    "public_id": "POR"
+  },
+  {
+    "id": "PH",
+    "name": "Portrush",
+    "public_id": "PRH"
+  },
+  {
+    "id": "PS",
+    "name": "Poyntzpass",
+    "public_id": "PZP"
+  },
+  {
+    "id": "RP",
+    "name": "Whitehead RPSI Siding",
+    "public_id": "WHS"
+  },
+  {
+    "id": "SL",
+    "name": "Seahill",
+    "public_id": "SEA"
+  },
+  {
+    "id": "SV",
+    "name": "Scarva",
+    "public_id": "SCA"
+  },
+  {
+    "id": "SY",
+    "name": "Sydenham",
+    "public_id": "SYD"
+  },
+  {
+    "id": "TE",
+    "name": "Trooperslane",
+    "public_id": "TRO"
+  },
+  {
+    "id": "TP",
+    "name": "Templepatrick",
+    "public_id": "TMP"
+  },
+  {
+    "id": "TK",
+    "name": "Templepatrick",
+    "public_id": "TMP"
+  },
+  {
+    "id": "UV",
+    "name": "University",
+    "public_id": "UNI"
+  },
+  {
+    "id": "WD",
+    "name": "Whitehead",
+    "public_id": "WHD"
+  },
+  {
+    "id": "WJ",
+    "name": "Westlink Junction",
+    "public_id": "WLJ"
+  },
+  {
+    "id": "WY",
+    "name": "Whiteabbey",
+    "public_id": "WHA"
+  },
+  {
+    "id": "YG",
+    "name": "Yorkgate",
+    "public_id": "YKG"
+  },
+  {
+    "id": "YJ",
+    "name": "City Junction",
+    "public_id": "CYJ"
+  },
+  {
+    "id": "FW",
+    "name": "Fortwilliam Depot",
+    "public_id": "FTW"
+  },
+  {
+    "id": "YRD",
+    "name": "York Road Depot",
+    "public_id": "YRD"
+  },
+  {
+    "id": "YD",
+    "name": "York Road Depot",
+    "public_id": "YRD"
+  },
+  {
+    "id": "GV",
+    "name": "Great Victoria Street",
+    "public_id": "GVS"
+  },
+  {
+    "id": "BB",
+    "name": "Balbriggan"
+  },
+  {
+    "id": "BD",
+    "name": "Ballinderry"
+  },
+  {
+    "id": "CN",
+    "name": "Crumlin"
+  },
+  {
+    "id": "DG",
+    "name": "Drogheda"
+  },
+  {
+    "id": "DN",
+    "name": "Dublin Connolly"
+  },
+  {
+    "id": "DK",
+    "name": "Dundalk"
+  },
+  {
+    "id": "GY",
+    "name": "Glenavy"
+  },
+  {
+    "id": "HJ",
+    "name": "Howth Junction"
+  },
+  {
+    "id": "KM",
+    "name": "Knockmore"
+  },
+  {
+    "id": "MH",
+    "name": "Malahide"
+  },
+  {
+    "id": "MY",
+    "name": "Mosney"
+  },
+  {
+    "id": "SA",
+    "name": "Scarva"
+  },
+  {
+    "id": "SK",
+    "name": "Skerries"
+  },
+  {
+    "id": "AM",
+    "name": "Adelaide Traincare Depot"
+  }
+]

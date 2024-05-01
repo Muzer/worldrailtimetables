@@ -26,6 +26,11 @@ use tokio::fs;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::Mutex;
 
+#[derive(Clone, Default, Deserialize)]
+pub struct CifImporterConfig {
+    location_overrides: Option<String>,
+}
+
 #[derive(Default)]
 pub struct CifImporter {
     last_train: Option<(String, DateTime<Tz>, ModificationType, bool)>,
@@ -34,6 +39,7 @@ pub struct CifImporter {
     change_en_route: Option<VariableTrain>,
     cr_location: Option<(String, Option<String>)>,
     orphaned_overlay_trains: HashMap<(String, DateTime<Tz>), Train>,
+    config: CifImporterConfig,
 }
 
 #[derive(Debug)]
@@ -1302,6 +1308,7 @@ where
         "OL" => Ok(Some(TrainType::Metro)),
         "OU" => Ok(Some(TrainType::UnadvertisedPassenger)),
         "OO" => Ok(Some(TrainType::OrdinaryPassenger)),
+        "00" => Ok(Some(TrainType::OrdinaryPassenger)), // Found in NI
         "OS" => Ok(Some(TrainType::Staff)),
         "OW" => Ok(Some(TrainType::Mixed)),
         "XC" => Ok(Some(TrainType::InternationalPassenger)),
@@ -1386,7 +1393,10 @@ where
         "EML" => Ok(Some(TrainPower::ElectricMultipleUnitWithLocomotive)),
         "EMU" => Ok(Some(TrainPower::ElectricMultipleUnit)),
         "HST" => Ok(Some(TrainPower::DieselElectricMultipleUnit)),
-        "" => Ok(None),
+        "" => match timing_load.trim() {
+            "DMU" => Ok(Some(TrainPower::DieselHydraulicMultipleUnit)), // NI
+            _ => Ok(None),
+        },
         x => Err(error_logic(CifErrorType::InvalidTrainPower(x.to_string()))),
     }
 }
@@ -1397,7 +1407,7 @@ where
 {
     let speed_mph = match slice {
         "   " => None,
-        x => match x.parse::<u16>() {
+        x => match x.trim().parse::<u16>() {
             Ok(speed) => Some(speed),
             Err(_) => return Err(error_logic(CifErrorType::InvalidSpeed(slice.to_string()))),
         },
@@ -1459,6 +1469,7 @@ where
     Ok(match power_type.trim() {
         "D" => match timing_load.trim() {
             "" => None,
+            "DDK" => Some("Diesel locomotive hauling De Dietrich stock".to_string()), // NI
             x => {
                 if br_mark_four_coaches {
                     Some(format!(
@@ -1493,6 +1504,7 @@ where
             }
             "805" => Some("Class 805 'Hitachi AT300' bi-mode running on diesel".to_string()),
             "1400" => Some("Diesel locomotive hauling 1400 tons".to_string()), // lol
+            "CAF" => Some("Class 3000/4000 'C3K/C4K' CAF DMU".to_string()),    // NI
             "" => None,
             x => return Err(error_logic(CifErrorType::InvalidTimingLoad(x.to_string()))),
         },
@@ -1766,6 +1778,10 @@ where
     F: FnOnce(CifErrorType) -> T,
 {
     let mut brand = None;
+    // contrary to the spec, NIR uses two letters to mean "Enterprise"
+    if slice.trim() == "EP" {
+        return Ok(Some("Enterprise".to_string()));
+    }
     for chr in slice.chars() {
         match chr {
             'E' => brand = Some("Eurostar".to_string()),
@@ -1839,6 +1855,10 @@ fn read_public_time<F, T>(slice: &str, error_logic: F) -> Result<Option<NaiveTim
 where
     F: FnOnce(CifErrorType) -> T,
 {
+    // contrary to the spec NI Railways use blanks not zeroes
+    if slice == "    " {
+        return Ok(None);
+    }
     let pub_dep = NaiveTime::parse_from_str(slice, "%H%M");
     let pub_dep = match pub_dep {
         Ok(x) => x,
@@ -1888,45 +1908,45 @@ where
         .into_iter()
         .map(|chunk| chunk.collect::<String>())
     {
-        match activity.as_str() {
-            "A " => activities.other_trains_pass = true,
+        match activity.trim() {
+            "A" => activities.other_trains_pass = true,
             "AE" => activities.attach_or_detach_assisting_loco = true,
             "AX" => activities.x_on_arrival = true,
             "BL" => activities.banking_loco = true,
-            "C " => activities.crew_change = true,
-            "D " => activities.set_down_only = true,
+            "C" => activities.crew_change = true,
+            "D" => activities.set_down_only = true,
             "-D" => activities.detach = true,
-            "E " => activities.examination = true,
-            "G " => activities.gbprtt = true,
-            "H " => activities.prevent_column_merge = true,
+            "E" => activities.examination = true,
+            "G" => activities.gbprtt = true,
+            "H" => activities.prevent_column_merge = true,
             "HH" => activities.prevent_third_column_merge = true,
-            "K " => activities.passenger_count = true,
+            "K" => activities.passenger_count = true,
             "KC" => activities.ticket_collection = true,
             "KE" => activities.ticket_examination = true,
             "KF" => activities.first_class_ticket_examination = true,
             "KS" => activities.selective_ticket_examination = true,
-            "L " => activities.change_loco = true,
-            "N " => activities.unadvertised_stop = true,
+            "L" => activities.change_loco = true,
+            "N" => activities.unadvertised_stop = true,
             "OP" => activities.operational_stop = true,
             "OR" => activities.train_locomotive_on_rear = true,
             "PR" => activities.propelling = true,
-            "R " => activities.request_stop = true,
+            "R" => activities.request_stop = true,
             "RM" => activities.reversing_move = true,
             "RR" => activities.run_round = true,
-            "S " => activities.staff_stop = true,
-            "T " => activities.normal_passenger_stop = true,
+            "S" => activities.staff_stop = true,
+            "T" => activities.normal_passenger_stop = true,
             "-T" => (activities.detach, activities.attach) = (true, true),
             "TB" => activities.train_begins = true,
             "TF" => activities.train_finishes = true,
             "TS" => activities.tops_reporting = true,
             "TW" => activities.token_etc = true,
-            "U " => activities.pick_up_only = true,
+            "U" => activities.pick_up_only = true,
             "-U" => activities.attach = true,
-            "W " => activities.watering_stock = true,
-            "X " => activities.cross_at_passing_point = true,
+            "W" => activities.watering_stock = true,
+            "X" => activities.cross_at_passing_point = true,
             // found in VSTP, this is its meaning in paper WTTs
-            "* " => activities.other_trains_pass = true,
-            "  " => (),
+            "*" => activities.other_trains_pass = true,
+            "" => (),
             x => return Err(error_logic(CifErrorType::InvalidActivity(x.to_string()))),
         };
     }
@@ -2007,6 +2027,7 @@ where
         "MV" => Some("Varamis Rail".to_string()),
         "PT" => Some("Europorte 2".to_string()),
         "YG" => Some("Hanson & Hall".to_string()),
+        "NI" => Some("Translink NI Railways".to_string()),
         "ZZ" => None,
         "#|" => None,
         x => {
@@ -2058,8 +2079,9 @@ fn calculate_day(
 }
 
 impl CifImporter {
-    pub fn new() -> CifImporter {
+    pub fn new(config: CifImporterConfig) -> CifImporter {
         CifImporter {
+            config,
             ..Default::default()
         }
     }
@@ -3158,8 +3180,8 @@ impl CifImporter {
             read_mandatory_wtt_time(&line[10..15], produce_cif_error_closure(number, 10))?;
         let pub_dep = read_public_time(&line[15..19], produce_cif_error_closure(number, 15))?;
 
-        let platform = read_optional_string(&line[19..22]);
-        let line_code = read_optional_string(&line[22..25]);
+        let platform = read_optional_string(&line[19..22].trim());
+        let line_code = read_optional_string(&line[22..25].trim());
 
         let eng_allowance = read_allowance(&line[25..27], produce_cif_error_closure(number, 25))?;
         let path_allowance = read_allowance(&line[27..29], produce_cif_error_closure(number, 27))?;
@@ -3257,9 +3279,9 @@ impl CifImporter {
         let pub_arr = read_public_time(&line[25..29], produce_cif_error_closure(number, 25))?;
         let pub_dep = read_public_time(&line[29..33], produce_cif_error_closure(number, 29))?;
 
-        let platform = read_optional_string(&line[33..36]);
-        let line_code = read_optional_string(&line[36..39]);
-        let path_code = read_optional_string(&line[39..42]);
+        let platform = read_optional_string(&line[33..36].trim());
+        let line_code = read_optional_string(&line[36..39].trim());
+        let path_code = read_optional_string(&line[39..42].trim());
 
         let activities = read_activities(&line[42..54], produce_cif_error_closure(number, 42))?;
 
@@ -3354,8 +3376,8 @@ impl CifImporter {
             read_mandatory_wtt_time(&line[10..15], produce_cif_error_closure(number, 10))?;
         let pub_arr = read_public_time(&line[15..19], produce_cif_error_closure(number, 15))?;
 
-        let platform = read_optional_string(&line[19..22]);
-        let path_code = read_optional_string(&line[22..25]);
+        let platform = read_optional_string(&line[19..22].trim());
+        let path_code = read_optional_string(&line[22..25].trim());
 
         let activities = read_activities(&line[25..37], produce_cif_error_closure(number, 25))?;
 
@@ -3674,8 +3696,39 @@ impl CifImporter {
             }
 
             schedule.trains.insert(train_id.to_string(), old_trains);
+        }
 
-            return Ok(schedule);
+        Ok(schedule)
+    }
+
+    async fn override_locations(&self, mut schedule: Schedule) -> Result<Schedule, Error> {
+        let mut location_overrides = vec![];
+        match &self.config.location_overrides {
+            None => (),
+            Some(filename) => match fs::read_to_string(filename).await {
+                Ok(contents) => {
+                    location_overrides = serde_json::from_str::<Vec<Location>>(&contents)?;
+                }
+                Err(x) => {
+                    println!("WARNING: Failed to load location overrides: {}", x);
+                }
+            },
+        }
+        println!("Overriding locations");
+        for location in location_overrides {
+            schedule
+                .locations
+                .insert(location.id.clone(), location.clone());
+            match location.public_id {
+                Some(x) => {
+                    schedule
+                        .locations_indexed_by_public_id
+                        .entry(x.clone())
+                        .or_insert(HashSet::new())
+                        .insert(location.id.clone());
+                }
+                None => (),
+            }
         }
 
         Ok(schedule)
@@ -3697,6 +3750,7 @@ impl CifImporter {
                 column: 0,
             });
         }
+
         match &line[..2] {
             "HD" => Ok(self.read_header(&line, schedule, number)?),
             "TI" => Ok(self.read_tiploc(&line, schedule, number, ModificationType::Insert)?),
@@ -3734,6 +3788,9 @@ impl SlowImporter for CifImporter {
             i += 1;
             schedule = self.read_record(line, schedule, i)?;
         }
+
+        schedule = self.override_locations(schedule).await?;
+
         println!(
             "Successfully loaded {} trains from {} lines of CIF",
             schedule.trains.len(),
@@ -3926,7 +3983,12 @@ impl NrJsonImporter {
                 let change_en_route = if i == 0 || j != 0 {
                     None
                 } else {
-                    Some(self.read_vstp_variable_train(segment, train_status)?)
+                    Some(self.read_vstp_variable_train(
+                        segment,
+                        train_status,
+                        train_id,
+                        schedule,
+                    )?)
                 };
 
                 let is_origin = if i == 0 && j == 0 { true } else { false };
@@ -4021,15 +4083,15 @@ impl NrJsonImporter {
                 };
 
                 let platform = match &location.cif_platform {
-                    Some(x) => read_optional_string(&x),
+                    Some(x) => read_optional_string(&x.trim()),
                     None => None,
                 };
                 let line_code = match &location.cif_line {
-                    Some(x) => read_optional_string(&x),
+                    Some(x) => read_optional_string(&x.trim()),
                     None => None,
                 };
                 let path_code = match &location.cif_path {
-                    Some(x) => read_optional_string(&x),
+                    Some(x) => read_optional_string(&x.trim()),
                     None => None,
                 };
 
@@ -4110,6 +4172,8 @@ impl NrJsonImporter {
         &self,
         schedule_segment: &NrJsonScheduleSegment,
         train_status: &TrainStatus,
+        train_id: &str,
+        schedule: &mut Schedule,
     ) -> Result<VariableTrain, NrJsonError> {
         let train_type = match read_train_type(
             &schedule_segment.cif_train_category,
@@ -4132,6 +4196,12 @@ impl NrJsonImporter {
         };
 
         let public_id = &schedule_segment.signalling_id;
+        schedule
+            .trains_indexed_by_public_id
+            .entry(public_id.to_string())
+            .or_insert(HashSet::new())
+            .insert(train_id.to_string());
+
         let headcode = match &schedule_segment.cif_headcode {
             Some(x) => read_optional_string(x),
             None => None,
@@ -4556,6 +4626,8 @@ impl NrJsonImporter {
                     .as_ref()
                     .unwrap()[0],
                 &train_status,
+                main_train_id,
+                &mut schedule,
             )?,
             source: Some(TrainSource::VeryShortTerm),
             runs_as_required,

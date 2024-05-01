@@ -3,11 +3,11 @@ use crate::fetcher::Fetcher;
 use crate::importer::{EphemeralImporter, FastImporter, SlowImporter};
 use crate::manager::Manager;
 use crate::nr_fetcher::{NrFetcher, NrFetcherConfig};
-use crate::nr_importer::{CifImporter, NrJsonImporter, NrJsonImporterConfig};
 use crate::nr_vstp_subscriber::{NrVstpSubscriber, NrVstpSubscriberConfig};
 use crate::schedule::Schedule;
 use crate::schedule_manager::ScheduleManager;
 use crate::subscriber::Subscriber;
+use crate::uk_importer::{CifImporter, CifImporterConfig, NrJsonImporter, NrJsonImporterConfig};
 
 use chrono::offset::Utc;
 use chrono::{Days, NaiveTime, TimeZone};
@@ -25,6 +25,7 @@ pub struct NrConfig {
     fetcher: NrFetcherConfig,
     vstp_subscriber: NrVstpSubscriberConfig,
     json_importer: NrJsonImporterConfig,
+    cif_importer: CifImporterConfig,
 }
 
 pub struct NrManager<'a> {
@@ -119,7 +120,7 @@ impl NrManager<'_> {
                     .from_local_datetime(&now.date_naive().and_hms_opt(2, 9, 0).unwrap())
                     .unwrap()
             };
-            let mut interval = time::interval(Duration::from_secs(60));
+            let mut interval = time::interval(Duration::from_secs(15));
             while London.from_utc_datetime(&Utc::now().naive_utc()) < new_time {
                 interval.tick().await;
             }
@@ -134,7 +135,7 @@ impl NrManager<'_> {
 impl Manager for NrManager<'_> {
     async fn run(&mut self) -> Result<(), Error> {
         let nr_fetcher = NrFetcher::new(self.config.fetcher.clone());
-        let mut cif_importer = CifImporter::new();
+        let mut cif_importer = CifImporter::new(self.config.cif_importer.clone());
         let mut nr_vstp_subscriber = NrVstpSubscriber::new(self.config.vstp_subscriber.clone());
         let nr_json_importer = NrJsonImporter::new(self.config.json_importer.clone()).await?;
 

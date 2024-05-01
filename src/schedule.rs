@@ -1,7 +1,7 @@
 use chrono::{DateTime, NaiveTime, Weekday};
 use chrono_tz::Tz;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -40,7 +40,7 @@ impl Schedule {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Location {
     pub id: String,
     pub name: String,

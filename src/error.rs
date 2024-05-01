@@ -1,9 +1,9 @@
-use crate::nr_importer::CifError;
-use crate::nr_importer::NrJsonError;
 use crate::nr_vstp_subscriber::NrVstpError;
+use crate::uk_importer::{CifError, NrJsonError};
 use crate::webui::WebUiError;
 use anyhow;
 use config_file::ConfigFileError;
+use rc_zip_tokio::rc_zip::error::Error as RcZipError;
 use reqwest;
 
 use std::fmt;
@@ -20,6 +20,7 @@ pub enum Error {
     SerdeJsonError(serde_json::Error),
     RocketError(rocket::Error),
     WebUiError(WebUiError),
+    RcZipError(RcZipError),
 }
 
 impl fmt::Display for Error {
@@ -81,5 +82,11 @@ impl From<serde_json::Error> for Error {
 impl From<rocket::Error> for Error {
     fn from(error: rocket::Error) -> Self {
         Error::RocketError(error)
+    }
+}
+
+impl From<RcZipError> for Error {
+    fn from(error: RcZipError) -> Self {
+        Error::RcZipError(error)
     }
 }

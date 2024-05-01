@@ -2,19 +2,22 @@ mod error;
 mod fetcher;
 mod importer;
 mod manager;
+mod nir_fetcher;
+mod nir_manager;
 mod nr_fetcher;
-mod nr_importer;
 mod nr_manager;
 mod nr_vstp_subscriber;
 mod schedule;
 mod schedule_manager;
 mod subscriber;
+mod uk_importer;
 mod webui;
 
 use config_file::FromConfigFile;
 use serde::Deserialize;
 
 use crate::manager::Manager;
+use crate::nir_manager::{NirConfig, NirManager};
 use crate::nr_manager::{NrConfig, NrManager};
 
 use std::sync::Arc;
@@ -22,6 +25,7 @@ use std::sync::Arc;
 #[derive(Clone, Deserialize)]
 struct Config {
     nr: NrConfig,
+    nir: NirConfig,
 }
 
 #[rocket::main]
@@ -31,8 +35,13 @@ async fn main() -> Result<(), error::Error> {
     let schedule_manager = Arc::new(schedule_manager::ScheduleManager::new());
 
     let mut nr_manager = NrManager::new(config.nr, &schedule_manager).await?;
+    let mut nir_manager = NirManager::new(config.nir, &schedule_manager).await?;
 
-    tokio::try_join!(nr_manager.run(), webui::rocket(schedule_manager.clone()),)?;
+    tokio::try_join!(
+        nr_manager.run(),
+        nir_manager.run(),
+        webui::rocket(schedule_manager.clone()),
+    )?;
 
     Ok(())
 }
