@@ -1,1 +1,487 @@
-[]
+[
+  {
+    "id": "ABWDXR",
+    "name": "ABBEY WOOD (CROSSRAIL)",
+    "public_id": "ABW"
+  },
+  {
+    "id": "ALERTN",
+    "name": "LIVERPOOL SOUTH PW HL",
+    "public_id": "LPY"
+  },
+  {
+    "id": "ASHFKI",
+    "name": "ASHFORD INTERNATIONAL",
+    "public_id": "AFK"
+  },
+  {
+    "id": "BARKGLT",
+    "name": "BARKING L.T.",
+    "public_id": "BKG"
+  },
+  {
+    "id": "BARKG1P",
+    "name": "BARKING NO 1 PLATFORM",
+    "public_id": "BKG"
+  },
+  {
+    "id": "BARKG7P",
+    "name": "BARKING NO7 PLATFORM",
+    "public_id": "BKG"
+  },
+  {
+    "id": "BSNGSEB",
+    "name": "BASINGSTOKE EAST BAY",
+    "public_id": "BSK"
+  },
+  {
+    "id": "CHLMBPK",
+    "name": "CHELMSFORD BEAULIEU PARK",
+    "public_id": "BPA"
+  },
+  {
+    "id": "BLTCHHL",
+    "name": "BLETCHLEY HIGH LEVEL",
+    "public_id": "BLY"
+  },
+  {
+    "id": "BUSHYDC",
+    "name": "BUSHEY DC",
+    "public_id": "BSH"
+  },
+  {
+    "id": "CNNBELL",
+    "name": "CANONBURY ELL",
+    "public_id": "CNN"
+  },
+  {
+    "id": "CLPHMJC",
+    "name": "CLAPHAM JUNCTION",
+    "public_id": "CLJ"
+  },
+  {
+    "id": "CLPHMJM",
+    "name": "CLAPHAM JUNCTION",
+    "public_id": "CLJ"
+  },
+  {
+    "id": "CLPHMJ2",
+    "name": "CLAPHAM JUNCTION",
+    "public_id": "CLJ"
+  },
+  {
+    "id": "CLPHMJW",
+    "name": "CLAPHAM JUNCTION",
+    "public_id": "CLJ"
+  },
+  {
+    "id": "CLPHMJ1",
+    "name": "CLAPHAM JUNCTION PLATS 0-2",
+    "public_id": "CLJ"
+  },
+  {
+    "id": "DAGNHME",
+    "name": "DAGENHAM EAST",
+    "public_id": "ZDE"
+  },
+  {
+    "id": "EBSFLTI",
+    "name": "EBBSFLEET INTERNATIONAL",
+    "public_id": "EBD"
+  },
+  {
+    "id": "EPHT",
+    "name": "ELEPHANT & CASTLE (LT)",
+    "public_id": "EPH"
+  },
+  {
+    "id": "EPSMSW",
+    "name": "EPSOM",
+    "public_id": "EPS"
+  },
+  {
+    "id": "FNTLSR",
+    "name": "FARRINGDON",
+    "public_id": "ZFD"
+  },
+  {
+    "id": "FRNDXR",
+    "name": "FARRINGDON CROSSRAIL",
+    "public_id": "ZFD"
+  },
+  {
+    "id": "GALTILL",
+    "name": "SMETHWICK GALTON BDG L.L.",
+    "public_id": "SGB"
+  },
+  {
+    "id": "GLGCLL",
+    "name": "GLASGOW CENTRAL LOW LEVEL",
+    "public_id": "GLC"
+  },
+  {
+    "id": "GLGQLL",
+    "name": "GLASGOW QUEEN STREET LL",
+    "public_id": "GLQ"
+  },
+  {
+    "id": "GROSNYM",
+    "name": "GROSMONT NORTH YORKS MOORS",
+    "public_id": "GMT"
+  },
+  {
+    "id": "HROWDC",
+    "name": "HARROW & WEALDSTONE D.C.",
+    "public_id": "HRW"
+  },
+  {
+    "id": "HIGHBYE",
+    "name": "HIGHBURY AND ISLINGTON ELL",
+    "public_id": "HHY"
+  },
+  {
+    "id": "HIGHBYA",
+    "name": "HIGHBURY & ISLINGTON",
+    "public_id": "HHY"
+  },
+  {
+    "id": "LNDNBDC",
+    "name": "LONDON BRIDGE",
+    "public_id": "LBG"
+  },
+  {
+    "id": "LNDNBDE",
+    "name": "LONDON BRIDGE",
+    "public_id": "LBG"
+  },
+  {
+    "id": "LCHTTVH",
+    "name": "LICHFIELD TRENT VALLEY HL",
+    "public_id": "LTV"
+  },
+  {
+    "id": "LVRPLCL",
+    "name": "LIVERPOOL CENTRAL (WIRRAL)",
+    "public_id": "LVC"
+  },
+  {
+    "id": "LVRPLSL",
+    "name": "LIVERPOOL LIME STREET LL",
+    "public_id": "LIV"
+  },
+  {
+    "id": "LIVSTLL",
+    "name": "LIVERPOOL ST CROSSRAIL",
+    "public_id": "LST"
+  },
+  {
+    "id": "MORFNL",
+    "name": "MOORFIELDS",
+    "public_id": "MRF"
+  },
+  {
+    "id": "MORGTLT",
+    "name": "MOORGATE LT",
+    "public_id": "MOG"
+  },
+  {
+    "id": "MGTLSR",
+    "name": "MOORGATE",
+    "public_id": "MOG"
+  },
+  {
+    "id": "NWCRELL",
+    "name": "NEW CROSS ELL",
+    "public_id": "NWX"
+  },
+  {
+    "id": "NEWXGEL",
+    "name": "NEW CROSS GATE STATION ELL",
+    "public_id": "NXG"
+  },
+  {
+    "id": "NWCSTLL",
+    "name": "NEWCASTLE (METRO)",
+    "public_id": "NCL"
+  },
+  {
+    "id": "ORPNPL1",
+    "name": "ORPINGTON PLATFORM 1",
+    "public_id": "ORP"
+  },
+  {
+    "id": "ORPNPL6",
+    "name": "ORPINGTON PLATFORM 6",
+    "public_id": "ORP"
+  },
+  {
+    "id": "OXTEDBY",
+    "name": "OXTED BAY",
+    "public_id": "OXT"
+  },
+  {
+    "id": "PKHMRYC",
+    "name": "PECKHAM RYE",
+    "public_id": "PMR"
+  },
+  {
+    "id": "PERTH3P",
+    "name": "PERTH NO3 PLATFORM",
+    "public_id": "PTH"
+  },
+  {
+    "id": "PRSTN4B",
+    "name": "PRESTON NO 4 BAY",
+    "public_id": "PRE"
+  },
+  {
+    "id": "PLAISTW",
+    "name": "PLAISTOW",
+    "public_id": "ZPS"
+  },
+  {
+    "id": "PADTLL",
+    "name": "PADDINGTON CROSSRAIL",
+    "public_id": "PAD"
+  },
+  {
+    "id": "QPRKAC",
+    "name": "QUEENS PARK (AC)",
+    "public_id": "QPW"
+  },
+  {
+    "id": "RICHNLL",
+    "name": "RICHMOND NLL",
+    "public_id": "RMD"
+  },
+  {
+    "id": "RDNG4AB",
+    "name": "READING",
+    "public_id": "RDG"
+  },
+  {
+    "id": "RTFDLL",
+    "name": "RETFORD LOW LEVEL",
+    "public_id": "RET"
+  },
+  {
+    "id": "STRBDG1",
+    "name": "STOURBRIDGE JN (TOWN PLAT)",
+    "public_id": "SBJ"
+  },
+  {
+    "id": "STFORDI",
+    "name": "STRATFORD INTERNATIONAL",
+    "public_id": "SFA"
+  },
+  {
+    "id": "SLSBY6B",
+    "name": "SALISBURY 6 BAY",
+    "public_id": "SAL"
+  },
+  {
+    "id": "STPXBOX",
+    "name": "ST PANCRAS INTERNATIONAL",
+    "public_id": "STP"
+  },
+  {
+    "id": "STPANCI",
+    "name": "ST PANCRAS INTERNATIONAL",
+    "public_id": "STP"
+  },
+  {
+    "id": "STPADOM",
+    "name": "ST PANCRAS INTL (DOMESTIC)",
+    "public_id": "STP"
+  },
+  {
+    "id": "SHOTTHL",
+    "name": "SHOTTON HIGH LEVEL",
+    "public_id": "SHT"
+  },
+  {
+    "id": "TMWTHHL",
+    "name": "TAMWORTH HL",
+    "public_id": "TAM"
+  },
+  {
+    "id": "UPMNSP6",
+    "name": "UPMINSTER",
+    "public_id": "UPM"
+  },
+  {
+    "id": "UPMNLT",
+    "name": "UPMINSTER L.T.",
+    "public_id": "UPM"
+  },
+  {
+    "id": "VAUXHLM",
+    "name": "VAUXHALL",
+    "public_id": "VXH"
+  },
+  {
+    "id": "VAUXHLW",
+    "name": "VAUXHALL",
+    "public_id": "VXH"
+  },
+  {
+    "id": "VICTRIC",
+    "name": "LONDON VICTORIA",
+    "public_id": "VIC"
+  },
+  {
+    "id": "VICTRIE",
+    "name": "LONDON VICTORIA",
+    "public_id": "VIC"
+  },
+  {
+    "id": "VICT9",
+    "name": "VICTORIA PLAT 9",
+    "public_id": "VIC"
+  },
+  {
+    "id": "VICT10",
+    "name": "VICTORIA PLAT 10",
+    "public_id": "VIC"
+  },
+  {
+    "id": "VICT11",
+    "name": "VICTORIA PLAT 11",
+    "public_id": "VIC"
+  },
+  {
+    "id": "VICT12",
+    "name": "VICTORIA PLAT 12",
+    "public_id": "VIC"
+  },
+  {
+    "id": "VICT13",
+    "name": "VICTORIA PLAT 13",
+    "public_id": "VIC"
+  },
+  {
+    "id": "VICT14",
+    "name": "VICTORIA PLAT 14",
+    "public_id": "VIC"
+  },
+  {
+    "id": "VICT15",
+    "name": "VICTORIA PLAT 15",
+    "public_id": "VIC"
+  },
+  {
+    "id": "VICT16",
+    "name": "VICTORIA PLAT 16",
+    "public_id": "VIC"
+  },
+  {
+    "id": "VICT17",
+    "name": "VICTORIA PLAT 17",
+    "public_id": "VIC"
+  },
+  {
+    "id": "VICT18",
+    "name": "VICTORIA PLAT 18",
+    "public_id": "VIC"
+  },
+  {
+    "id": "VICT19",
+    "name": "VICTORIA PLAT 19",
+    "public_id": "VIC"
+  },
+  {
+    "id": "WATRLMN",
+    "name": "LONDON WATERLOO",
+    "public_id": "WAT"
+  },
+  {
+    "id": "WATRLOW",
+    "name": "LONDON WATERLOO",
+    "public_id": "WAT"
+  },
+  {
+    "id": "WATR",
+    "name": "LONDON WATERLOO",
+    "public_id": "WAT"
+  },
+  {
+    "id": "WATRINT",
+    "name": "LONDON WATERLOO (INT)",
+    "public_id": "WAT"
+  },
+  {
+    "id": "WATRLLT",
+    "name": "WATERLOO LUL",
+    "public_id": "WAT"
+  },
+  {
+    "id": "WACW",
+    "name": "WATERLOO (WATERLOO & CITY)",
+    "public_id": "WAT"
+  },
+  {
+    "id": "WMBYDC",
+    "name": "WEMBLEY CENTRAL DC",
+    "public_id": "WMB"
+  },
+  {
+    "id": "WLSDJHL",
+    "name": "WILLESDEN JN. HIGH LEVEL",
+    "public_id": "WIJ"
+  },
+  {
+    "id": "WLSDNJL",
+    "name": "WILLESDEN JN LOW LEVEL",
+    "public_id": "WIJ"
+  },
+  {
+    "id": "WEYBDGB",
+    "name": "WEYBRIDGE",
+    "public_id": "WYB"
+  },
+  {
+    "id": "WREXGUB",
+    "name": "WREXHAM GENERAL UP BAY",
+    "public_id": "WRX"
+  },
+  {
+    "id": "WHAMLT",
+    "name": "WEST HAM LT",
+    "public_id": "WEH"
+  },
+  {
+    "id": "WORCPHL",
+    "name": "WORCESTERSHIRE PARKWAY HL",
+    "public_id": "WOP"
+  },
+  {
+    "id": "WDNLUL",
+    "name": "WIMBLEDON L.U.L.",
+    "public_id": "WIM"
+  },
+  {
+    "id": "WDON",
+    "name": "WIMBLEDON",
+    "public_id": "WIM"
+  },
+  {
+    "id": "WATFJDC",
+    "name": "WATFORD JUNCTION DC",
+    "public_id": "WFJ"
+  },
+  {
+    "id": "WCHAPXR",
+    "name": "WHITECHAPEL CROSSRAIL",
+    "public_id": "ZLW"
+  },
+  {
+    "id": "BRWSUSX",
+    "name": "BERWICK",
+    "public_id": "BRK"
+  },
+  {
+    "id": "HEWOMTR",
+    "name": "HEWORTH (METRO)",
+    "public_id": "HEW"
+  }
+]
