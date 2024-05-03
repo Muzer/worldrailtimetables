@@ -1,6 +1,6 @@
 use crate::error::Error;
-use crate::fetcher::Fetcher;
-use crate::importer::SlowImporter;
+use crate::fetcher::StreamingFetcher;
+use crate::importer::SlowStreamingImporter;
 use crate::manager::Manager;
 use crate::nir_fetcher::NirFetcher;
 use crate::schedule::Schedule;
@@ -18,21 +18,23 @@ use serde::Deserialize;
 
 use async_trait::async_trait;
 
+use std::sync::Arc;
+
 #[derive(Clone, Deserialize)]
 pub struct NirConfig {
     cif_importer: CifImporterConfig,
 }
 
-pub struct NirManager<'a> {
-    schedule_manager: &'a ScheduleManager,
+pub struct NirManager {
+    schedule_manager: Arc<ScheduleManager>,
     config: NirConfig,
 }
 
-impl NirManager<'_> {
-    pub async fn new<'a>(
+impl NirManager {
+    pub async fn new(
         config: NirConfig,
-        schedule_manager: &'a ScheduleManager,
-    ) -> Result<NirManager<'a>, Error> {
+        schedule_manager: Arc<ScheduleManager>,
+    ) -> Result<NirManager, Error> {
         Ok(NirManager {
             schedule_manager,
             config,
@@ -99,7 +101,7 @@ impl NirManager<'_> {
 }
 
 #[async_trait]
-impl Manager for NirManager<'_> {
+impl Manager for NirManager {
     async fn run(&mut self) -> Result<(), Error> {
         let nir_fetcher = NirFetcher::new();
         let mut cif_importer = CifImporter::new(self.config.cif_importer.clone());

@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::fetcher::Fetcher;
+use crate::fetcher::StreamingFetcher;
 use async_trait::async_trait;
 use futures::stream::TryStreamExt;
 use reqwest::Client;
@@ -17,7 +17,7 @@ impl NirFetcher {
 }
 
 #[async_trait]
-impl Fetcher for NirFetcher {
+impl StreamingFetcher for NirFetcher {
     async fn fetch(&self) -> Result<Box<dyn AsyncBufRead + Unpin + Send>, Error> {
         println!("Fetching NIR Rail CIF data from OpenDataNI");
         let client = Client::new();

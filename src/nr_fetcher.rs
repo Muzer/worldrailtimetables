@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::fetcher::Fetcher;
+use crate::fetcher::StreamingFetcher;
 use async_compression::tokio::bufread::GzipDecoder;
 use async_trait::async_trait;
 use futures::stream::TryStreamExt;
@@ -12,6 +12,7 @@ use tokio_util::compat::FuturesAsyncReadCompatExt;
 
 pub struct NrFetcher {
     config: NrFetcherConfig,
+    url: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -21,18 +22,18 @@ pub struct NrFetcherConfig {
 }
 
 impl NrFetcher {
-    pub fn new(config: NrFetcherConfig) -> Self {
-        Self { config }
+    pub fn new(config: NrFetcherConfig, url: &str) -> Self {
+        Self { config, url: url.to_string() }
     }
 }
 
 #[async_trait]
-impl Fetcher for NrFetcher {
+impl StreamingFetcher for NrFetcher {
     async fn fetch(&self) -> Result<Box<dyn AsyncBufRead + Unpin + Send>, Error> {
         println!("Fetching SCHEDULE from Network Rail");
         let client = Client::new();
         let response = client
-            .get("https://publicdatafeeds.networkrail.co.uk/ntrod/CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full.CIF.gz")
+            .get(self.url.clone())
             .basic_auth(self.config.username.clone(), Some(self.config.password.clone()))
             .send()
             .await?

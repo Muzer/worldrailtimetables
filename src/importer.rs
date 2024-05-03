@@ -5,11 +5,22 @@ use async_trait::async_trait;
 
 use tokio::io::AsyncBufReadExt;
 
+use gtfs_structures::Gtfs;
+
 #[async_trait]
-pub trait SlowImporter {
+pub trait SlowStreamingImporter {
     async fn overlay(
         &mut self,
         reader: impl AsyncBufReadExt + Unpin + Send,
+        schedule: Schedule,
+    ) -> Result<Schedule, Error>;
+}
+
+#[async_trait]
+pub trait SlowGtfsImporter {
+    async fn overlay(
+        &mut self,
+        gtfs: Gtfs,
         schedule: Schedule,
     ) -> Result<Schedule, Error>;
 }

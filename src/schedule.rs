@@ -46,6 +46,7 @@ pub struct Location {
     pub name: String,
     pub public_id: Option<String>, // some countries have an internal ID for planning and a public
                                    // ID for retail; we should expose the public one.
+    pub timezone: Tz,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -297,7 +298,7 @@ pub struct AssociationNode {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TrainLocation {
-    pub timezone: Tz,
+    pub timing_tz: Option<Tz>, // TZ for timings, if different from the location TZ (GTFS)
     pub id: String,
     pub id_suffix: Option<String>, // to allow associations to be matched when the same location
     // occurs multiple times in a given train

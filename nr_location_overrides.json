@@ -2,486 +2,583 @@
   {
     "id": "ABWDXR",
     "name": "ABBEY WOOD (CROSSRAIL)",
-    "public_id": "ABW"
+    "public_id": "ABW",
+    "timezone": "Europe/London"
   },
   {
     "id": "ALERTN",
     "name": "LIVERPOOL SOUTH PW HL",
-    "public_id": "LPY"
+    "public_id": "LPY",
+    "timezone": "Europe/London"
   },
   {
     "id": "ASHFKI",
     "name": "ASHFORD INTERNATIONAL",
-    "public_id": "AFK"
+    "public_id": "AFK",
+    "timezone": "Europe/London"
   },
   {
     "id": "BARKGLT",
     "name": "BARKING L.T.",
-    "public_id": "BKG"
+    "public_id": "BKG",
+    "timezone": "Europe/London"
   },
   {
     "id": "BARKG1P",
     "name": "BARKING NO 1 PLATFORM",
-    "public_id": "BKG"
+    "public_id": "BKG",
+    "timezone": "Europe/London"
   },
   {
     "id": "BARKG7P",
     "name": "BARKING NO7 PLATFORM",
-    "public_id": "BKG"
+    "public_id": "BKG",
+    "timezone": "Europe/London"
   },
   {
     "id": "BSNGSEB",
     "name": "BASINGSTOKE EAST BAY",
-    "public_id": "BSK"
+    "public_id": "BSK",
+    "timezone": "Europe/London"
   },
   {
     "id": "CHLMBPK",
     "name": "CHELMSFORD BEAULIEU PARK",
-    "public_id": "BPA"
+    "public_id": "BPA",
+    "timezone": "Europe/London"
   },
   {
     "id": "BLTCHHL",
     "name": "BLETCHLEY HIGH LEVEL",
-    "public_id": "BLY"
+    "public_id": "BLY",
+    "timezone": "Europe/London"
   },
   {
     "id": "BUSHYDC",
     "name": "BUSHEY DC",
-    "public_id": "BSH"
+    "public_id": "BSH",
+    "timezone": "Europe/London"
   },
   {
     "id": "CNNBELL",
     "name": "CANONBURY ELL",
-    "public_id": "CNN"
+    "public_id": "CNN",
+    "timezone": "Europe/London"
   },
   {
     "id": "CLPHMJC",
     "name": "CLAPHAM JUNCTION",
-    "public_id": "CLJ"
+    "public_id": "CLJ",
+    "timezone": "Europe/London"
   },
   {
     "id": "CLPHMJM",
     "name": "CLAPHAM JUNCTION",
-    "public_id": "CLJ"
+    "public_id": "CLJ",
+    "timezone": "Europe/London"
   },
   {
     "id": "CLPHMJ2",
     "name": "CLAPHAM JUNCTION",
-    "public_id": "CLJ"
+    "public_id": "CLJ",
+    "timezone": "Europe/London"
   },
   {
     "id": "CLPHMJW",
     "name": "CLAPHAM JUNCTION",
-    "public_id": "CLJ"
+    "public_id": "CLJ",
+    "timezone": "Europe/London"
   },
   {
     "id": "CLPHMJ1",
     "name": "CLAPHAM JUNCTION PLATS 0-2",
-    "public_id": "CLJ"
+    "public_id": "CLJ",
+    "timezone": "Europe/London"
   },
   {
     "id": "DAGNHME",
     "name": "DAGENHAM EAST",
-    "public_id": "ZDE"
+    "public_id": "ZDE",
+    "timezone": "Europe/London"
   },
   {
     "id": "EBSFLTI",
     "name": "EBBSFLEET INTERNATIONAL",
-    "public_id": "EBD"
+    "public_id": "EBD",
+    "timezone": "Europe/London"
   },
   {
     "id": "EPHT",
     "name": "ELEPHANT & CASTLE (LT)",
-    "public_id": "EPH"
+    "public_id": "EPH",
+    "timezone": "Europe/London"
   },
   {
     "id": "EPSMSW",
     "name": "EPSOM",
-    "public_id": "EPS"
+    "public_id": "EPS",
+    "timezone": "Europe/London"
   },
   {
     "id": "FNTLSR",
     "name": "FARRINGDON",
-    "public_id": "ZFD"
+    "public_id": "ZFD",
+    "timezone": "Europe/London"
   },
   {
     "id": "FRNDXR",
     "name": "FARRINGDON CROSSRAIL",
-    "public_id": "ZFD"
+    "public_id": "ZFD",
+    "timezone": "Europe/London"
   },
   {
     "id": "GALTILL",
     "name": "SMETHWICK GALTON BDG L.L.",
-    "public_id": "SGB"
+    "public_id": "SGB",
+    "timezone": "Europe/London"
   },
   {
     "id": "GLGCLL",
     "name": "GLASGOW CENTRAL LOW LEVEL",
-    "public_id": "GLC"
+    "public_id": "GLC",
+    "timezone": "Europe/London"
   },
   {
     "id": "GLGQLL",
     "name": "GLASGOW QUEEN STREET LL",
-    "public_id": "GLQ"
+    "public_id": "GLQ",
+    "timezone": "Europe/London"
   },
   {
     "id": "GROSNYM",
     "name": "GROSMONT NORTH YORKS MOORS",
-    "public_id": "GMT"
+    "public_id": "GMT",
+    "timezone": "Europe/London"
   },
   {
     "id": "HROWDC",
     "name": "HARROW & WEALDSTONE D.C.",
-    "public_id": "HRW"
+    "public_id": "HRW",
+    "timezone": "Europe/London"
   },
   {
     "id": "HIGHBYE",
     "name": "HIGHBURY AND ISLINGTON ELL",
-    "public_id": "HHY"
+    "public_id": "HHY",
+    "timezone": "Europe/London"
   },
   {
     "id": "HIGHBYA",
     "name": "HIGHBURY & ISLINGTON",
-    "public_id": "HHY"
+    "public_id": "HHY",
+    "timezone": "Europe/London"
   },
   {
     "id": "LNDNBDC",
     "name": "LONDON BRIDGE",
-    "public_id": "LBG"
+    "public_id": "LBG",
+    "timezone": "Europe/London"
   },
   {
     "id": "LNDNBDE",
     "name": "LONDON BRIDGE",
-    "public_id": "LBG"
+    "public_id": "LBG",
+    "timezone": "Europe/London"
   },
   {
     "id": "LCHTTVH",
     "name": "LICHFIELD TRENT VALLEY HL",
-    "public_id": "LTV"
+    "public_id": "LTV",
+    "timezone": "Europe/London"
   },
   {
     "id": "LVRPLCL",
     "name": "LIVERPOOL CENTRAL (WIRRAL)",
-    "public_id": "LVC"
+    "public_id": "LVC",
+    "timezone": "Europe/London"
   },
   {
     "id": "LVRPLSL",
     "name": "LIVERPOOL LIME STREET LL",
-    "public_id": "LIV"
+    "public_id": "LIV",
+    "timezone": "Europe/London"
   },
   {
     "id": "LIVSTLL",
     "name": "LIVERPOOL ST CROSSRAIL",
-    "public_id": "LST"
+    "public_id": "LST",
+    "timezone": "Europe/London"
   },
   {
     "id": "MORFNL",
     "name": "MOORFIELDS",
-    "public_id": "MRF"
+    "public_id": "MRF",
+    "timezone": "Europe/London"
   },
   {
     "id": "MORGTLT",
     "name": "MOORGATE LT",
-    "public_id": "MOG"
+    "public_id": "MOG",
+    "timezone": "Europe/London"
   },
   {
     "id": "MGTLSR",
     "name": "MOORGATE",
-    "public_id": "MOG"
+    "public_id": "MOG",
+    "timezone": "Europe/London"
   },
   {
     "id": "NWCRELL",
     "name": "NEW CROSS ELL",
-    "public_id": "NWX"
+    "public_id": "NWX",
+    "timezone": "Europe/London"
   },
   {
     "id": "NEWXGEL",
     "name": "NEW CROSS GATE STATION ELL",
-    "public_id": "NXG"
+    "public_id": "NXG",
+    "timezone": "Europe/London"
   },
   {
     "id": "NWCSTLL",
     "name": "NEWCASTLE (METRO)",
-    "public_id": "NCL"
+    "public_id": "NCL",
+    "timezone": "Europe/London"
   },
   {
     "id": "ORPNPL1",
     "name": "ORPINGTON PLATFORM 1",
-    "public_id": "ORP"
+    "public_id": "ORP",
+    "timezone": "Europe/London"
   },
   {
     "id": "ORPNPL6",
     "name": "ORPINGTON PLATFORM 6",
-    "public_id": "ORP"
+    "public_id": "ORP",
+    "timezone": "Europe/London"
   },
   {
     "id": "OXTEDBY",
     "name": "OXTED BAY",
-    "public_id": "OXT"
+    "public_id": "OXT",
+    "timezone": "Europe/London"
   },
   {
     "id": "PKHMRYC",
     "name": "PECKHAM RYE",
-    "public_id": "PMR"
+    "public_id": "PMR",
+    "timezone": "Europe/London"
   },
   {
     "id": "PERTH3P",
     "name": "PERTH NO3 PLATFORM",
-    "public_id": "PTH"
+    "public_id": "PTH",
+    "timezone": "Europe/London"
   },
   {
     "id": "PRSTN4B",
     "name": "PRESTON NO 4 BAY",
-    "public_id": "PRE"
+    "public_id": "PRE",
+    "timezone": "Europe/London"
   },
   {
     "id": "PLAISTW",
     "name": "PLAISTOW",
-    "public_id": "ZPS"
+    "public_id": "ZPS",
+    "timezone": "Europe/London"
   },
   {
     "id": "PADTLL",
     "name": "PADDINGTON CROSSRAIL",
-    "public_id": "PAD"
+    "public_id": "PAD",
+    "timezone": "Europe/London"
   },
   {
     "id": "QPRKAC",
     "name": "QUEENS PARK (AC)",
-    "public_id": "QPW"
+    "public_id": "QPW",
+    "timezone": "Europe/London"
   },
   {
     "id": "RICHNLL",
     "name": "RICHMOND NLL",
-    "public_id": "RMD"
+    "public_id": "RMD",
+    "timezone": "Europe/London"
   },
   {
     "id": "RDNG4AB",
     "name": "READING",
-    "public_id": "RDG"
+    "public_id": "RDG",
+    "timezone": "Europe/London"
   },
   {
     "id": "RTFDLL",
     "name": "RETFORD LOW LEVEL",
-    "public_id": "RET"
+    "public_id": "RET",
+    "timezone": "Europe/London"
   },
   {
     "id": "STRBDG1",
     "name": "STOURBRIDGE JN (TOWN PLAT)",
-    "public_id": "SBJ"
+    "public_id": "SBJ",
+    "timezone": "Europe/London"
   },
   {
     "id": "STFORDI",
     "name": "STRATFORD INTERNATIONAL",
-    "public_id": "SFA"
+    "public_id": "SFA",
+    "timezone": "Europe/London"
   },
   {
     "id": "SLSBY6B",
     "name": "SALISBURY 6 BAY",
-    "public_id": "SAL"
+    "public_id": "SAL",
+    "timezone": "Europe/London"
   },
   {
     "id": "STPXBOX",
     "name": "ST PANCRAS INTERNATIONAL",
-    "public_id": "STP"
+    "public_id": "STP",
+    "timezone": "Europe/London"
   },
   {
     "id": "STPANCI",
     "name": "ST PANCRAS INTERNATIONAL",
-    "public_id": "STP"
+    "public_id": "STP",
+    "timezone": "Europe/London"
   },
   {
     "id": "STPADOM",
     "name": "ST PANCRAS INTL (DOMESTIC)",
-    "public_id": "STP"
+    "public_id": "STP",
+    "timezone": "Europe/London"
   },
   {
     "id": "SHOTTHL",
     "name": "SHOTTON HIGH LEVEL",
-    "public_id": "SHT"
+    "public_id": "SHT",
+    "timezone": "Europe/London"
   },
   {
     "id": "TMWTHHL",
     "name": "TAMWORTH HL",
-    "public_id": "TAM"
+    "public_id": "TAM",
+    "timezone": "Europe/London"
   },
   {
     "id": "UPMNSP6",
     "name": "UPMINSTER",
-    "public_id": "UPM"
+    "public_id": "UPM",
+    "timezone": "Europe/London"
   },
   {
     "id": "UPMNLT",
     "name": "UPMINSTER L.T.",
-    "public_id": "UPM"
+    "public_id": "UPM",
+    "timezone": "Europe/London"
   },
   {
     "id": "VAUXHLM",
     "name": "VAUXHALL",
-    "public_id": "VXH"
+    "public_id": "VXH",
+    "timezone": "Europe/London"
   },
   {
     "id": "VAUXHLW",
     "name": "VAUXHALL",
-    "public_id": "VXH"
+    "public_id": "VXH",
+    "timezone": "Europe/London"
   },
   {
     "id": "VICTRIC",
     "name": "LONDON VICTORIA",
-    "public_id": "VIC"
+    "public_id": "VIC",
+    "timezone": "Europe/London"
   },
   {
     "id": "VICTRIE",
     "name": "LONDON VICTORIA",
-    "public_id": "VIC"
+    "public_id": "VIC",
+    "timezone": "Europe/London"
   },
   {
     "id": "VICT9",
     "name": "VICTORIA PLAT 9",
-    "public_id": "VIC"
+    "public_id": "VIC",
+    "timezone": "Europe/London"
   },
   {
     "id": "VICT10",
     "name": "VICTORIA PLAT 10",
-    "public_id": "VIC"
+    "public_id": "VIC",
+    "timezone": "Europe/London"
   },
   {
     "id": "VICT11",
     "name": "VICTORIA PLAT 11",
-    "public_id": "VIC"
+    "public_id": "VIC",
+    "timezone": "Europe/London"
   },
   {
     "id": "VICT12",
     "name": "VICTORIA PLAT 12",
-    "public_id": "VIC"
+    "public_id": "VIC",
+    "timezone": "Europe/London"
   },
   {
     "id": "VICT13",
     "name": "VICTORIA PLAT 13",
-    "public_id": "VIC"
+    "public_id": "VIC",
+    "timezone": "Europe/London"
   },
   {
     "id": "VICT14",
     "name": "VICTORIA PLAT 14",
-    "public_id": "VIC"
+    "public_id": "VIC",
+    "timezone": "Europe/London"
   },
   {
     "id": "VICT15",
     "name": "VICTORIA PLAT 15",
-    "public_id": "VIC"
+    "public_id": "VIC",
+    "timezone": "Europe/London"
   },
   {
     "id": "VICT16",
     "name": "VICTORIA PLAT 16",
-    "public_id": "VIC"
+    "public_id": "VIC",
+    "timezone": "Europe/London"
   },
   {
     "id": "VICT17",
     "name": "VICTORIA PLAT 17",
-    "public_id": "VIC"
+    "public_id": "VIC",
+    "timezone": "Europe/London"
   },
   {
     "id": "VICT18",
     "name": "VICTORIA PLAT 18",
-    "public_id": "VIC"
+    "public_id": "VIC",
+    "timezone": "Europe/London"
   },
   {
     "id": "VICT19",
     "name": "VICTORIA PLAT 19",
-    "public_id": "VIC"
+    "public_id": "VIC",
+    "timezone": "Europe/London"
   },
   {
     "id": "WATRLMN",
     "name": "LONDON WATERLOO",
-    "public_id": "WAT"
+    "public_id": "WAT",
+    "timezone": "Europe/London"
   },
   {
     "id": "WATRLOW",
     "name": "LONDON WATERLOO",
-    "public_id": "WAT"
+    "public_id": "WAT",
+    "timezone": "Europe/London"
   },
   {
     "id": "WATR",
     "name": "LONDON WATERLOO",
-    "public_id": "WAT"
+    "public_id": "WAT",
+    "timezone": "Europe/London"
   },
   {
     "id": "WATRINT",
     "name": "LONDON WATERLOO (INT)",
-    "public_id": "WAT"
+    "public_id": "WAT",
+    "timezone": "Europe/London"
   },
   {
     "id": "WATRLLT",
     "name": "WATERLOO LUL",
-    "public_id": "WAT"
+    "public_id": "WAT",
+    "timezone": "Europe/London"
   },
   {
     "id": "WACW",
     "name": "WATERLOO (WATERLOO & CITY)",
-    "public_id": "WAT"
+    "public_id": "WAT",
+    "timezone": "Europe/London"
   },
   {
     "id": "WMBYDC",
     "name": "WEMBLEY CENTRAL DC",
-    "public_id": "WMB"
+    "public_id": "WMB",
+    "timezone": "Europe/London"
   },
   {
     "id": "WLSDJHL",
     "name": "WILLESDEN JN. HIGH LEVEL",
-    "public_id": "WIJ"
+    "public_id": "WIJ",
+    "timezone": "Europe/London"
   },
   {
     "id": "WLSDNJL",
     "name": "WILLESDEN JN LOW LEVEL",
-    "public_id": "WIJ"
+    "public_id": "WIJ",
+    "timezone": "Europe/London"
   },
   {
     "id": "WEYBDGB",
     "name": "WEYBRIDGE",
-    "public_id": "WYB"
+    "public_id": "WYB",
+    "timezone": "Europe/London"
   },
   {
     "id": "WREXGUB",
     "name": "WREXHAM GENERAL UP BAY",
-    "public_id": "WRX"
+    "public_id": "WRX",
+    "timezone": "Europe/London"
   },
   {
     "id": "WHAMLT",
     "name": "WEST HAM LT",
-    "public_id": "WEH"
+    "public_id": "WEH",
+    "timezone": "Europe/London"
   },
   {
     "id": "WORCPHL",
     "name": "WORCESTERSHIRE PARKWAY HL",
-    "public_id": "WOP"
+    "public_id": "WOP",
+    "timezone": "Europe/London"
   },
   {
     "id": "WDNLUL",
     "name": "WIMBLEDON L.U.L.",
-    "public_id": "WIM"
+    "public_id": "WIM",
+    "timezone": "Europe/London"
   },
   {
     "id": "WDON",
     "name": "WIMBLEDON",
-    "public_id": "WIM"
+    "public_id": "WIM",
+    "timezone": "Europe/London"
   },
   {
     "id": "WATFJDC",
     "name": "WATFORD JUNCTION DC",
-    "public_id": "WFJ"
+    "public_id": "WFJ",
+    "timezone": "Europe/London"
   },
   {
     "id": "WCHAPXR",
     "name": "WHITECHAPEL CROSSRAIL",
-    "public_id": "ZLW"
+    "public_id": "ZLW",
+    "timezone": "Europe/London"
   },
   {
     "id": "BRWSUSX",
     "name": "BERWICK",
-    "public_id": "BRK"
+    "public_id": "BRK",
+    "timezone": "Europe/London"
   },
   {
     "id": "HEWOMTR",
     "name": "HEWORTH (METRO)",
-    "public_id": "HEW"
+    "public_id": "HEW",
+    "timezone": "Europe/London"
   }
 ]

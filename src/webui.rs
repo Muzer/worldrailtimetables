@@ -1,5 +1,7 @@
 use chrono::naive::Days;
-use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, ParseError};
+use chrono::offset::LocalResult;
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, ParseError, TimeZone};
+use chrono_tz::Tz;
 
 use crate::error::Error;
 use crate::schedule::{AssociationNode, Train, TrainLocation, TrainOperator, TrainSource};
@@ -70,6 +72,38 @@ impl<'a> FromParam<'a> for NaiveTimeRocket {
             Err(e) => Err(e),
         }
     }
+}
+
+fn convert_tz(
+    date: &NaiveDate,
+    day_diff: &Option<u8>,
+    time: &Option<NaiveTime>,
+    time_tz: &Option<Tz>,
+    target_tz: &Tz,
+) -> Result<Option<NaiveTime>, Error> {
+    let time_tz = match time_tz {
+        None => return Ok(time.clone()),
+        Some(x) => x,
+    };
+    let (time, day_diff) = match time {
+        None => return Ok(None),
+        Some(x) => (x, day_diff.unwrap()),
+    };
+    let date_time = date.add(Days::new(day_diff.into())).and_time(*time);
+
+    let date_time_with_tz = match time_tz.from_local_datetime(&date_time) {
+        LocalResult::None => {
+            return Err(Error::WebUiError(WebUiError {
+                what: "Invalid datetime".to_string(),
+            }))
+        }
+        LocalResult::Single(x) => x,
+        LocalResult::Ambiguous(x, _) => x, // TODO?
+    };
+
+    let output_time_tz = date_time_with_tz.with_timezone(target_tz);
+
+    Ok(Some(output_time_tz.time()))
 }
 
 fn get_train_instance(trains: &Vec<Train>, date: NaiveDate) -> (Option<Train>, bool, bool) {
@@ -259,7 +293,7 @@ fn train(
 
     let (final_train, cancelled, modified) = get_train_instance(&trains, date);
 
-    let train = final_train?;
+    let mut train = final_train?;
     let mut associations: Vec<(
         String,
         i8,
@@ -356,9 +390,21 @@ fn train(
                 category: *category,
                 name: train.variable_train.name.clone(),
                 dep_time: if train.route[0].public_dep.is_none() {
-                    train.route[0].working_dep.unwrap()
+                    convert_tz(
+                        &other_date,
+                        &Some(0),
+                        &train.route[0].working_dep,
+                        &train.route[0].timing_tz,
+                        &locations.get(location_id).unwrap().timezone,
+                    ).ok()?.unwrap()
                 } else {
-                    train.route[0].public_dep.unwrap()
+                    convert_tz(
+                        &other_date,
+                        &Some(0),
+                        &train.route[0].public_dep,
+                        &train.route[0].timing_tz,
+                        &locations.get(location_id).unwrap().timezone,
+                    ).ok()?.unwrap()
                 },
             });
     }
@@ -372,6 +418,45 @@ fn train(
         + 1)
     {
         dates.push(date.add(Days::new(extra_days.into())));
+    }
+
+    // now convert all the timezones of all the stops
+    for location in train.route.iter_mut() {
+        location.working_arr = convert_tz(
+            &date,
+            &location.working_arr_day,
+            &location.working_arr,
+            &location.timing_tz,
+            &locations.get(&location.id).unwrap().timezone,
+        ).ok()?;
+        location.working_dep = convert_tz(
+            &date,
+            &location.working_dep_day,
+            &location.working_dep,
+            &location.timing_tz,
+            &locations.get(&location.id).unwrap().timezone,
+        ).ok()?;
+        location.working_pass = convert_tz(
+            &date,
+            &location.working_pass_day,
+            &location.working_pass,
+            &location.timing_tz,
+            &locations.get(&location.id).unwrap().timezone,
+        ).ok()?;
+        location.public_arr = convert_tz(
+            &date,
+            &location.public_arr_day,
+            &location.public_arr,
+            &location.timing_tz,
+            &locations.get(&location.id).unwrap().timezone,
+        ).ok()?;
+        location.public_dep = convert_tz(
+            &date,
+            &location.public_dep_day,
+            &location.public_dep,
+            &location.timing_tz,
+            &locations.get(&location.id).unwrap().timezone,
+        ).ok()?;
     }
 
     let context = context! {
@@ -684,6 +769,9 @@ fn location_line_up(
     let mut actual_trains = vec![];
     for train in trains {
         // OK, this is somewhat hacky but I haven't yet thought of a better way.
+        if train.len() == 0 { // deleted trains remain in map
+            continue;
+        }
         let last_location = &train[0].route.last().unwrap();
         let max_day_offset = if last_location.working_arr_day.is_none() {
             last_location.public_arr_day.unwrap()

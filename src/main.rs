@@ -1,6 +1,9 @@
 mod error;
 mod fetcher;
+mod gtfs_importer;
+mod gtfs_url_fetcher;
 mod importer;
+mod ir_manager;
 mod manager;
 mod nir_fetcher;
 mod nir_manager;
@@ -16,6 +19,7 @@ mod webui;
 use config_file::FromConfigFile;
 use serde::Deserialize;
 
+use crate::ir_manager::IrManager;
 use crate::manager::Manager;
 use crate::nir_manager::{NirConfig, NirManager};
 use crate::nr_manager::{NrConfig, NrManager};
@@ -34,14 +38,19 @@ async fn main() -> Result<(), error::Error> {
 
     let schedule_manager = Arc::new(schedule_manager::ScheduleManager::new());
 
-    let mut nr_manager = NrManager::new(config.nr, &schedule_manager).await?;
-    let mut nir_manager = NirManager::new(config.nir, &schedule_manager).await?;
+    let mut nr_manager = NrManager::new(config.nr, schedule_manager.clone()).await?;
+    let mut nir_manager = NirManager::new(config.nir, schedule_manager.clone()).await?;
+    let mut ir_manager = IrManager::new(schedule_manager.clone()).await?;
 
-    tokio::try_join!(
-        nr_manager.run(),
-        nir_manager.run(),
-        webui::rocket(schedule_manager.clone()),
-    )?;
+    let nr_manager_fut = tokio::spawn(async move { nr_manager.run().await });
+    let nir_manager_fut = tokio::spawn(async move { nir_manager.run().await });
+    let ir_manager_fut = tokio::spawn(async move { ir_manager.run().await });
+    let webui_fut = tokio::spawn(async move { webui::rocket(schedule_manager.clone()).await });
+    tokio::select!(
+        x = nr_manager_fut => x,
+        x = nir_manager_fut => x,
+        x = ir_manager_fut => x,
+        x = webui_fut => x)??;
 
     Ok(())
 }

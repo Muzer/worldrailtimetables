@@ -1,3 +1,4 @@
+use crate::gtfs_importer::GtfsImportError;
 use crate::nr_vstp_subscriber::NrVstpError;
 use crate::uk_importer::{CifError, NrJsonError};
 use crate::webui::WebUiError;
@@ -5,6 +6,7 @@ use anyhow;
 use config_file::ConfigFileError;
 use rc_zip_tokio::rc_zip::error::Error as RcZipError;
 use reqwest;
+use tokio::task::JoinError;
 
 use std::fmt;
 
@@ -21,6 +23,9 @@ pub enum Error {
     RocketError(rocket::Error),
     WebUiError(WebUiError),
     RcZipError(RcZipError),
+    GtfsError(gtfs_structures::error::Error),
+    JoinError(JoinError),
+    GtfsImportError(GtfsImportError),
 }
 
 impl fmt::Display for Error {
@@ -88,5 +93,23 @@ impl From<rocket::Error> for Error {
 impl From<RcZipError> for Error {
     fn from(error: RcZipError) -> Self {
         Error::RcZipError(error)
+    }
+}
+
+impl From<gtfs_structures::error::Error> for Error {
+    fn from(error: gtfs_structures::error::Error) -> Self {
+        Error::GtfsError(error)
+    }
+}
+
+impl From<JoinError> for Error {
+    fn from(error: JoinError) -> Self {
+        Error::JoinError(error)
+    }
+}
+
+impl From<GtfsImportError> for Error {
+    fn from(error: GtfsImportError) -> Self {
+        Error::GtfsImportError(error)
     }
 }
