@@ -115,7 +115,7 @@ fn get_train_instance(trains: &Vec<Train>, date: NaiveDate) -> (Option<Train>, b
         for validity in &train.validity {
             if validity.valid_begin.date_naive() <= date
                 && validity.valid_end.date_naive() >= date
-                && train.days_of_week.get_by_weekday(date.weekday())
+                && validity.days_of_week.get_by_weekday(date.weekday())
             {
                 cancelled = false;
                 modified = false;
@@ -123,7 +123,7 @@ fn get_train_instance(trains: &Vec<Train>, date: NaiveDate) -> (Option<Train>, b
                     for validity in &replacement.validity {
                         if validity.valid_begin.date_naive() <= date
                             && validity.valid_end.date_naive() >= date
-                            && train.days_of_week.get_by_weekday(date.weekday())
+                            && validity.days_of_week.get_by_weekday(date.weekday())
                         {
                             final_train = Some(replacement.clone());
                             modified = true;
@@ -134,10 +134,10 @@ fn get_train_instance(trains: &Vec<Train>, date: NaiveDate) -> (Option<Train>, b
                 if final_train.is_none() {
                     final_train = Some(train.clone());
                 }
-                for (cancellation, weekdays) in &train.cancellations {
+                for cancellation in &train.cancellations {
                     if cancellation.valid_begin.date_naive() <= date
                         && cancellation.valid_end.date_naive() >= date
-                        && weekdays.get_by_weekday(date.weekday())
+                        && cancellation.days_of_week.get_by_weekday(date.weekday())
                     {
                         cancelled = true;
                     }
@@ -179,14 +179,14 @@ fn get_association(assoc: &AssociationNode, date: NaiveDate) -> Option<Associati
     for validity in &assoc.validity {
         if validity.valid_begin.date_naive() <= date
             && validity.valid_end.date_naive() >= date
-            && assoc.days.get_by_weekday(date.weekday())
+            && validity.days_of_week.get_by_weekday(date.weekday())
         {
             cancelled = false;
             'replacement: for replacement in &assoc.replacements {
                 for validity in &replacement.validity {
                     if validity.valid_begin.date_naive() <= date
                         && validity.valid_end.date_naive() >= date
-                        && assoc.days.get_by_weekday(date.weekday())
+                        && validity.days_of_week.get_by_weekday(date.weekday())
                     {
                         final_assoc = Some(replacement.clone());
                         break 'replacement;
@@ -196,10 +196,10 @@ fn get_association(assoc: &AssociationNode, date: NaiveDate) -> Option<Associati
             if final_assoc.is_none() {
                 final_assoc = Some(assoc.clone());
             }
-            for (cancellation, weekdays) in &assoc.cancellations {
+            for cancellation in &assoc.cancellations {
                 if cancellation.valid_begin.date_naive() <= date
                     && cancellation.valid_end.date_naive() >= date
-                    && weekdays.get_by_weekday(date.weekday())
+                    && cancellation.days_of_week.get_by_weekday(date.weekday())
                 {
                     cancelled = true;
                 }
@@ -396,7 +396,9 @@ fn train(
                         &train.route[0].working_dep,
                         &train.route[0].timing_tz,
                         &locations.get(location_id).unwrap().timezone,
-                    ).ok()?.unwrap()
+                    )
+                    .ok()?
+                    .unwrap()
                 } else {
                     convert_tz(
                         &other_date,
@@ -404,7 +406,9 @@ fn train(
                         &train.route[0].public_dep,
                         &train.route[0].timing_tz,
                         &locations.get(location_id).unwrap().timezone,
-                    ).ok()?.unwrap()
+                    )
+                    .ok()?
+                    .unwrap()
                 },
             });
     }
@@ -428,35 +432,40 @@ fn train(
             &location.working_arr,
             &location.timing_tz,
             &locations.get(&location.id).unwrap().timezone,
-        ).ok()?;
+        )
+        .ok()?;
         location.working_dep = convert_tz(
             &date,
             &location.working_dep_day,
             &location.working_dep,
             &location.timing_tz,
             &locations.get(&location.id).unwrap().timezone,
-        ).ok()?;
+        )
+        .ok()?;
         location.working_pass = convert_tz(
             &date,
             &location.working_pass_day,
             &location.working_pass,
             &location.timing_tz,
             &locations.get(&location.id).unwrap().timezone,
-        ).ok()?;
+        )
+        .ok()?;
         location.public_arr = convert_tz(
             &date,
             &location.public_arr_day,
             &location.public_arr,
             &location.timing_tz,
             &locations.get(&location.id).unwrap().timezone,
-        ).ok()?;
+        )
+        .ok()?;
         location.public_dep = convert_tz(
             &date,
             &location.public_dep_day,
             &location.public_dep,
             &location.timing_tz,
             &locations.get(&location.id).unwrap().timezone,
-        ).ok()?;
+        )
+        .ok()?;
     }
 
     let context = context! {
@@ -485,6 +494,7 @@ struct BasicTrainForLocation {
     public_arr: Option<NaiveDateTime>,
     public_dep: Option<NaiveDateTime>,
     platform: Option<String>,
+    platform_zone: Option<String>,
     modified: bool,
     cancelled: bool,
     source: Option<TrainSource>,
@@ -493,6 +503,8 @@ struct BasicTrainForLocation {
     name: Option<String>,
     namespace: String,
     date: NaiveDate,
+    is_first: bool,
+    is_last: bool,
 }
 
 fn get_origins(
@@ -769,7 +781,8 @@ fn location_line_up(
     let mut actual_trains = vec![];
     for train in trains {
         // OK, this is somewhat hacky but I haven't yet thought of a better way.
-        if train.len() == 0 { // deleted trains remain in map
+        if train.len() == 0 {
+            // deleted trains remain in map
             continue;
         }
         let last_location = &train[0].route.last().unwrap();
@@ -917,6 +930,7 @@ fn location_line_up(
                         ),
                     },
                     platform: location.platform.clone(),
+                    platform_zone: location.platform_zone.clone(),
                     modified,
                     cancelled,
                     source: train.source,
@@ -925,6 +939,8 @@ fn location_line_up(
                     name: variable_train.name.clone(),
                     namespace: namespace.to_string(),
                     date: cur_date,
+                    is_first: i == 0,
+                    is_last: i == train.route.len() - 1,
                 });
             }
 

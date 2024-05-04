@@ -77,7 +77,7 @@ impl NrManager {
             if current_day == 7 {
                 current_day = 0;
             }
-            if now.time() <= NaiveTime::from_hms_opt(2, 9, 0).unwrap() {
+            if now.time() <= NaiveTime::from_hms_opt(1, 0, 0).unwrap() {
                 if current_day == 0 {
                     current_day = 7;
                 }

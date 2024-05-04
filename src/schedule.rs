@@ -53,6 +53,7 @@ pub struct Location {
 pub struct TrainValidityPeriod {
     pub valid_begin: DateTime<Tz>,
     pub valid_end: DateTime<Tz>,
+    pub days_of_week: DaysOfWeek,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -77,6 +78,29 @@ impl DaysOfWeek {
             Weekday::Sat => self.saturday,
             Weekday::Sun => self.sunday,
         }
+    }
+
+    pub fn from_single_weekday(weekday: Weekday) -> DaysOfWeek {
+        let mut days = DaysOfWeek {
+            monday: false,
+            tuesday: false,
+            wednesday: false,
+            thursday: false,
+            friday: false,
+            saturday: false,
+            sunday: false,
+        };
+        match weekday {
+            Weekday::Mon => days.monday = true,
+            Weekday::Tue => days.tuesday = true,
+            Weekday::Wed => days.wednesday = true,
+            Weekday::Thu => days.thursday = true,
+            Weekday::Fri => days.friday = true,
+            Weekday::Sat => days.saturday = true,
+            Weekday::Sun => days.sunday = true,
+        }
+
+        days
     }
 }
 
@@ -155,6 +179,15 @@ pub enum TrainType {
     PassengerParcels,
     Ship,
     Trip,
+    Tram,
+    CableTram,
+    CableCar,
+    Funicular,
+    Trolleybus,
+    Monorail,
+    Coach,
+    Taxi,
+    Air,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -224,6 +257,7 @@ pub enum ReservationField {
     Impossible,
     NotMandatory, // some railways might not have possible/impossible distinction
     NotApplicable,
+    Unknown,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -269,7 +303,8 @@ pub struct Activities {
     pub operational_stop: bool,
     pub train_locomotive_on_rear: bool,
     pub propelling: bool,
-    pub request_stop: bool,
+    pub request_pick_up: bool,
+    pub request_set_down: bool,
     pub reversing_move: bool,
     pub run_round: bool,
     pub staff_stop: bool,
@@ -281,6 +316,9 @@ pub struct Activities {
     pub pick_up_only: bool,
     pub watering_stock: bool,
     pub cross_at_passing_point: bool,
+    pub request_pick_up_by_telephone: bool,
+    pub request_set_down_by_telephone: bool,
+    pub times_approximate: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -288,9 +326,8 @@ pub struct AssociationNode {
     pub other_train_id: String,
     pub other_train_location_id_suffix: Option<String>,
     pub validity: Vec<TrainValidityPeriod>,
-    pub cancellations: Vec<(TrainValidityPeriod, DaysOfWeek)>,
+    pub cancellations: Vec<TrainValidityPeriod>,
     pub replacements: Vec<AssociationNode>,
-    pub days: DaysOfWeek,
     pub day_diff: i8,
     pub for_passengers: bool,
     pub source: Option<TrainSource>,
@@ -313,6 +350,7 @@ pub struct TrainLocation {
     pub public_dep: Option<NaiveTime>,
     pub public_dep_day: Option<u8>,
     pub platform: Option<String>,
+    pub platform_zone: Option<String>,
     pub line: Option<String>,
     pub path: Option<String>,
     pub engineering_allowance_s: Option<u32>,
@@ -338,27 +376,28 @@ pub struct VariableTrain {
     pub timing_allocation: Option<TrainAllocation>,
     pub actual_allocation: Option<TrainAllocation>,
     pub timing_speed_m_per_s: Option<f64>,
-    pub operating_characteristics: OperatingCharacteristics,
-    pub has_first_class_seats: bool,
-    pub has_second_class_seats: bool,
-    pub has_first_class_sleepers: bool,
-    pub has_second_class_sleepers: bool,
-    pub carries_vehicles: bool,
+    pub operating_characteristics: Option<OperatingCharacteristics>,
+    pub has_first_class_seats: Option<bool>,
+    pub has_second_class_seats: Option<bool>,
+    pub has_first_class_sleepers: Option<bool>,
+    pub has_second_class_sleepers: Option<bool>,
+    pub carries_vehicles: Option<bool>,
     pub reservations: Reservations,
-    pub catering: Catering,
+    pub catering: Option<Catering>,
     pub brand: Option<String>,
     pub name: Option<String>,
     pub uic_code: Option<String>,
     pub operator: Option<TrainOperator>,
+    pub wheelchair_accessible: Option<bool>,
+    pub bicycles_allowed: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Train {
     pub id: String,
     pub validity: Vec<TrainValidityPeriod>,
-    pub cancellations: Vec<(TrainValidityPeriod, DaysOfWeek)>, // TODO should include TrainSource?
+    pub cancellations: Vec<TrainValidityPeriod>, // TODO should include TrainSource?
     pub replacements: Vec<Train>,
-    pub days_of_week: DaysOfWeek,
     pub variable_train: VariableTrain,
     pub source: Option<TrainSource>,
     pub runs_as_required: bool,

@@ -52,12 +52,12 @@
           <td>{% if train.cancelled %}<s>{% endif %}<a href="/train/{{ namespace }}/{{ train.id }}/{{ train.date | split(pat="T") | first }}">{% if train.public_id %}{{ train.public_id }}{% else %}{{ train.id }}{% endif %}</a>{% if train.cancelled %}</s>{% endif %}</td> {# TODO expand scope of this link for convenience #}
           <td>{% if train.operator %}{{ train.operator.id }}{% endif %}</td>
           <td>{% if train.name %}{{ train.name }}{% endif %}</td>
-          <td>{% if train.platform %}{{ train.platform }}{% endif %}</td>
+          <td>{% if train.platform %}{{ train.platform }}{% if train.platform_zone %}-{{ train.platform_zone }}{% endif %}{% endif %}</td>
           <td>{% if train.source == "LongTerm" %}LTP{% elif train.source == "ShortTerm" %}STP{% elif train.source == "VeryShortTerm" %}VSTP{% endif %}</td>
           <td>{% if train.working_arr %}{{ train.working_arr | split(pat="T") | last | truncate(length=8, end="") }}{% endif %}</td>
           <td>{% if train.public_arr %}{{ train.public_arr | split(pat="T") | last | truncate(length=5, end="") }}{% endif %}</td>
-          <td>{% if train.cancelled %}<s>{% endif %}{% if train.public_arr or train.working_arr or train.working_pass %}{% for origin in train.origins %}{{ locations[origin].name }}{% if not loop.last %} &amp; {% endif %}{% endfor %}{% else %}<em>Starts</em>{% endif %}{% if train.cancelled %}</s>{% endif %}</td>
-          <td>{% if train.cancelled %}<s>{% endif %}{% if train.public_dep or train.working_dep or train.working_pass %}{% for destination in train.destinations %}{{ locations[destination].name }}{% if not loop.last %} &amp; {% endif %}{% endfor %}{% else %}<em>Terminates</em>{% endif %}{% if train.cancelled %}</s>{% endif %}</td>
+          <td>{% if train.cancelled %}<s>{% endif %}{% if not train.is_first %}{% for origin in train.origins %}{{ locations[origin].name }}{% if not loop.last %} &amp; {% endif %}{% endfor %}{% else %}<em>Starts</em>{% endif %}{% if train.cancelled %}</s>{% endif %}</td>
+          <td>{% if train.cancelled %}<s>{% endif %}{% if not train.is_last %}{% for destination in train.destinations %}{{ locations[destination].name }}{% if not loop.last %} &amp; {% endif %}{% endfor %}{% else %}<em>Terminates</em>{% endif %}{% if train.cancelled %}</s>{% endif %}</td>
           <td>{% if train.working_pass %}{{ train.working_pass | split(pat="T") | last | truncate(length=5, end="") }}{% endif %}</td>
           <td>{% if train.public_dep %}{{ train.public_dep | split(pat="T") | last | truncate(length=5, end="") }}{% endif %}</td>
           <td>{% if train.working_dep %}{{ train.working_dep | split(pat="T") | last | truncate(length=8, end="") }}{% endif %}</td>

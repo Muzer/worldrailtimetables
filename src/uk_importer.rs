@@ -223,13 +223,13 @@ fn rev_date(date: &DateTime<Tz>, day_diff: i8) -> DateTime<Tz> {
 
 fn check_date_applicability(
     existing_validity: &TrainValidityPeriod,
-    existing_days: &DaysOfWeek,
     new_begin: DateTime<Tz>,
     new_end: DateTime<Tz>,
     new_days: &DaysOfWeek,
 ) -> bool {
     // check for no overlapping days at all
-    if existing_days
+    if existing_validity
+        .days_of_week
         .into_iter()
         .zip(new_days.into_iter())
         .find(|(existing_day, new_day)| *existing_day && *new_day)
@@ -263,10 +263,9 @@ fn write_assocs_to_trains(
                 for (assoc, category) in assocs {
                     if !check_date_applicability(
                         &train.validity[0],
-                        &train.days_of_week,
                         assoc.validity[0].valid_begin,
                         assoc.validity[0].valid_end,
-                        &assoc.days,
+                        &assoc.validity[0].days_of_week,
                     ) {
                         continue;
                     }
@@ -351,7 +350,7 @@ fn delete_single_assoc_replacements_cancellations(
             )
         });
     } else if *stp_modification_type == ModificationType::Delete {
-        assoc.cancellations.retain(|(validity, _days_of_week)| {
+        assoc.cancellations.retain(|validity| {
             !is_matching_assoc_for_modify_replacement_or_cancel(
                 validity,
                 begin,
@@ -416,8 +415,8 @@ fn amend_individual_assoc(
     assoc.validity = vec![TrainValidityPeriod {
         valid_begin: new_begin.clone(),
         valid_end: new_end.clone(),
+        days_of_week: new_days.clone(),
     }];
-    assoc.days = new_days.clone();
     match day_diff {
         None => (),
         Some(x) => assoc.day_diff = x * if use_rev { -1 } else { 1 },
@@ -468,13 +467,13 @@ fn amend_single_assoc_replacements_cancellations(
             }
         }
     } else if *stp_modification_type == ModificationType::Delete {
-        for (cancellation, old_days_of_week) in assoc.cancellations.iter_mut() {
+        for cancellation in assoc.cancellations.iter_mut() {
             if cancellation.valid_begin == *begin {
                 *cancellation = TrainValidityPeriod {
                     valid_begin: new_begin.clone(),
                     valid_end: new_end.clone(),
+                    days_of_week: new_days.clone(),
                 };
-                *old_days_of_week = new_days.clone();
             }
         }
     }
@@ -552,22 +551,15 @@ fn cancel_single_assoc(
             (*begin, *end, *days_of_week)
         };
 
-        if !check_date_applicability(
-            &assoc.validity[0],
-            &assoc.days,
-            rev_begin,
-            rev_end,
-            &rev_days_of_week,
-        ) {
+        if !check_date_applicability(&assoc.validity[0], rev_begin, rev_end, &rev_days_of_week) {
             return;
         }
         let new_cancel = TrainValidityPeriod {
             valid_begin: rev_begin,
             valid_end: rev_end,
+            days_of_week: rev_days_of_week.clone(),
         };
-        assoc
-            .cancellations
-            .push((new_cancel, rev_days_of_week.clone()))
+        assoc.cancellations.push(new_cancel)
     }
 }
 
@@ -606,10 +598,9 @@ fn replace_single_vec_assocs(
             // check for no overlapping days at all
             if !check_date_applicability(
                 &assoc.validity[0],
-                &assoc.days,
                 new_assoc.validity[0].valid_begin,
                 new_assoc.validity[0].valid_end,
-                &new_assoc.days,
+                &new_assoc.validity[0].days_of_week,
             ) {
                 continue;
             }
@@ -1130,10 +1121,9 @@ fn trains_replace_assoc(
                         // check for no overlapping days at all
                         if !check_date_applicability(
                             &assoc.validity[0],
-                            &assoc.days,
                             new_assoc.validity[0].valid_begin,
                             new_assoc.validity[0].valid_end,
-                            &new_assoc.days,
+                            &new_assoc.validity[0].days_of_week,
                         ) {
                             continue;
                         }
@@ -1185,10 +1175,9 @@ fn trains_replace_rev_assoc(
                         // check for no overlapping days at all
                         if !check_date_applicability(
                             &assoc.validity[0],
-                            &assoc.days,
                             new_assoc.validity[0].valid_begin,
                             new_assoc.validity[0].valid_end,
-                            &new_assoc.days,
+                            &new_assoc.validity[0].days_of_week,
                         ) {
                             continue;
                         }
@@ -1834,7 +1823,6 @@ where
 
 fn amend_train(train: &mut Train, new_train: Train) {
     train.validity = new_train.validity;
-    train.days_of_week = new_train.days_of_week;
     train.runs_as_required = new_train.runs_as_required;
     train.performance_monitoring = new_train.performance_monitoring;
     train.route = new_train.route;
@@ -1968,7 +1956,10 @@ where
             "OP" => activities.operational_stop = true,
             "OR" => activities.train_locomotive_on_rear = true,
             "PR" => activities.propelling = true,
-            "R" => activities.request_stop = true,
+            "R" => {
+                activities.request_pick_up = true;
+                activities.request_set_down = true;
+            }
             "RM" => activities.reversing_move = true,
             "RR" => activities.run_round = true,
             "S" => activities.staff_stop = true,
@@ -2327,10 +2318,9 @@ impl CifImporter {
                 // check for no overlapping days at all
                 if !check_date_applicability(
                     &assoc.validity[0],
-                    &assoc.days,
                     new_assoc.validity[0].valid_begin,
                     new_assoc.validity[0].valid_end,
-                    &new_assoc.days,
+                    &new_assoc.validity[0].days_of_week,
                 ) {
                     continue;
                 }
@@ -2403,7 +2393,10 @@ impl CifImporter {
                 .get_mut(&(main_train_id.clone(), begin.clone()))
             {
                 Some(x) => x,
-                None => panic!("Unable to find last-written train, even in orphaned overlays"),
+                None => panic!(
+                    "Unable to find last-written train, even in orphaned overlays; line {}",
+                    number
+                ),
             },
             _ => panic!("Unable to find last-written train"),
         })
@@ -2748,10 +2741,10 @@ impl CifImporter {
             validity: vec![TrainValidityPeriod {
                 valid_begin: begin,
                 valid_end: end,
+                days_of_week,
             }],
             cancellations: vec![],
             replacements: vec![],
-            days: days_of_week,
             day_diff,
             for_passengers,
             source: Some(if is_stp {
@@ -2767,10 +2760,10 @@ impl CifImporter {
             validity: vec![TrainValidityPeriod {
                 valid_begin: rev_begin,
                 valid_end: rev_end,
+                days_of_week: rev_days_of_week,
             }],
             cancellations: vec![],
             replacements: vec![],
-            days: rev_days_of_week,
             day_diff: -day_diff,
             for_passengers,
             source: Some(if is_stp {
@@ -2902,11 +2895,9 @@ impl CifImporter {
                         ModificationType::Amend => train
                             .replacements
                             .retain(|replacement| replacement.validity[0].valid_begin != begin),
-                        ModificationType::Delete => {
-                            train.cancellations.retain(|(cancellation, _days_of_week)| {
-                                cancellation.valid_begin != begin
-                            })
-                        }
+                        ModificationType::Delete => train
+                            .cancellations
+                            .retain(|cancellation| cancellation.valid_begin != begin),
                     }
                 }
             }
@@ -2934,20 +2925,15 @@ impl CifImporter {
 
             // we cancel main trains
             for train in old_trains.iter_mut() {
-                if !check_date_applicability(
-                    &train.validity[0],
-                    &train.days_of_week,
-                    begin,
-                    end,
-                    &days_of_week,
-                ) {
+                if !check_date_applicability(&train.validity[0], begin, end, &days_of_week) {
                     continue;
                 }
                 let new_cancel = TrainValidityPeriod {
                     valid_begin: begin.clone(),
                     valid_end: end.clone(),
+                    days_of_week: days_of_week,
                 };
-                train.cancellations.push((new_cancel, days_of_week.clone()))
+                train.cancellations.push(new_cancel)
             }
 
             schedule
@@ -2968,13 +2954,13 @@ impl CifImporter {
 
             // now we clean up modifications/cancellations
             for ref mut train in old_trains.iter_mut() {
-                for (cancellation, old_days_of_week) in train.cancellations.iter_mut() {
+                for cancellation in train.cancellations.iter_mut() {
                     if cancellation.valid_begin == begin {
                         *cancellation = TrainValidityPeriod {
                             valid_begin: begin,
                             valid_end: end,
+                            days_of_week: days_of_week.clone(),
                         };
-                        *old_days_of_week = days_of_week.clone();
                     }
                 }
             }
@@ -3067,10 +3053,10 @@ impl CifImporter {
             validity: vec![TrainValidityPeriod {
                 valid_begin: begin,
                 valid_end: end,
+                days_of_week,
             }],
             cancellations: vec![],
             replacements: vec![],
-            days_of_week,
             variable_train: VariableTrain {
                 train_type,
                 public_id: Some(public_id.to_string()),
@@ -3087,18 +3073,20 @@ impl CifImporter {
                 },
                 actual_allocation: None,
                 timing_speed_m_per_s: speed_m_per_s,
-                operating_characteristics,
-                has_first_class_seats: first_seating,
-                has_second_class_seats: standard_seating,
-                has_first_class_sleepers: first_sleepers,
-                has_second_class_sleepers: standard_sleepers,
-                carries_vehicles: train_type == TrainType::CarCarryingPassenger,
+                operating_characteristics: Some(operating_characteristics),
+                has_first_class_seats: Some(first_seating),
+                has_second_class_seats: Some(standard_seating),
+                has_first_class_sleepers: Some(first_sleepers),
+                has_second_class_sleepers: Some(standard_sleepers),
+                carries_vehicles: Some(train_type == TrainType::CarCarryingPassenger),
                 reservations,
-                catering,
+                catering: Some(catering),
                 brand,
                 name: None,
                 uic_code: None,
                 operator: None,
+                wheelchair_accessible: None,
+                bicycles_allowed: None,
             },
             source: Some(if is_stp {
                 TrainSource::ShortTerm
@@ -3207,13 +3195,7 @@ impl CifImporter {
             // we replace main trains
             let mut replaced = false;
             for train in old_trains.iter_mut() {
-                if !check_date_applicability(
-                    &train.validity[0],
-                    &train.days_of_week,
-                    begin,
-                    end,
-                    &days_of_week,
-                ) {
+                if !check_date_applicability(&train.validity[0], begin, end, &days_of_week) {
                     continue;
                 }
                 replaced = true;
@@ -3307,6 +3289,7 @@ impl CifImporter {
             public_dep: pub_dep,
             public_dep_day: Some(0),
             platform,
+            platform_zone: None,
             line: line_code,
             path: None,
             engineering_allowance_s: Some(eng_allowance),
@@ -3434,6 +3417,7 @@ impl CifImporter {
                 public_dep: pub_dep,
                 public_dep_day: pub_dep_day,
                 platform,
+                platform_zone: None,
                 line: line_code,
                 path: path_code,
                 engineering_allowance_s: Some(eng_allowance),
@@ -3520,6 +3504,7 @@ impl CifImporter {
                 public_dep: None,
                 public_dep_day: None,
                 platform,
+                platform_zone: None,
                 line: None,
                 path: path_code,
                 engineering_allowance_s: None,
@@ -3652,18 +3637,20 @@ impl CifImporter {
             },
             actual_allocation: None,
             timing_speed_m_per_s: speed_m_per_s,
-            operating_characteristics,
-            has_first_class_seats: first_seating,
-            has_second_class_seats: standard_seating,
-            has_first_class_sleepers: first_sleepers,
-            has_second_class_sleepers: standard_sleepers,
-            carries_vehicles: train_type == TrainType::CarCarryingPassenger,
+            operating_characteristics: Some(operating_characteristics),
+            has_first_class_seats: Some(first_seating),
+            has_second_class_seats: Some(standard_seating),
+            has_first_class_sleepers: Some(first_sleepers),
+            has_second_class_sleepers: Some(standard_sleepers),
+            carries_vehicles: Some(train_type == TrainType::CarCarryingPassenger),
             reservations: reservations,
-            catering: catering,
+            catering: Some(catering),
             brand: brand,
             name: None,
             uic_code: uic_code,
             operator,
+            wheelchair_accessible: None,
+            bicycles_allowed: None,
         });
 
         Ok(schedule)
@@ -3788,10 +3775,9 @@ impl CifImporter {
             for train in old_trains.iter_mut() {
                 if !check_date_applicability(
                     &train.validity[0],
-                    &train.days_of_week,
                     new_train.validity[0].valid_begin,
                     new_train.validity[0].valid_end,
-                    &new_train.days_of_week,
+                    &new_train.validity[0].days_of_week,
                 ) {
                     continue;
                 }
@@ -4289,6 +4275,7 @@ impl NrJsonImporter {
                     public_dep: pub_dep,
                     public_dep_day: pub_dep_day,
                     platform,
+                    platform_zone: None,
                     line: line_code,
                     path: path_code,
                     engineering_allowance_s: eng_allowance,
@@ -4527,14 +4514,14 @@ impl NrJsonImporter {
             },
             actual_allocation: None,
             timing_speed_m_per_s: speed_m_per_s,
-            operating_characteristics,
-            has_first_class_seats: first_seating,
-            has_second_class_seats: standard_seating,
-            has_first_class_sleepers: first_sleepers,
-            has_second_class_sleepers: standard_sleepers,
-            carries_vehicles: train_type == TrainType::CarCarryingPassenger,
+            operating_characteristics: Some(operating_characteristics),
+            has_first_class_seats: Some(first_seating),
+            has_second_class_seats: Some(standard_seating),
+            has_first_class_sleepers: Some(first_sleepers),
+            has_second_class_sleepers: Some(standard_sleepers),
+            carries_vehicles: Some(train_type == TrainType::CarCarryingPassenger),
             reservations,
-            catering,
+            catering: Some(catering),
             brand,
             name: None,
             uic_code,
@@ -4542,6 +4529,8 @@ impl NrJsonImporter {
                 id: atoc_code.to_string(),
                 description: train_operator_desc,
             }),
+            wheelchair_accessible: None,
+            bicycles_allowed: None,
         })
     }
 
@@ -4626,11 +4615,9 @@ impl NrJsonImporter {
                         ModificationType::Amend => train
                             .replacements
                             .retain(|replacement| replacement.validity[0].valid_begin != begin),
-                        ModificationType::Delete => {
-                            train.cancellations.retain(|(cancellation, _days_of_week)| {
-                                cancellation.valid_begin != begin
-                            })
-                        }
+                        ModificationType::Delete => train
+                            .cancellations
+                            .retain(|cancellation| cancellation.valid_begin != begin),
                     }
                 }
             }
@@ -4676,20 +4663,15 @@ impl NrJsonImporter {
 
             // we cancel main trains
             for train in old_trains.iter_mut() {
-                if !check_date_applicability(
-                    &train.validity[0],
-                    &train.days_of_week,
-                    begin,
-                    end,
-                    &days_of_week,
-                ) {
+                if !check_date_applicability(&train.validity[0], begin, end, &days_of_week) {
                     continue;
                 }
                 let new_cancel = TrainValidityPeriod {
                     valid_begin: begin.clone(),
                     valid_end: end.clone(),
+                    days_of_week: days_of_week.clone(),
                 };
-                train.cancellations.push((new_cancel, days_of_week.clone()))
+                train.cancellations.push(new_cancel)
             }
 
             schedule
@@ -4710,13 +4692,13 @@ impl NrJsonImporter {
             };
 
             for ref mut train in old_trains.iter_mut() {
-                for (cancellation, old_days_of_week) in train.cancellations.iter_mut() {
+                for cancellation in train.cancellations.iter_mut() {
                     if cancellation.valid_begin == begin {
                         *cancellation = TrainValidityPeriod {
                             valid_begin: begin,
                             valid_end: end,
+                            days_of_week: days_of_week.clone(),
                         };
-                        *old_days_of_week = days_of_week.clone();
                     }
                 }
             }
@@ -4790,10 +4772,10 @@ impl NrJsonImporter {
             validity: vec![TrainValidityPeriod {
                 valid_begin: begin,
                 valid_end: end,
+                days_of_week,
             }],
             cancellations: vec![],
             replacements: vec![],
-            days_of_week,
             variable_train: self.read_vstp_variable_train(
                 &parsed_json
                     .vstp_cif_msg_v1
@@ -4894,13 +4876,7 @@ impl NrJsonImporter {
 
             // we replace main trains
             for train in old_trains.iter_mut() {
-                if !check_date_applicability(
-                    &train.validity[0],
-                    &train.days_of_week,
-                    begin,
-                    end,
-                    &days_of_week,
-                ) {
+                if !check_date_applicability(&train.validity[0], begin, end, &days_of_week) {
                     continue;
                 }
                 train.replacements.push(new_train.clone())
