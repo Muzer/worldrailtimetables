@@ -358,7 +358,7 @@ fn calculate_route(
                 }
             }),
             id: actual_stop_id.clone(),
-            id_suffix: None,
+            id_suffix: Some(stop_time.stop_sequence.to_string()),
             working_arr,
             working_arr_day,
             working_dep,
