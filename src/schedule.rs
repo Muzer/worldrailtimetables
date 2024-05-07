@@ -326,7 +326,7 @@ pub struct AssociationNode {
     pub other_train_id: String,
     pub other_train_location_id_suffix: Option<String>,
     pub validity: Vec<TrainValidityPeriod>,
-    pub cancellations: Vec<TrainValidityPeriod>,
+    pub cancellations: Vec<(TrainValidityPeriod, TrainSource)>,
     pub replacements: Vec<AssociationNode>,
     pub day_diff: i8,
     pub for_passengers: bool,
@@ -396,7 +396,7 @@ pub struct VariableTrain {
 pub struct Train {
     pub id: String,
     pub validity: Vec<TrainValidityPeriod>,
-    pub cancellations: Vec<TrainValidityPeriod>, // TODO should include TrainSource?
+    pub cancellations: Vec<(TrainValidityPeriod, TrainSource)>,
     pub replacements: Vec<Train>,
     pub variable_train: VariableTrain,
     pub source: Option<TrainSource>,

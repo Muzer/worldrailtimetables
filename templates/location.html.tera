@@ -61,7 +61,7 @@
           <td>{% if train.working_pass %}{{ train.working_pass | split(pat="T") | last | truncate(length=5, end="") }}{% endif %}</td>
           <td>{% if train.public_dep %}{{ train.public_dep | split(pat="T") | last | truncate(length=5, end="") }}{% endif %}</td>
           <td>{% if train.working_dep %}{{ train.working_dep | split(pat="T") | last | truncate(length=8, end="") }}{% endif %}</td>
-          <td>{% if train.cancelled %}CANCELLED{% elif train.modified %}MODIFIED{% endif %}</td>
+          <td>{% if train.cancelled %}CANCELLED{% elif train.modified %}MODIFIED{% endif %} {% if train.runs_as_required %}AS REQUIRED{% endif %}</td>
         </tr>
         {% endfor %}
       </table>

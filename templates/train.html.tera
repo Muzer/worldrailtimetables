@@ -68,7 +68,7 @@
           {% elif location.working_pass %}
             {% set time = location.working_pass %}
           {% endif %}
-          <td style="border-bottom: none;"><a href="/location{% if locations[location.id].public_id %}-public{% endif %}/{{ namespace }}/{% if locations[location.id].public_id %}{{ locations[location.id].public_id }}{% else %}{{ location.id }}{% endif %}/{{ dates[day] | split(pat="T") | first }}/{{ time | truncate(length=5, end="") }}">{{ locations[location.id].name }}{% if locations[location.id].public_id %} [{{ locations[location.id].public_id }}]{% endif %}</a></td>
+          <td style="border-bottom: none;"><a href="/location/{{ namespace }}{% if locations[location.id].public_id %}-public{% else %}-internal{% endif %}/{% if locations[location.id].public_id %}{{ locations[location.id].public_id }}{% else %}{{ location.id }}{% endif %}/{{ dates[day] | split(pat="T") | first }}/{{ time | truncate(length=5, end="") }}">{{ locations[location.id].name }}{% if locations[location.id].public_id %} [{{ locations[location.id].public_id }}]{% endif %}</a></td>
           <td style="border-bottom: none;">{% if location.platform %}{{ location.platform }}{% if location.platform_zone %}-{{ location.platform_zone }}{% endif %}{% endif %}</td>
           <td style="border-bottom: none;">{% if location.path %}{{ location.path }}&ndash;{% endif %}{% if location.line %}{{ location.line }}{% endif %}</td>
           <td style="border-bottom: none;">{% if location.working_arr %}{% if location.activities.times_approximate %}~{% endif %}{{ location.working_arr }}{% if location.working_arr_day > 0 %} +{{ location.working_arr_day }}{% endif %}{% endif %}</td>

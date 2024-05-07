@@ -12,6 +12,7 @@ mod nr_manager;
 mod nr_vstp_subscriber;
 mod schedule;
 mod schedule_manager;
+mod sncf_fetcher;
 mod subscriber;
 mod uk_importer;
 mod webui;
@@ -32,8 +33,7 @@ struct Config {
     nir: NirConfig,
 }
 
-#[rocket::main]
-async fn main() -> Result<(), error::Error> {
+async fn do_main() -> Result<(), error::Error> {
     let config = Config::from_config_file("./config.toml")?; // TODO improve
 
     let schedule_manager = Arc::new(schedule_manager::ScheduleManager::new());
@@ -53,4 +53,15 @@ async fn main() -> Result<(), error::Error> {
         x = webui_fut => x)??;
 
     Ok(())
+}
+
+#[rocket::main]
+async fn main() -> Result<(), error::Error> {
+    match do_main().await {
+        Ok(()) => Ok(()),
+        Err(x) => {
+            println!("Error! {}", x);
+            Err(x)
+        },
+    }
 }

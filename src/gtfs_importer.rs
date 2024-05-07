@@ -181,7 +181,7 @@ fn calculate_validities(
 fn calculate_cancellations(
     calendar_dates: &Option<&Vec<CalendarDate>>,
     timezone: &str,
-) -> Result<Vec<TrainValidityPeriod>, GtfsImportError> {
+) -> Result<Vec<(TrainValidityPeriod, TrainSource)>, GtfsImportError> {
     let timezone = match Tz::from_str(&timezone) {
         Ok(x) => x,
         Err(x) => {
@@ -199,15 +199,24 @@ fn calculate_cancellations(
         Some(x) => {
             for calendar_date in &**x {
                 match calendar_date.exception_type {
-                    Exception::Deleted => cancellations.push(TrainValidityPeriod {
-                        valid_begin: timezone
-                            .from_local_datetime(&calendar_date.date.and_hms_opt(0, 0, 0).unwrap())
-                            .unwrap(),
-                        valid_end: timezone
-                            .from_local_datetime(&calendar_date.date.and_hms_opt(0, 0, 0).unwrap())
-                            .unwrap(),
-                        days_of_week: DaysOfWeek::from_single_weekday(calendar_date.date.weekday()),
-                    }),
+                    Exception::Deleted => cancellations.push((
+                        TrainValidityPeriod {
+                            valid_begin: timezone
+                                .from_local_datetime(
+                                    &calendar_date.date.and_hms_opt(0, 0, 0).unwrap(),
+                                )
+                                .unwrap(),
+                            valid_end: timezone
+                                .from_local_datetime(
+                                    &calendar_date.date.and_hms_opt(0, 0, 0).unwrap(),
+                                )
+                                .unwrap(),
+                            days_of_week: DaysOfWeek::from_single_weekday(
+                                calendar_date.date.weekday(),
+                            ),
+                        },
+                        TrainSource::ShortTerm,
+                    )),
                     Exception::Added => (),
                 }
             }
@@ -457,8 +466,8 @@ impl GtfsImporter {
             }
         };
 
-        for feed_info in gtfs.feed_info {
-            schedule.their_id = feed_info.version;
+        for feed_info in &gtfs.feed_info {
+            schedule.their_id = feed_info.version.clone();
             schedule.valid_begin = feed_info.start_date.map(|x| {
                 default_timezone_tz
                     .from_local_datetime(&x.and_hms_opt(0, 0, 0).unwrap())
@@ -660,6 +669,7 @@ impl GtfsImporter {
                 .or_insert(vec![])
                 .push(train);
         }
+        self.base_gtfs = Some(gtfs);
         Ok(schedule)
     }
 }

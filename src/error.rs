@@ -1,5 +1,6 @@
 use crate::gtfs_importer::GtfsImportError;
 use crate::nr_vstp_subscriber::NrVstpError;
+use crate::sncf_fetcher::SncfFetcherError;
 use crate::uk_importer::{CifError, NrJsonError};
 use crate::webui::WebUiError;
 use anyhow;
@@ -26,12 +27,27 @@ pub enum Error {
     GtfsError(gtfs_structures::error::Error),
     JoinError(JoinError),
     GtfsImportError(GtfsImportError),
+    SncfFetcherError(SncfFetcherError),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            other => write!(f, "WorldTrainTimes error: {}", other),
+            Error::ConfigFileError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::HttpRequestError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::IoError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::CifError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::NrJsonError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::AnyhowError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::NrVstpError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::SerdeJsonError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::RocketError(x) => write!(f, "WorldRailTimetables error: {}", x.pretty_print()),
+            Error::WebUiError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::RcZipError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::GtfsError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::JoinError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::GtfsImportError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::SncfFetcherError(x) => write!(f, "WorldRailTimetables error: {}", x),
         }
     }
 }
@@ -111,5 +127,11 @@ impl From<JoinError> for Error {
 impl From<GtfsImportError> for Error {
     fn from(error: GtfsImportError) -> Self {
         Error::GtfsImportError(error)
+    }
+}
+
+impl From<SncfFetcherError> for Error {
+    fn from(error: SncfFetcherError) -> Self {
+        Error::SncfFetcherError(error)
     }
 }

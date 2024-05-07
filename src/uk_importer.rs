@@ -350,7 +350,7 @@ fn delete_single_assoc_replacements_cancellations(
             )
         });
     } else if *stp_modification_type == ModificationType::Delete {
-        assoc.cancellations.retain(|validity| {
+        assoc.cancellations.retain(|(validity, _source)| {
             !is_matching_assoc_for_modify_replacement_or_cancel(
                 validity,
                 begin,
@@ -467,7 +467,7 @@ fn amend_single_assoc_replacements_cancellations(
             }
         }
     } else if *stp_modification_type == ModificationType::Delete {
-        for cancellation in assoc.cancellations.iter_mut() {
+        for (cancellation, _source) in assoc.cancellations.iter_mut() {
             if cancellation.valid_begin == *begin {
                 *cancellation = TrainValidityPeriod {
                     valid_begin: new_begin.clone(),
@@ -559,7 +559,7 @@ fn cancel_single_assoc(
             valid_end: rev_end,
             days_of_week: rev_days_of_week.clone(),
         };
-        assoc.cancellations.push(new_cancel)
+        assoc.cancellations.push((new_cancel, TrainSource::ShortTerm))
     }
 }
 
@@ -2897,7 +2897,7 @@ impl CifImporter {
                             .retain(|replacement| replacement.validity[0].valid_begin != begin),
                         ModificationType::Delete => train
                             .cancellations
-                            .retain(|cancellation| cancellation.valid_begin != begin),
+                            .retain(|(cancellation, _source)| cancellation.valid_begin != begin),
                     }
                 }
             }
@@ -2913,7 +2913,7 @@ impl CifImporter {
         let days_of_week = read_days_of_week(&line[21..28], produce_cif_error_closure(number, 27))?;
 
         // Now we handle STP cancellations; these are where long-running
-        // trains are deleted as a one-off
+        // trains are marked as not running as a one-off
         if stp_modification_type == ModificationType::Delete
             && modification_type == ModificationType::Insert
         {
@@ -2933,7 +2933,7 @@ impl CifImporter {
                     valid_end: end.clone(),
                     days_of_week: days_of_week,
                 };
-                train.cancellations.push(new_cancel)
+                train.cancellations.push((new_cancel, TrainSource::ShortTerm))
             }
 
             schedule
@@ -2954,7 +2954,7 @@ impl CifImporter {
 
             // now we clean up modifications/cancellations
             for ref mut train in old_trains.iter_mut() {
-                for cancellation in train.cancellations.iter_mut() {
+                for (cancellation, _source) in train.cancellations.iter_mut() {
                     if cancellation.valid_begin == begin {
                         *cancellation = TrainValidityPeriod {
                             valid_begin: begin,
@@ -4617,7 +4617,7 @@ impl NrJsonImporter {
                             .retain(|replacement| replacement.validity[0].valid_begin != begin),
                         ModificationType::Delete => train
                             .cancellations
-                            .retain(|cancellation| cancellation.valid_begin != begin),
+                            .retain(|(cancellation, _source)| cancellation.valid_begin != begin),
                     }
                 }
             }
@@ -4671,7 +4671,7 @@ impl NrJsonImporter {
                     valid_end: end.clone(),
                     days_of_week: days_of_week.clone(),
                 };
-                train.cancellations.push(new_cancel)
+                train.cancellations.push((new_cancel, TrainSource::VeryShortTerm))
             }
 
             schedule
@@ -4692,7 +4692,7 @@ impl NrJsonImporter {
             };
 
             for ref mut train in old_trains.iter_mut() {
-                for cancellation in train.cancellations.iter_mut() {
+                for (cancellation, _source) in train.cancellations.iter_mut() {
                     if cancellation.valid_begin == begin {
                         *cancellation = TrainValidityPeriod {
                             valid_begin: begin,

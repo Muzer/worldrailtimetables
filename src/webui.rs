@@ -1,6 +1,6 @@
 use chrono::naive::Days;
 use chrono::offset::LocalResult;
-use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, ParseError, TimeZone};
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, ParseError, TimeZone, Utc};
 use chrono_tz::Tz;
 
 use crate::error::Error;
@@ -134,7 +134,7 @@ fn get_train_instance(trains: &Vec<Train>, date: NaiveDate) -> (Option<Train>, b
                 if final_train.is_none() {
                     final_train = Some(train.clone());
                 }
-                for cancellation in &train.cancellations {
+                for (cancellation, _source) in &train.cancellations {
                     if cancellation.valid_begin.date_naive() <= date
                         && cancellation.valid_end.date_naive() >= date
                         && cancellation.days_of_week.get_by_weekday(date.weekday())
@@ -196,7 +196,7 @@ fn get_association(assoc: &AssociationNode, date: NaiveDate) -> Option<Associati
             if final_assoc.is_none() {
                 final_assoc = Some(assoc.clone());
             }
-            for cancellation in &assoc.cancellations {
+            for (cancellation, _source) in &assoc.cancellations {
                 if cancellation.valid_begin.date_naive() <= date
                     && cancellation.valid_end.date_naive() >= date
                     && cancellation.days_of_week.get_by_weekday(date.weekday())
@@ -505,6 +505,7 @@ struct BasicTrainForLocation {
     date: NaiveDate,
     is_first: bool,
     is_last: bool,
+    cur_found_tos: usize,
 }
 
 fn get_origins(
@@ -756,6 +757,8 @@ fn location_line_up(
     location_ids: &HashSet<String>,
     start_datetime: NaiveDateTime,
     end_datetime: NaiveDateTime,
+    from_station: Option<HashSet<String>>,
+    to_station: Option<HashSet<String>>,
     schedule_manager: Arc<ScheduleManager>,
 ) -> Option<Template> {
     let (trains, locations) = {
@@ -808,9 +811,29 @@ fn location_line_up(
             let mut additions_for_this_train: Vec<BasicTrainForLocation> = vec![];
             let mut origins_so_far = vec![];
             let mut variable_train = &train.variable_train;
+            let mut found_from = match from_station {
+                Some(_) => false,
+                None => true,
+            };
+            let mut just_found_from = false;
+            let mut cur_found_tos = 0;
             for (i, location) in train.route.iter().enumerate() {
+                if just_found_from {
+                    found_from = true;
+                    just_found_from = false;
+                }
+
                 if location.change_en_route.is_some() {
                     variable_train = &location.change_en_route.as_ref().unwrap();
+                }
+
+                if !found_from {
+                    just_found_from = from_station.as_ref().unwrap().contains(&location.id);
+                }
+                if to_station.is_some() {
+                    if to_station.as_ref().unwrap().contains(&location.id) {
+                        cur_found_tos += 1;
+                    }
                 }
 
                 origins_so_far.append(&mut get_origins(
@@ -835,6 +858,10 @@ fn location_line_up(
                 }
 
                 if !location_ids.contains(&location.id) {
+                    continue;
+                }
+
+                if from_station.is_some() && !found_from {
                     continue;
                 }
 
@@ -941,12 +968,21 @@ fn location_line_up(
                     date: cur_date,
                     is_first: i == 0,
                     is_last: i == train.route.len() - 1,
+                    cur_found_tos,
                 });
             }
 
-            actual_trains.append(&mut additions_for_this_train);
-
             cur_date = cur_date.add(Days::new(1));
+
+            if to_station.is_some() {
+                for addition in additions_for_this_train {
+                    if cur_found_tos > addition.cur_found_tos {
+                        actual_trains.push(addition.clone());
+                    }
+                }
+            } else {
+                actual_trains.append(&mut additions_for_this_train);
+            }
         }
     }
 
@@ -976,54 +1012,465 @@ fn location_line_up(
     Some(Template::render("location", &context))
 }
 
-#[get("/location/<namespace>/<location_id>/<date>/<time>")]
+struct Namespace {
+    namespace: String,
+    is_public_id: bool,
+}
+
+impl<'a> FromParam<'a> for Namespace {
+    type Error = WebUiError;
+
+    fn from_param(param: &'a str) -> Result<Self, Self::Error> {
+        let parts = param.split("-").collect::<Vec<&str>>();
+        if parts.len() != 2 {
+            return Err(WebUiError {
+                what: "Invalid namespace string".to_string(),
+            });
+        }
+
+        match parts[1] {
+            "public" => Ok(Namespace {
+                namespace: parts[0].to_string(),
+                is_public_id: true,
+            }),
+            "internal" => Ok(Namespace {
+                namespace: parts[0].to_string(),
+                is_public_id: false,
+            }),
+            _ => {
+                return Err(WebUiError {
+                    what: "Invalid ID type".to_string(),
+                })
+            }
+        }
+    }
+}
+
+fn get_location_ids_and_first_tz(
+    location_id: &str,
+    namespace: &Namespace,
+    schedule_manager: Arc<ScheduleManager>,
+) -> Option<(HashSet<String>, Tz)> {
+    let schedule_manager = schedule_manager.read();
+    let schedule = &schedule_manager.get(&namespace.namespace)?;
+    match namespace.is_public_id {
+        true => {
+            let locations = schedule.locations_indexed_by_public_id.get(location_id)?;
+            if locations.len() == 0 {
+                return None;
+            }
+            Some((
+                locations.clone(),
+                schedule
+                    .locations
+                    .get(locations.iter().next().unwrap())
+                    .unwrap()
+                    .timezone
+                    .clone(),
+            ))
+        }
+        false => {
+            let mut location_ids = HashSet::new();
+            location_ids.insert(location_id.to_string());
+            let location = match schedule.locations.get(location_id) {
+                Some(x) => x,
+                None => return None,
+            };
+            Some((location_ids, location.timezone))
+        }
+    }
+}
+
+#[get("/location/<namespace>/<location_id>")]
 fn location(
-    namespace: &str,
+    namespace: Namespace,
+    location_id: &str,
+    schedule_manager: &State<Arc<ScheduleManager>>,
+) -> Option<Template> {
+    let (location_ids, timezone) =
+        get_location_ids_and_first_tz(location_id, &namespace, (*schedule_manager).clone())?;
+
+    let now = timezone
+        .from_utc_datetime(&Utc::now().naive_utc())
+        .naive_local();
+
+    location_line_up(
+        &namespace.namespace,
+        &location_ids,
+        now - Duration::minutes(30),
+        now + Duration::minutes(120),
+        None,
+        None,
+        (*schedule_manager).clone(),
+    )
+}
+
+#[get("/location/<namespace>/<location_id>/from/<from_id>", rank = 0)]
+fn location_from(
+    namespace: Namespace,
+    location_id: &str,
+    from_id: &str,
+    schedule_manager: &State<Arc<ScheduleManager>>,
+) -> Option<Template> {
+    let (location_ids, timezone) =
+        get_location_ids_and_first_tz(location_id, &namespace, (*schedule_manager).clone())?;
+
+    let now = timezone
+        .from_utc_datetime(&Utc::now().naive_utc())
+        .naive_local();
+
+    let (from_ids, _timezone) =
+        get_location_ids_and_first_tz(from_id, &namespace, (*schedule_manager).clone())?;
+
+    location_line_up(
+        &namespace.namespace,
+        &location_ids,
+        now - Duration::minutes(30),
+        now + Duration::minutes(120),
+        Some(from_ids),
+        None,
+        (*schedule_manager).clone(),
+    )
+}
+
+#[get("/location/<namespace>/<location_id>/to/<to_id>", rank = 0)]
+fn location_to(
+    namespace: Namespace,
+    location_id: &str,
+    to_id: &str,
+    schedule_manager: &State<Arc<ScheduleManager>>,
+) -> Option<Template> {
+    let (location_ids, timezone) =
+        get_location_ids_and_first_tz(location_id, &namespace, (*schedule_manager).clone())?;
+
+    let now = timezone
+        .from_utc_datetime(&Utc::now().naive_utc())
+        .naive_local();
+
+    let (to_ids, _timezone) =
+        get_location_ids_and_first_tz(to_id, &namespace, (*schedule_manager).clone())?;
+
+    location_line_up(
+        &namespace.namespace,
+        &location_ids,
+        now - Duration::minutes(30),
+        now + Duration::minutes(120),
+        None,
+        Some(to_ids),
+        (*schedule_manager).clone(),
+    )
+}
+
+#[get(
+    "/location/<namespace>/<location_id>/from/<from_id>/to/<to_id>",
+    rank = 0
+)]
+fn location_from_to(
+    namespace: Namespace,
+    location_id: &str,
+    from_id: &str,
+    to_id: &str,
+    schedule_manager: &State<Arc<ScheduleManager>>,
+) -> Option<Template> {
+    let (location_ids, timezone) =
+        get_location_ids_and_first_tz(location_id, &namespace, (*schedule_manager).clone())?;
+
+    let now = timezone
+        .from_utc_datetime(&Utc::now().naive_utc())
+        .naive_local();
+
+    let (from_ids, _timezone) =
+        get_location_ids_and_first_tz(from_id, &namespace, (*schedule_manager).clone())?;
+    let (to_ids, _timezone) =
+        get_location_ids_and_first_tz(to_id, &namespace, (*schedule_manager).clone())?;
+
+    location_line_up(
+        &namespace.namespace,
+        &location_ids,
+        now - Duration::minutes(30),
+        now + Duration::minutes(120),
+        Some(from_ids),
+        Some(to_ids),
+        (*schedule_manager).clone(),
+    )
+}
+
+#[get("/location/<namespace>/<location_id>/<date>/<time>", rank = 1)]
+fn location_time(
+    namespace: Namespace,
     location_id: &str,
     date: NaiveDateRocket,
     time: NaiveTimeRocket,
     schedule_manager: &State<Arc<ScheduleManager>>,
 ) -> Option<Template> {
-    let mut location_ids = HashSet::new();
-    location_ids.insert(location_id.to_string());
+    let (location_ids, _timezone) =
+        get_location_ids_and_first_tz(location_id, &namespace, (*schedule_manager).clone())?;
+
     location_line_up(
-        namespace,
+        &namespace.namespace,
         &location_ids,
         date.0.and_time(time.0) - Duration::minutes(30),
         date.0.and_time(time.0) + Duration::minutes(120),
+        None,
+        None,
         (*schedule_manager).clone(),
     )
 }
 
-#[get("/location-public/<namespace>/<public_location_id>/<date>/<time>")]
-fn location_public(
-    namespace: &str,
-    public_location_id: &str,
+#[get(
+    "/location/<namespace>/<location_id>/from/<from_id>/<date>/<time>",
+    rank = 1
+)]
+fn location_from_time(
+    namespace: Namespace,
+    location_id: &str,
+    from_id: &str,
     date: NaiveDateRocket,
     time: NaiveTimeRocket,
     schedule_manager: &State<Arc<ScheduleManager>>,
 ) -> Option<Template> {
-    let location_id = {
-        let schedule_manager = schedule_manager.read();
-        let schedule = &schedule_manager.get(namespace)?;
-        schedule
-            .locations_indexed_by_public_id
-            .get(public_location_id)?
-            .clone()
+    let (location_ids, _timezone) =
+        get_location_ids_and_first_tz(location_id, &namespace, (*schedule_manager).clone())?;
+
+    let (from_ids, _timezone) =
+        get_location_ids_and_first_tz(from_id, &namespace, (*schedule_manager).clone())?;
+
+    location_line_up(
+        &namespace.namespace,
+        &location_ids,
+        date.0.and_time(time.0) - Duration::minutes(30),
+        date.0.and_time(time.0) + Duration::minutes(120),
+        Some(from_ids),
+        None,
+        (*schedule_manager).clone(),
+    )
+}
+
+#[get(
+    "/location/<namespace>/<location_id>/to/<to_id>/<date>/<time>",
+    rank = 1
+)]
+fn location_to_time(
+    namespace: Namespace,
+    location_id: &str,
+    to_id: &str,
+    date: NaiveDateRocket,
+    time: NaiveTimeRocket,
+    schedule_manager: &State<Arc<ScheduleManager>>,
+) -> Option<Template> {
+    let (location_ids, _timezone) =
+        get_location_ids_and_first_tz(location_id, &namespace, (*schedule_manager).clone())?;
+
+    let (to_ids, _timezone) =
+        get_location_ids_and_first_tz(to_id, &namespace, (*schedule_manager).clone())?;
+
+    location_line_up(
+        &namespace.namespace,
+        &location_ids,
+        date.0.and_time(time.0) - Duration::minutes(30),
+        date.0.and_time(time.0) + Duration::minutes(120),
+        None,
+        Some(to_ids),
+        (*schedule_manager).clone(),
+    )
+}
+
+#[get(
+    "/location/<namespace>/<location_id>/from/<from_id>/to/<to_id>/<date>/<time>",
+    rank = 1
+)]
+fn location_from_to_time(
+    namespace: Namespace,
+    location_id: &str,
+    from_id: &str,
+    to_id: &str,
+    date: NaiveDateRocket,
+    time: NaiveTimeRocket,
+    schedule_manager: &State<Arc<ScheduleManager>>,
+) -> Option<Template> {
+    let (location_ids, _timezone) =
+        get_location_ids_and_first_tz(location_id, &namespace, (*schedule_manager).clone())?;
+
+    let (from_ids, _timezone) =
+        get_location_ids_and_first_tz(from_id, &namespace, (*schedule_manager).clone())?;
+    let (to_ids, _timezone) =
+        get_location_ids_and_first_tz(to_id, &namespace, (*schedule_manager).clone())?;
+
+    location_line_up(
+        &namespace.namespace,
+        &location_ids,
+        date.0.and_time(time.0) - Duration::minutes(30),
+        date.0.and_time(time.0) + Duration::minutes(120),
+        Some(from_ids),
+        Some(to_ids),
+        (*schedule_manager).clone(),
+    )
+}
+
+#[get(
+    "/location/<namespace>/<location_id>/<date>/<from_time>/to/<to_time>",
+    rank = 2
+)]
+fn location_time_to(
+    namespace: Namespace,
+    location_id: &str,
+    date: NaiveDateRocket,
+    from_time: NaiveTimeRocket,
+    to_time: NaiveTimeRocket,
+    schedule_manager: &State<Arc<ScheduleManager>>,
+) -> Option<Template> {
+    let (location_ids, _timezone) =
+        get_location_ids_and_first_tz(location_id, &namespace, (*schedule_manager).clone())?;
+
+    let to_date = if to_time.0 < from_time.0 {
+        date.0 + Days::new(1)
+    } else {
+        date.0
     };
 
     location_line_up(
-        namespace,
-        &location_id,
-        date.0.and_time(time.0) - Duration::minutes(30),
-        date.0.and_time(time.0) + Duration::minutes(120),
+        &namespace.namespace,
+        &location_ids,
+        date.0.and_time(from_time.0),
+        to_date.and_time(to_time.0),
+        None,
+        None,
+        (*schedule_manager).clone(),
+    )
+}
+
+#[get(
+    "/location/<namespace>/<location_id>/from/<from_id>/<date>/<from_time>/to/<to_time>",
+    rank = 2
+)]
+fn location_from_time_to(
+    namespace: Namespace,
+    location_id: &str,
+    from_id: &str,
+    date: NaiveDateRocket,
+    from_time: NaiveTimeRocket,
+    to_time: NaiveTimeRocket,
+    schedule_manager: &State<Arc<ScheduleManager>>,
+) -> Option<Template> {
+    let (location_ids, _timezone) =
+        get_location_ids_and_first_tz(location_id, &namespace, (*schedule_manager).clone())?;
+
+    let to_date = if to_time.0 < from_time.0 {
+        date.0 + Days::new(1)
+    } else {
+        date.0
+    };
+
+    let (from_ids, _timezone) =
+        get_location_ids_and_first_tz(from_id, &namespace, (*schedule_manager).clone())?;
+
+    location_line_up(
+        &namespace.namespace,
+        &location_ids,
+        date.0.and_time(from_time.0),
+        to_date.and_time(to_time.0),
+        Some(from_ids),
+        None,
+        (*schedule_manager).clone(),
+    )
+}
+
+#[get(
+    "/location/<namespace>/<location_id>/to/<to_id>/<date>/<from_time>/to/<to_time>",
+    rank = 2
+)]
+fn location_to_time_to(
+    namespace: Namespace,
+    location_id: &str,
+    to_id: &str,
+    date: NaiveDateRocket,
+    from_time: NaiveTimeRocket,
+    to_time: NaiveTimeRocket,
+    schedule_manager: &State<Arc<ScheduleManager>>,
+) -> Option<Template> {
+    let (location_ids, _timezone) =
+        get_location_ids_and_first_tz(location_id, &namespace, (*schedule_manager).clone())?;
+
+    let to_date = if to_time.0 < from_time.0 {
+        date.0 + Days::new(1)
+    } else {
+        date.0
+    };
+
+    let (to_ids, _timezone) =
+        get_location_ids_and_first_tz(to_id, &namespace, (*schedule_manager).clone())?;
+
+    location_line_up(
+        &namespace.namespace,
+        &location_ids,
+        date.0.and_time(from_time.0),
+        to_date.and_time(to_time.0),
+        None,
+        Some(to_ids),
+        (*schedule_manager).clone(),
+    )
+}
+
+#[get(
+    "/location/<namespace>/<location_id>/from/<from_id>/to/<to_id>/<date>/<from_time>/to/<to_time>",
+    rank = 2
+)]
+fn location_from_to_time_to(
+    namespace: Namespace,
+    location_id: &str,
+    from_id: &str,
+    to_id: &str,
+    date: NaiveDateRocket,
+    from_time: NaiveTimeRocket,
+    to_time: NaiveTimeRocket,
+    schedule_manager: &State<Arc<ScheduleManager>>,
+) -> Option<Template> {
+    let (location_ids, _timezone) =
+        get_location_ids_and_first_tz(location_id, &namespace, (*schedule_manager).clone())?;
+
+    let to_date = if to_time.0 < from_time.0 {
+        date.0 + Days::new(1)
+    } else {
+        date.0
+    };
+
+    let (from_ids, _timezone) =
+        get_location_ids_and_first_tz(from_id, &namespace, (*schedule_manager).clone())?;
+    let (to_ids, _timezone) =
+        get_location_ids_and_first_tz(to_id, &namespace, (*schedule_manager).clone())?;
+
+    location_line_up(
+        &namespace.namespace,
+        &location_ids,
+        date.0.and_time(from_time.0),
+        to_date.and_time(to_time.0),
+        Some(from_ids),
+        Some(to_ids),
         (*schedule_manager).clone(),
     )
 }
 
 pub async fn rocket(schedule_manager: Arc<ScheduleManager>) -> Result<(), Error> {
     rocket::build()
-        .mount("/", routes![index, train, location, location_public])
+        .mount(
+            "/",
+            routes![
+                index,
+                train,
+                location,
+                location_from,
+                location_to,
+                location_from_to,
+                location_time,
+                location_from_time,
+                location_to_time,
+                location_from_to_time,
+                location_time_to,
+                location_from_time_to,
+                location_to_time_to,
+                location_from_to_time_to
+            ],
+        )
         .attach(Template::fairing())
         .manage(schedule_manager)
         .launch()
