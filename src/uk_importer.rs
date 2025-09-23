@@ -1529,9 +1529,11 @@ where
             "802" => {
                 Some("Class 800/802 'IET/Nova 1/Paragon' bi-mode running on diesel".to_string())
             }
-            "805" => Some("Class 805 'Hitachi AT300' bi-mode running on diesel".to_string()),
+            "805" => Some("Class 805/807 'Evero' bi-mode running on diesel".to_string()),
+            "810" => Some("Class 810 'Aurora' bi-mode running on diesel".to_string()),
             "1400" => Some("Diesel locomotive hauling 1400 tons".to_string()), // lol
             "CAF" => Some("Class 3000/4000 'C3K/C4K' CAF DMU".to_string()),    // NI
+            "DMU" => Some("Class 3000/4000 'C3K/C4K' CAF DMU".to_string()),    // NI
             "" => None,
             x => return Err(error_logic(CifErrorType::InvalidTimingLoad(x.to_string()))),
         },
@@ -1953,8 +1955,10 @@ where
             "KS" => activities.selective_ticket_examination = true,
             "L" => activities.change_loco = true,
             "N" => activities.unadvertised_stop = true,
+            "O" => activities.operational_stop = true,  // Typo in NIR CIF data
             "OP" => activities.operational_stop = true,
             "OR" => activities.train_locomotive_on_rear = true,
+            "PN" => activities.unadvertised_stop = true,  // Typo in NIR CIF data
             "PR" => activities.propelling = true,
             "R" => {
                 activities.request_pick_up = true;
@@ -1990,7 +1994,9 @@ where
     Ok(match slice.trim() {
         "B" => TrainStatus::Bus,
         "F" => TrainStatus::Freight,
+        "D" => TrainStatus::Freight, // Appears in a seeming typo in NIR CIF
         "P" => TrainStatus::PassengerParcels,
+        "E" => TrainStatus::PassengerParcels, // Appears in a seeming typo in NIR CIF
         "S" => TrainStatus::Ship,
         "T" => TrainStatus::Trip,
         "1" => TrainStatus::StpPassengerParcels,
@@ -2056,6 +2062,8 @@ where
         "MV" => Some("Varamis Rail".to_string()),
         "PT" => Some("Europorte 2".to_string()),
         "YG" => Some("Hanson & Hall".to_string()),
+        "FS" => Some("Fishbone Solutions".to_string()),
+        "PX" => Some("Europhoenix".to_string()),
         "NI" => Some("Translink NI Railways".to_string()),
         "ZZ" => None,
         "#|" => None,
@@ -3767,7 +3775,11 @@ impl CifImporter {
         for ((train_id, _begin), new_train) in &self.orphaned_overlay_trains {
             let old_trains = schedule.trains.remove(train_id);
             let mut old_trains = match old_trains {
-                None => return Ok(schedule),
+                None => {
+                    // This orphaned overlay was probably intended to be an N instead.
+                    schedule.trains.insert(train_id.to_string(), vec![new_train.clone()]);
+                    continue;
+                },
                 Some(x) => x,
             };
 

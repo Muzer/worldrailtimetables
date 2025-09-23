@@ -1074,7 +1074,9 @@ fn get_location_ids_and_first_tz(
             location_ids.insert(location_id.to_string());
             let location = match schedule.locations.get(location_id) {
                 Some(x) => x,
-                None => return None,
+                None => {
+                    return None
+                },
             };
             Some((location_ids, location.timezone))
         }

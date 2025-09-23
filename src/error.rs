@@ -1,4 +1,5 @@
 use crate::gtfs_importer::GtfsImportError;
+use crate::nir_fetcher::{CkanError, NirFetcherError};
 use crate::nr_vstp_subscriber::NrVstpError;
 use crate::sncf_fetcher::SncfFetcherError;
 use crate::uk_importer::{CifError, NrJsonError};
@@ -28,6 +29,8 @@ pub enum Error {
     JoinError(JoinError),
     GtfsImportError(GtfsImportError),
     SncfFetcherError(SncfFetcherError),
+    CkanError(CkanError),
+    NirFetcherError(NirFetcherError),
 }
 
 impl fmt::Display for Error {
@@ -48,6 +51,8 @@ impl fmt::Display for Error {
             Error::JoinError(x) => write!(f, "WorldRailTimetables error: {}", x),
             Error::GtfsImportError(x) => write!(f, "WorldRailTimetables error: {}", x),
             Error::SncfFetcherError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::CkanError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::NirFetcherError(x) => write!(f, "WorldRailTimetables error: {}", x),
         }
     }
 }
@@ -133,5 +138,17 @@ impl From<GtfsImportError> for Error {
 impl From<SncfFetcherError> for Error {
     fn from(error: SncfFetcherError) -> Self {
         Error::SncfFetcherError(error)
+    }
+}
+
+impl From<CkanError> for Error {
+    fn from(error: CkanError) -> Self {
+        Error::CkanError(error)
+    }
+}
+
+impl From<NirFetcherError> for Error {
+    fn from(error: NirFetcherError) -> Self {
+        Error::NirFetcherError(error)
     }
 }

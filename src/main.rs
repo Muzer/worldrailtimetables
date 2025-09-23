@@ -50,13 +50,16 @@ async fn do_main() -> Result<(), error::Error> {
         x = nr_manager_fut => x,
         x = nir_manager_fut => x,
         x = ir_manager_fut => x,
-        x = webui_fut => x)??;
+        x = webui_fut => x
+    )??;
 
     Ok(())
 }
 
 #[rocket::main]
 async fn main() -> Result<(), error::Error> {
+    //tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE).init();
+
     match do_main().await {
         Ok(()) => Ok(()),
         Err(x) => {
