@@ -102,7 +102,11 @@ fn load_stop(stop: &Stop, default_timezone: &str) -> Result<Location, GtfsImport
                 })
             }
         },
-        public_id: stop.code.clone(),
+        public_id: match &stop.code {
+            Some(x) if x == "0" => None, // Irish Rail publishes all stops with the same stop code 0
+            Some(x) => Some(x.clone()),
+            None => None,
+        },
         timezone: match Tz::from_str(&timezone) {
             Ok(x) => x,
             Err(x) => {
@@ -488,6 +492,7 @@ impl GtfsImporter {
                             .locations
                             .insert(stop_id.clone(), load_stop(stop, &default_timezone)?);
                         match &stop.code {
+                            Some(x) if x == "0" => (),
                             Some(x) => {
                                 schedule
                                     .locations_indexed_by_public_id
@@ -504,6 +509,7 @@ impl GtfsImporter {
                         .locations
                         .insert(stop_id.clone(), load_stop(stop, &default_timezone)?);
                     match &stop.code {
+                        Some(x) if x == "0" => (),
                         Some(x) => {
                             schedule
                                 .locations_indexed_by_public_id
