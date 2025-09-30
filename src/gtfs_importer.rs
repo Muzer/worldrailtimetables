@@ -533,6 +533,12 @@ impl GtfsImporter {
         }
 
         for (trip_id, trip) in &gtfs.trips {
+            // XXX workaround for Irish Rail GTFS bug, ignore trip IDs that represent an older
+            // timetable that should not be being published
+            if trip_id.starts_with("4452_") {
+                continue;
+            }
+
             let route = match &gtfs.routes.get(&trip.route_id) {
                 Some(x) => (*x).clone(),
                 None => {
