@@ -183,11 +183,7 @@ pub struct NirFetcherError {
 
 impl fmt::Display for NirFetcherError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "Error fetching NIR CIF: {}",
-            self.error_type
-        )
+        write!(f, "Error fetching NIR CIF: {}", self.error_type)
     }
 }
 
@@ -201,38 +197,46 @@ impl NirFetcher {
             return Err(CkanError {
                 error_type: CkanErrorType::NotSuccess,
                 field_name: "success".to_string(),
-            })
+            });
         }
 
         let result = match json.result {
-            None => return Err(CkanError {
-                error_type: CkanErrorType::NoResult,
-                field_name: "result".to_string(),
-            }),
+            None => {
+                return Err(CkanError {
+                    error_type: CkanErrorType::NoResult,
+                    field_name: "result".to_string(),
+                })
+            }
             Some(x) => x,
         };
 
         let resources = match result.resources {
-            None => return Err(CkanError {
-                error_type: CkanErrorType::NoResources,
-                field_name: "resources".to_string(),
-            }),
+            None => {
+                return Err(CkanError {
+                    error_type: CkanErrorType::NoResources,
+                    field_name: "resources".to_string(),
+                })
+            }
             Some(x) => x,
         };
 
         let resource = match resources.iter().find(|&x| x.name == "NIR Rail cif data") {
-            None => return Err(CkanError {
-                error_type: CkanErrorType::ResourceNotFound("NIR Rail cif data".to_string()),
-                field_name: "name".to_string(),
-            }),
+            None => {
+                return Err(CkanError {
+                    error_type: CkanErrorType::ResourceNotFound("NIR Rail cif data".to_string()),
+                    field_name: "name".to_string(),
+                })
+            }
             Some(x) => x,
         };
 
         match &resource.url {
-            None => return Err(CkanError {
-                error_type: CkanErrorType::NoUrl,
-                field_name: "url".to_string(),
-            }),
+            None => {
+                return Err(CkanError {
+                    error_type: CkanErrorType::NoUrl,
+                    field_name: "url".to_string(),
+                })
+            }
             Some(x) => Ok(x.clone()),
         }
     }
@@ -247,7 +251,7 @@ impl NirFetcher {
         let reader = StreamReader::new(
             response
                 .bytes_stream()
-                .map_err(|e| futures::io::Error::new(futures::io::ErrorKind::Other, e))
+                .map_err(|e| futures::io::Error::new(futures::io::ErrorKind::Other, e)),
         );
         let mut json_str = String::new();
         BufReader::new(reader).read_to_string(&mut json_str).await?;
@@ -264,20 +268,21 @@ impl StreamingFetcher for NirFetcher {
         let client = Client::new();
         let url = self.get_url().await?;
         println!("{}", url);
-        let response = client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?;
+        let response = client.get(url).send().await?.error_for_status()?;
         let response_bytes = Vec::<u8>::from(response.bytes().await?);
         let reader = response_bytes.read_zip().await?;
         for entry in reader.entries() {
-            if entry.sanitized_name().unwrap_or("").to_ascii_lowercase().ends_with(".cif") {
-                return Ok(Box::new(BufReader::new(Cursor::new(entry.bytes().await?))))
+            if entry
+                .sanitized_name()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .ends_with(".cif")
+            {
+                return Ok(Box::new(BufReader::new(Cursor::new(entry.bytes().await?))));
             }
         }
         Err(Error::NirFetcherError(NirFetcherError {
-                    error_type: NirFetcherErrorType::NoCifEntry,
-                }))
+            error_type: NirFetcherErrorType::NoCifEntry,
+        }))
     }
 }

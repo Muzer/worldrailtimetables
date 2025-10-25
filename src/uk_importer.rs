@@ -559,7 +559,9 @@ fn cancel_single_assoc(
             valid_end: rev_end,
             days_of_week: rev_days_of_week.clone(),
         };
-        assoc.cancellations.push((new_cancel, TrainSource::ShortTerm))
+        assoc
+            .cancellations
+            .push((new_cancel, TrainSource::ShortTerm))
     }
 }
 
@@ -1955,10 +1957,10 @@ where
             "KS" => activities.selective_ticket_examination = true,
             "L" => activities.change_loco = true,
             "N" => activities.unadvertised_stop = true,
-            "O" => activities.operational_stop = true,  // Typo in NIR CIF data
+            "O" => activities.operational_stop = true, // Typo in NIR CIF data
             "OP" => activities.operational_stop = true,
             "OR" => activities.train_locomotive_on_rear = true,
-            "PN" => activities.unadvertised_stop = true,  // Typo in NIR CIF data
+            "PN" => activities.unadvertised_stop = true, // Typo in NIR CIF data
             "PR" => activities.propelling = true,
             "R" => {
                 activities.request_pick_up = true;
@@ -2941,7 +2943,9 @@ impl CifImporter {
                     valid_end: end.clone(),
                     days_of_week: days_of_week,
                 };
-                train.cancellations.push((new_cancel, TrainSource::ShortTerm))
+                train
+                    .cancellations
+                    .push((new_cancel, TrainSource::ShortTerm))
             }
 
             schedule
@@ -3777,9 +3781,11 @@ impl CifImporter {
             let mut old_trains = match old_trains {
                 None => {
                     // This orphaned overlay was probably intended to be an N instead.
-                    schedule.trains.insert(train_id.to_string(), vec![new_train.clone()]);
+                    schedule
+                        .trains
+                        .insert(train_id.to_string(), vec![new_train.clone()]);
                     continue;
-                },
+                }
                 Some(x) => x,
             };
 
@@ -4683,7 +4689,9 @@ impl NrJsonImporter {
                     valid_end: end.clone(),
                     days_of_week: days_of_week.clone(),
                 };
-                train.cancellations.push((new_cancel, TrainSource::VeryShortTerm))
+                train
+                    .cancellations
+                    .push((new_cancel, TrainSource::VeryShortTerm))
             }
 
             schedule

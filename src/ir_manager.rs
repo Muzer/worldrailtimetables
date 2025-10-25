@@ -1,9 +1,9 @@
 use crate::error::Error;
 use crate::fetcher::GtfsFetcher;
 use crate::gtfs_importer::GtfsImporter;
+use crate::gtfs_url_fetcher::GtfsUrlFetcher;
 use crate::importer::SlowGtfsImporter;
 use crate::manager::Manager;
-use crate::gtfs_url_fetcher::GtfsUrlFetcher;
 use crate::schedule::Schedule;
 use crate::schedule_manager::ScheduleManager;
 
@@ -23,12 +23,8 @@ pub struct IrManager {
 }
 
 impl IrManager {
-    pub async fn new(
-        schedule_manager: Arc<ScheduleManager>,
-    ) -> Result<IrManager, Error> {
-        Ok(IrManager {
-            schedule_manager,
-        })
+    pub async fn new(schedule_manager: Arc<ScheduleManager>) -> Result<IrManager, Error> {
+        Ok(IrManager { schedule_manager })
     }
 
     async fn reload_gtfs(
@@ -84,8 +80,7 @@ impl IrManager {
                 interval.tick().await;
             }
 
-            self.reload_gtfs(gtfs_fetcher, gtfs_importer)
-                .await?;
+            self.reload_gtfs(gtfs_fetcher, gtfs_importer).await?;
         }
     }
 }
@@ -93,19 +88,17 @@ impl IrManager {
 #[async_trait]
 impl Manager for IrManager {
     async fn run(&mut self) -> Result<(), Error> {
-        let gtfs_fetcher = GtfsUrlFetcher::new("https://www.transportforireland.ie/transitData/Data/GTFS_Irish_Rail.zip", "the National Transport Authority");
+        let gtfs_fetcher = GtfsUrlFetcher::new(
+            "https://www.transportforireland.ie/transitData/Data/GTFS_Irish_Rail.zip",
+            "the National Transport Authority",
+        );
         let mut gtfs_importer = GtfsImporter::new();
 
-        self.reload_gtfs(&gtfs_fetcher, &mut gtfs_importer)
-            .await?;
+        self.reload_gtfs(&gtfs_fetcher, &mut gtfs_importer).await?;
 
-        tokio::try_join!(
-            async {
-                return self
-                    .update_gtfs(&gtfs_fetcher, &mut gtfs_importer)
-                    .await;
-            },
-        )?;
+        tokio::try_join!(async {
+            return self.update_gtfs(&gtfs_fetcher, &mut gtfs_importer).await;
+        },)?;
 
         Ok(())
     }

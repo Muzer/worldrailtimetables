@@ -18,11 +18,7 @@ pub trait SlowStreamingImporter {
 
 #[async_trait]
 pub trait SlowGtfsImporter {
-    async fn overlay(
-        &mut self,
-        gtfs: Gtfs,
-        schedule: Schedule,
-    ) -> Result<Schedule, Error>;
+    async fn overlay(&mut self, gtfs: Gtfs, schedule: Schedule) -> Result<Schedule, Error>;
 }
 
 #[async_trait]

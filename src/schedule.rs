@@ -45,7 +45,7 @@ pub struct Location {
     pub id: String,
     pub name: String,
     pub public_id: Option<String>, // some countries have an internal ID for planning and a public
-                                   // ID for retail; we should expose the public one.
+    // ID for retail; we should expose the public one.
     pub timezone: Tz,
 }
 

@@ -23,7 +23,10 @@ pub struct NrFetcherConfig {
 
 impl NrFetcher {
     pub fn new(config: NrFetcherConfig, url: &str) -> Self {
-        Self { config, url: url.to_string() }
+        Self {
+            config,
+            url: url.to_string(),
+        }
     }
 }
 
@@ -34,7 +37,10 @@ impl StreamingFetcher for NrFetcher {
         let client = Client::new();
         let response = client
             .get(self.url.clone())
-            .basic_auth(self.config.username.clone(), Some(self.config.password.clone()))
+            .basic_auth(
+                self.config.username.clone(),
+                Some(self.config.password.clone()),
+            )
             .send()
             .await?
             .error_for_status()?;

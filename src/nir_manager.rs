@@ -94,8 +94,7 @@ impl NirManager {
                 interval.tick().await;
             }
 
-            self.reload_cif(nir_fetcher, cif_importer)
-                .await?;
+            self.reload_cif(nir_fetcher, cif_importer).await?;
         }
     }
 }
@@ -106,16 +105,11 @@ impl Manager for NirManager {
         let nir_fetcher = NirFetcher::new();
         let mut cif_importer = CifImporter::new(self.config.cif_importer.clone());
 
-        self.reload_cif(&nir_fetcher, &mut cif_importer)
-            .await?;
+        self.reload_cif(&nir_fetcher, &mut cif_importer).await?;
 
-        tokio::try_join!(
-            async {
-                return self
-                    .update_cif(&nir_fetcher, &mut cif_importer)
-                    .await;
-            },
-        )?;
+        tokio::try_join!(async {
+            return self.update_cif(&nir_fetcher, &mut cif_importer).await;
+        },)?;
 
         Ok(())
     }
