@@ -15,10 +15,10 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use crate::error::Error;
 use crate::importer::SlowStreamingImporter;
 use crate::schedule::{
-    AccommodationTypes, AccommodationTypesByClass, Assistance, Catering, DaysOfWeek, Families, Line,
-    Location, Luggage, Schedule, PassengerCommunications, PassengerInformation, ReservationField,
-    Reservations, Toilets, Train, TrainOperator, TrainSource, TrainType, TrainValidityPeriod,
-    VariableTrain,
+    AccommodationTypes, AccommodationTypesByClass, Activities, Assistance, Catering, DaysOfWeek,
+    Families, Line, Location, Luggage, Schedule, PassengerCommunications, PassengerInformation,
+    ReservationField, Reservations, Toilets, Train, TrainLocation, TrainOperator, TrainSource,
+    TrainType, TrainValidityPeriod, VariableTrain,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -170,9 +170,9 @@ pub struct JourneyPart {
     #[serde(rename = "EndTime")]
     pub end_time: NaiveTime,
     #[serde(rename = "EndTimeDayOffset")]
-    pub end_time_day_offset: Option<i32>,
+    pub end_time_day_offset: Option<u8>,
     #[serde(rename = "StartTimeDayOffset")]
-    pub start_time_day_offset: Option<i32>,
+    pub start_time_day_offset: Option<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1840,9 +1840,9 @@ pub struct TimetabledPassingTime {
     #[serde(rename = "ArrivalTime")]
     pub arrival_time: Option<NaiveTime>,
     #[serde(rename = "ArrivalDayOffset")]
-    pub arrival_day_offset: Option<i32>,
+    pub arrival_day_offset: Option<u8>,
     #[serde(rename = "DepartureDayOffset")]
-    pub departure_day_offset: Option<i32>,
+    pub departure_day_offset: Option<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2484,15 +2484,20 @@ pub struct TypeOfServiceShortName {
 #[derive(Clone, Debug)]
 pub enum NetexErrorType {
     BadColour(ParseIntError),
+    CoupledJourneyNotFound(String),
     DayBitsDontMatchPeriodLength(i64),
     DayTypeAssignmentNotFound(String),
+    DestinationDisplayNotFound(String),
     DuplicateScheduledStopPoint(String),
     InvalidDatetime,
+    JourneyPartCoupleNotFound(String),
     LineNotFound(String),
+    NoLocationsInSchedule(String),
     OperatorNotFound(String),
     ScheduledStopPointNotFound(String),
     ServiceJourneyPatternNotFound(String),
     StopPlaceNotFound(String),
+    StopPointInJourneyPatternNotFound(String),
     TrainNumberNotFound(String),
     UicOperatingPeriodNotFound(String),
     UnexpectedTransportMode(AllPublicTransportModes),
@@ -2504,17 +2509,27 @@ impl fmt::Display for NetexErrorType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             NetexErrorType::BadColour(x) => write!(f, "Bad colour component {}", x),
+            NetexErrorType::CoupledJourneyNotFound(x) => write!(
+                f, "Coupled journey not found {}", x
+            ),
             NetexErrorType::DayBitsDontMatchPeriodLength(x) => write!(
                 f, "Number of day bits does not match period length {}", x
             ),
             NetexErrorType::DayTypeAssignmentNotFound(x) => write!(
                 f, "Day type assignment not found for day type {}", x
             ),
+            NetexErrorType::DestinationDisplayNotFound(x) => write!(
+                f, "Destination display not found {}", x
+            ),
             NetexErrorType::DuplicateScheduledStopPoint(x) => write!(
                 f, "Duplicate scheduled stop point in PassengerStopAssignment {}", x
             ),
             NetexErrorType::InvalidDatetime => write!(f, "Invalid Datetime"),
+            NetexErrorType::JourneyPartCoupleNotFound(x) => write!(
+                f, "Journey part couple not found {}", x
+            ),
             NetexErrorType::LineNotFound(x) => write!(f, "Line not found {}", x),
+            NetexErrorType::NoLocationsInSchedule(x) => write!(f, "No locations in schedule {}", x),
             NetexErrorType::OperatorNotFound(x) => write!(f, "Operator not found {}", x),
             NetexErrorType::ScheduledStopPointNotFound(x) => write!(
                 f, "Scheduled stop point not found {}", x
@@ -2523,6 +2538,9 @@ impl fmt::Display for NetexErrorType {
                 f, "Service journey pattern not found {}", x
             ),
             NetexErrorType::StopPlaceNotFound(x) => write!(f, "Stop place not found {}", x),
+            NetexErrorType::StopPointInJourneyPatternNotFound(x) => write!(
+                f, "Stop point in journey pattern not found {}", x
+            ),
             NetexErrorType::TrainNumberNotFound(x) => write!(f, "Train number not found {}", x),
             NetexErrorType::UicOperatingPeriodNotFound(x) => write!(
                 f, "UIC Operating Period not found {}", x
@@ -2555,7 +2573,9 @@ impl fmt::Display for NetexError {
 
 #[derive(Default)]
 pub struct NetexImporter {
+    coupled_journey_by_id: HashMap<String, CoupledJourney>,
     destination_display_by_id: HashMap<String, DestinationDisplay>,
+    journey_part_couple_by_id: HashMap<String, JourneyPartCouple>,
     line_by_id: HashMap<String, NetexLine>,
     operator_by_id: HashMap<String, Operator>,
     scheduled_stop_point_by_id: HashMap<String, ScheduledStopPoint>,
@@ -2569,7 +2589,9 @@ pub struct NetexImporter {
 impl NetexImporter {
     pub fn new() -> NetexImporter {
         NetexImporter {
+            coupled_journey_by_id: HashMap::new(),
             destination_display_by_id: HashMap::new(),
+            journey_part_couple_by_id: HashMap::new(),
             line_by_id: HashMap::new(),
             operator_by_id: HashMap::new(),
             scheduled_stop_point_by_id: HashMap::new(),
@@ -2689,6 +2711,20 @@ impl NetexImporter {
             self.read_service_journey_pattern(&service_journey_pattern)?;
         }
 
+        // Load coupled journey parts
+        for journey_part_couple
+            in &composite_frame.frames.timetable_frame.journey_part_couples.journey_part_couple {
+            self.read_journey_part_couple(&journey_part_couple)?;
+        }
+
+        // Load coupled journeys
+        for coupled_journey
+            in &composite_frame.frames.timetable_frame.coupled_journeys.coupled_journeys {
+            self.read_coupled_journey(&coupled_journey)?;
+        }
+
+        // Generate map of trains to couplage
+
         // Now we can load the trains into the schedule
         for service_journey
             in &composite_frame.frames.timetable_frame.vehicle_journeys.service_journey {
@@ -2696,6 +2732,22 @@ impl NetexImporter {
         }
 
         Ok(schedule)
+    }
+
+    fn read_coupled_journey(
+        &mut self, coupled_journey: &CoupledJourney
+    ) -> Result<(), NetexError> {
+        self.coupled_journey_by_id.insert(coupled_journey.id.clone(), coupled_journey.clone());
+        Ok(())
+    }
+
+    fn read_journey_part_couple(
+        &mut self, journey_part_couple: &JourneyPartCouple
+    ) -> Result<(), NetexError> {
+        self.journey_part_couple_by_id.insert(
+            journey_part_couple.id.clone(), journey_part_couple.clone()
+        );
+        Ok(())
     }
 
     fn read_service_journey_pattern(
@@ -2971,7 +3023,7 @@ impl NetexImporter {
                                              &cur_start.and_hms_opt(0, 0, 0).unwrap()
                                              ).unwrap(),
                             valid_end: default_timezone.from_local_datetime(
-                                             &cur_end.and_hms_opt(0, 0, 0).unwrap()
+                                             &(cur_end - Days::new(1)).and_hms_opt(0, 0, 0).unwrap()
                                              ).unwrap(),
                             days_of_week: DaysOfWeek {
                                 monday: maybe_days_of_week[0].unwrap_or(false),
@@ -2983,8 +3035,15 @@ impl NetexImporter {
                                 sunday: maybe_days_of_week[6].unwrap_or(false),
                             },
                         };
-                        train_validity_periods.push(train_validity_period);
+                        if maybe_days_of_week.iter().filter(
+                            |x| { x.unwrap_or(false) }
+                        ).count() != 0 {
+                            train_validity_periods.push(train_validity_period);
+                        }
                         cur_start = cur_end.clone();
+                        cur_end = cur_end + Days::new(
+                            u64::try_from(week.iter().filter(|x| { x.is_some() }).count()).unwrap()
+                        );
                         week
                     },
                 };
@@ -3987,6 +4046,166 @@ impl NetexImporter {
         Ok(Some(passenger_info))
     }
 
+    fn get_headcode(
+        &self, service_journey_pattern: &ServiceJourneyPattern
+    ) -> Result<Option<String>, NetexError> {
+
+        match self.destination_display_by_id.get(
+            &service_journey_pattern.destination_display_ref.destination_display_ref_ref
+        ) {
+            Some(destination_display) => Ok(Some(destination_display.front_text.clone())),
+            // SNCF data has empty string destination displays sometimes
+            None =>
+                if service_journey_pattern.destination_display_ref.destination_display_ref_ref == ""
+            {
+                Ok(None)
+            } else {
+                return Err(
+                    NetexError {
+                        error_type: NetexErrorType::DestinationDisplayNotFound(
+                            service_journey_pattern
+                            .destination_display_ref
+                            .destination_display_ref_ref
+                            .clone()
+                        )
+                    }
+                )
+            },
+        }
+    }
+
+    fn get_route(
+        &self,
+        service_journey_pattern: &ServiceJourneyPattern,
+        timetabled_passing_times: &Vec<TimetabledPassingTime>,
+        train_id: &str,
+        mut schedule: Schedule,
+    ) -> Result<(Vec<TrainLocation>, Schedule), NetexError> {
+        // OK, so, we use the `service_journey_pattern` to figure out the stopping points, and we
+        // use `timetabled_passing_times` to figure out the times of those stopping points.
+        let mut train_locations = vec![];
+        let mut stop_point_in_journey_pattern_by_id = HashMap::new();
+        for stop_point_in_journey_pattern
+            in &service_journey_pattern.points_in_sequence.stop_point_in_journey_pattern {
+            stop_point_in_journey_pattern_by_id.insert(
+                stop_point_in_journey_pattern.id.clone(),
+                stop_point_in_journey_pattern.clone(),
+            );
+        }
+        for timetabled_passing_time in timetabled_passing_times {
+            let stop_point_in_journey_pattern = match stop_point_in_journey_pattern_by_id.get(
+                &timetabled_passing_time
+                .point_in_journey_pattern_ref
+                .point_in_journey_pattern_ref_ref
+            ) {
+                Some(stop_point_in_journey_pattern) => stop_point_in_journey_pattern,
+                None => return Err(
+                    NetexError {
+                        error_type: NetexErrorType::StopPointInJourneyPatternNotFound(
+                            timetabled_passing_time
+                            .point_in_journey_pattern_ref
+                            .point_in_journey_pattern_ref_ref
+                            .clone()
+                        )
+                    }
+                ),
+            };
+            let train_location = TrainLocation {
+                timing_tz: None,
+                id: stop_point_in_journey_pattern
+                    .scheduled_stop_point_ref
+                    .scheduled_stop_point_ref_ref
+                    .clone(),
+                id_suffix: None, // We could use `stop_point_in_journey_pattern` but the coupled
+                                 // journeys don't actually use that, so no point really...
+                working_arr: None,
+                working_arr_day: None,
+                working_dep: None,
+                working_dep_day: None,
+                working_pass: None,
+                working_pass_day: None,
+                public_arr: timetabled_passing_time.arrival_time.clone(),
+                public_arr_day: match timetabled_passing_time.arrival_day_offset {
+                    Some(x) => Some(x),
+                    None => match timetabled_passing_time.arrival_time {
+                        Some(x) => Some(0),
+                        None => None,
+                    },
+                },
+                public_dep: timetabled_passing_time.departure_time.clone(),
+                public_dep_day: match timetabled_passing_time.departure_day_offset {
+                    Some(x) => Some(x),
+                    None => match timetabled_passing_time.departure_time {
+                        Some(x) => Some(0),
+                        None => None,
+                    },
+                },
+                platform: None,
+                platform_zone: None,
+                line: None,
+                path: None,
+                engineering_allowance_s: None,
+                pathing_allowance_s: None,
+                performance_allowance_s: None,
+                activities: Activities { // all TODO
+                    detach: false,
+                    attach: false,
+                    other_trains_pass: false,
+                    attach_or_detach_assisting_loco: false,
+                    x_on_arrival: false,
+                    banking_loco: false,
+                    crew_change: false,
+                    set_down_only: false,
+                    examination: false,
+                    gbprtt: false,
+                    prevent_column_merge: false,
+                    prevent_third_column_merge: false,
+                    passenger_count: false,
+                    ticket_collection: false,
+                    ticket_examination: false,
+                    first_class_ticket_examination: false,
+                    selective_ticket_examination: false,
+                    change_loco: false,
+                    unadvertised_stop: false,
+                    operational_stop: false,
+                    train_locomotive_on_rear: false,
+                    propelling: false,
+                    request_pick_up: false,
+                    request_set_down: false,
+                    reversing_move: false,
+                    run_round: false,
+                    staff_stop: false,
+                    normal_passenger_stop: false,
+                    train_begins: false,
+                    train_finishes: false,
+                    tops_reporting: false,
+                    token_etc: false,
+                    pick_up_only: false,
+                    watering_stock: false,
+                    cross_at_passing_point: false,
+                    request_pick_up_by_telephone: false,
+                    request_set_down_by_telephone: false,
+                    times_approximate: false,
+                },
+                change_en_route: None, // TODO?
+                divides_to_form: vec![], // TODO
+                joins_to: vec![], // TODO
+                becomes: None, // TODO
+                divides_from: vec![], // TODO
+                is_joined_to_by: vec![], // TODO
+                forms_from: None, // TODO
+            };
+            schedule
+                .trains_indexed_by_location
+                .entry(train_location.id.clone())
+                .or_insert(HashSet::new())
+                .insert(train_id.to_string());
+
+            train_locations.push(train_location);
+        }
+        Ok((train_locations, schedule))
+    }
+
     fn read_service_journey(
         &self,
         service_journey: &ServiceJourney,
@@ -4097,10 +4316,36 @@ impl NetexImporter {
             )?,
             None => None,
         };
+        let service_journey_pattern = match self.service_journey_pattern_by_id.get(
+            &service_journey.journey_pattern_ref.journey_pattern_ref_ref
+        ) {
+            Some(service_journey_pattern) => service_journey_pattern,
+            None => return Err(
+                NetexError {
+                    error_type: NetexErrorType::ServiceJourneyPatternNotFound(
+                        service_journey.journey_pattern_ref.journey_pattern_ref_ref.clone()
+                    )
+                }
+            ),
+        };
+        let headcode = self.get_headcode(service_journey_pattern)?;
+        let (route, mut schedule) = self.get_route(
+            service_journey_pattern,
+            &service_journey.passing_times.timetabled_passing_time,
+            &service_journey.id,
+            schedule,
+        )?;
+        let source = Some(match service_journey.service_alteration {
+            ServiceAlteration::Planned => TrainSource::LongTerm,
+            ServiceAlteration::ExtraJourney => TrainSource::ShortTerm,
+            ServiceAlteration::Provisional => TrainSource::Provisional,
+            ServiceAlteration::Cancellation => TrainSource::LongTerm, // The original
+            ServiceAlteration::Replaced => TrainSource::LongTerm, // The original
+        });
         let variable_train = VariableTrain {
             train_type: train_type,
             public_id: Some(train_number),
-            headcode: None, // TODO DestinationDisplay when we are loading journeys
+            headcode: headcode,
             power_type: None,
             timing_allocation: None,
             actual_allocation: None,
@@ -4122,13 +4367,6 @@ impl NetexImporter {
             assistance: assistance,
             passenger_information: passenger_information,
         };
-        let source = Some(match service_journey.service_alteration {
-            ServiceAlteration::Planned => TrainSource::LongTerm,
-            ServiceAlteration::ExtraJourney => TrainSource::ShortTerm,
-            ServiceAlteration::Provisional => TrainSource::Provisional,
-            ServiceAlteration::Cancellation => TrainSource::LongTerm, // The original
-            ServiceAlteration::Replaced => TrainSource::LongTerm, // The original
-        });
         let cancellations = if service_journey.service_alteration == ServiceAlteration::Cancellation
             || service_journey.service_alteration == ServiceAlteration::Replaced {
             // If a train is cancelled or replaced, it means its whole validity is cancelled. TODO
@@ -4148,7 +4386,7 @@ impl NetexImporter {
             source: source,
             runs_as_required: false,
             performance_monitoring: None,
-            route: vec![], // TODO
+            route: route,
         };
         match &train.variable_train.public_id {
             Some(x) => {

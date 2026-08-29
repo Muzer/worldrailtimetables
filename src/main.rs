@@ -37,7 +37,7 @@ struct Config {
 }
 
 async fn do_main() -> Result<(), error::Error> {
-    let config = Config::from_config_file("./config.toml")?; // TODO improve
+    //let config = Config::from_config_file("./config.toml")?; // TODO improve
 
     let schedule_manager = Arc::new(schedule_manager::ScheduleManager::new());
 
