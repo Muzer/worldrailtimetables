@@ -375,42 +375,49 @@ fn train(
         } else {
             date.sub(Days::new(u64::try_from(-*day_diff).unwrap()))
         };
-        let train = get_train_instance(&trains, other_date).0?;
-        assoc_train_details
-            .entry(location_id.clone() + "|" + &location_suffix.as_ref().unwrap_or(&"".to_string()))
-            .or_insert(vec![])
-            .push(BasicAssocTrainDetails {
-                id: train.id.clone(),
-                public_id: train.variable_train.public_id.clone(),
-                origin_id: train.route.first().unwrap().id.clone(),
-                destination_id: train.route.last().unwrap().id.clone(),
-                date: other_date.clone(),
-                namespace: namespace.to_string(),
-                is_public: *is_public,
-                category: *category,
-                name: train.variable_train.name.clone(),
-                dep_time: if train.route[0].public_dep.is_none() {
-                    convert_tz(
-                        &other_date,
-                        &Some(0),
-                        &train.route[0].working_dep,
-                        &train.route[0].timing_tz,
-                        &locations.get(location_id).unwrap().timezone,
-                    )
-                    .ok()?
-                    .unwrap()
-                } else {
-                    convert_tz(
-                        &other_date,
-                        &Some(0),
-                        &train.route[0].public_dep,
-                        &train.route[0].timing_tz,
-                        &locations.get(location_id).unwrap().timezone,
-                    )
-                    .ok()?
-                    .unwrap()
-                },
-            });
+        let train = get_train_instance(&trains, other_date).0;
+        // No association? No problem, must just not be running this day...
+        match train {
+            Some(train) => {
+                assoc_train_details
+                    .entry(location_id.clone() + "|" + 
+                        &location_suffix.as_ref().unwrap_or(&"".to_string()))
+                    .or_insert(vec![])
+                    .push(BasicAssocTrainDetails {
+                        id: train.id.clone(),
+                        public_id: train.variable_train.public_id.clone(),
+                        origin_id: train.route.first().unwrap().id.clone(),
+                        destination_id: train.route.last().unwrap().id.clone(),
+                        date: other_date.clone(),
+                        namespace: namespace.to_string(),
+                        is_public: *is_public,
+                        category: *category,
+                        name: train.variable_train.name.clone(),
+                        dep_time: if train.route[0].public_dep.is_none() {
+                            convert_tz(
+                                &other_date,
+                                &Some(0),
+                                &train.route[0].working_dep,
+                                &train.route[0].timing_tz,
+                                &locations.get(location_id).unwrap().timezone,
+                            )
+                            .ok()?
+                            .unwrap()
+                        } else {
+                            convert_tz(
+                                &other_date,
+                                &Some(0),
+                                &train.route[0].public_dep,
+                                &train.route[0].timing_tz,
+                                &locations.get(location_id).unwrap().timezone,
+                            )
+                            .ok()?
+                            .unwrap()
+                        },
+                    });
+            },
+            None => (),
+        };
     }
 
     let mut dates = vec![];

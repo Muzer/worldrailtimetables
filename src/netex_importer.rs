@@ -15,10 +15,10 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use crate::error::Error;
 use crate::importer::SlowStreamingImporter;
 use crate::schedule::{
-    AccommodationTypes, AccommodationTypesByClass, Activities, Assistance, Catering, DaysOfWeek,
-    Families, Line, Location, Luggage, Schedule, PassengerCommunications, PassengerInformation,
-    ReservationField, Reservations, Toilets, Train, TrainLocation, TrainOperator, TrainSource,
-    TrainType, TrainValidityPeriod, VariableTrain,
+    AccommodationTypes, AccommodationTypesByClass, Activities, Assistance, AssociationNode,
+    Catering, DaysOfWeek, Families, Line, Location, Luggage, Schedule, PassengerCommunications,
+    PassengerInformation, ReservationField, Reservations, Toilets, Train, TrainLocation,
+    TrainOperator, TrainSource, TrainType, TrainValidityPeriod, VariableTrain,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2343,9 +2343,9 @@ pub struct JourneyPartCouple {
     #[serde(rename = "TrainNumberRef")]
     pub train_number_ref: JourneyPartCoupleTrainNumberRef,
     #[serde(rename = "StartTimeDayOffset")]
-    pub start_time_day_offset: Option<i32>,
+    pub start_time_day_offset: Option<u8>,
     #[serde(rename = "EndTimeDayOffset")]
-    pub end_time_day_offset: Option<i32>,
+    pub end_time_day_offset: Option<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2490,6 +2490,7 @@ pub enum NetexErrorType {
     DestinationDisplayNotFound(String),
     DuplicateScheduledStopPoint(String),
     InvalidDatetime,
+    JourneyPartNotFound(String),
     JourneyPartCoupleNotFound(String),
     LineNotFound(String),
     NoLocationsInSchedule(String),
@@ -2525,6 +2526,9 @@ impl fmt::Display for NetexErrorType {
                 f, "Duplicate scheduled stop point in PassengerStopAssignment {}", x
             ),
             NetexErrorType::InvalidDatetime => write!(f, "Invalid Datetime"),
+            NetexErrorType::JourneyPartNotFound(x) => write!(
+                f, "Journey part couple not found {}", x
+            ),
             NetexErrorType::JourneyPartCoupleNotFound(x) => write!(
                 f, "Journey part couple not found {}", x
             ),
@@ -2574,8 +2578,11 @@ impl fmt::Display for NetexError {
 #[derive(Default)]
 pub struct NetexImporter {
     coupled_journey_by_id: HashMap<String, CoupledJourney>,
+    coupled_train_ids_by_train_id: HashMap<String, HashSet<String>>,
     destination_display_by_id: HashMap<String, DestinationDisplay>,
+    journey_part_by_id: HashMap<String, JourneyPart>,
     journey_part_couple_by_id: HashMap<String, JourneyPartCouple>,
+    journey_part_couple_ids_by_train_id: HashMap<String, HashSet<String>>,
     line_by_id: HashMap<String, NetexLine>,
     operator_by_id: HashMap<String, Operator>,
     scheduled_stop_point_by_id: HashMap<String, ScheduledStopPoint>,
@@ -2590,8 +2597,11 @@ impl NetexImporter {
     pub fn new() -> NetexImporter {
         NetexImporter {
             coupled_journey_by_id: HashMap::new(),
+            coupled_train_ids_by_train_id: HashMap::new(),
             destination_display_by_id: HashMap::new(),
+            journey_part_by_id: HashMap::new(),
             journey_part_couple_by_id: HashMap::new(),
+            journey_part_couple_ids_by_train_id: HashMap::new(),
             line_by_id: HashMap::new(),
             operator_by_id: HashMap::new(),
             scheduled_stop_point_by_id: HashMap::new(),
@@ -2711,6 +2721,11 @@ impl NetexImporter {
             self.read_service_journey_pattern(&service_journey_pattern)?;
         }
 
+        // Load journey parts
+        for journey_part in &composite_frame.frames.general_frame.members.journey_part {
+            self.read_journey_part(&journey_part)?;
+        }
+
         // Load coupled journey parts
         for journey_part_couple
             in &composite_frame.frames.timetable_frame.journey_part_couples.journey_part_couple {
@@ -2719,11 +2734,20 @@ impl NetexImporter {
 
         // Load coupled journeys
         for coupled_journey
-            in &composite_frame.frames.timetable_frame.coupled_journeys.coupled_journeys {
+            in &composite_frame.frames.timetable_frame.coupled_journeys.coupled_journey {
             self.read_coupled_journey(&coupled_journey)?;
         }
 
-        // Generate map of trains to couplage
+        // Generate map of trains to other coupled trains
+        for coupled_journey
+            in &composite_frame.frames.timetable_frame.coupled_journeys.coupled_journey {
+            self.fill_train_couple_map(&coupled_journey)?;
+        }
+
+        // Generate map of trains to journey part couples
+        for journey_part in &composite_frame.frames.general_frame.members.journey_part {
+            self.fill_journey_part_map(&journey_part)?;
+        }
 
         // Now we can load the trains into the schedule
         for service_journey
@@ -2732,6 +2756,44 @@ impl NetexImporter {
         }
 
         Ok(schedule)
+    }
+
+    fn fill_journey_part_map(&mut self, journey_part: &JourneyPart) -> Result<(), NetexError> {
+        match &journey_part.journey_part_couple_ref {
+            Some(journey_part_couple_ref) => {
+                self.journey_part_couple_ids_by_train_id
+                    .entry(journey_part.parent_journey_ref.parent_journey_ref_ref.clone())
+                    .or_insert(HashSet::new())
+                    .insert(journey_part_couple_ref.journey_part_couple_ref_ref.clone());
+                for other_train_id in self.coupled_train_ids_by_train_id.get(
+                    &journey_part.parent_journey_ref.parent_journey_ref_ref
+                ).unwrap_or(&HashSet::new()) {
+                    self.journey_part_couple_ids_by_train_id
+                        .entry(other_train_id.clone())
+                        .or_insert(HashSet::new())
+                        .insert(journey_part_couple_ref.journey_part_couple_ref_ref.clone());
+                }
+            },
+            None => (),
+        };
+        Ok(())
+    }
+
+    fn fill_train_couple_map(
+        &mut self, coupled_journey: &CoupledJourney
+    ) -> Result<(), NetexError> {
+        for vehicle_journey_1 in &coupled_journey.journeys.vehicle_journey_ref {
+            for vehicle_journey_2 in &coupled_journey.journeys.vehicle_journey_ref {
+                if vehicle_journey_2.vehicle_journey_ref_ref
+                    != vehicle_journey_1.vehicle_journey_ref_ref {
+                    self.coupled_train_ids_by_train_id
+                        .entry(vehicle_journey_1.vehicle_journey_ref_ref.clone())
+                        .or_insert(HashSet::new())
+                        .insert(vehicle_journey_2.vehicle_journey_ref_ref.clone());
+                }
+            }
+        }
+        Ok(())
     }
 
     fn read_coupled_journey(
@@ -2747,6 +2809,11 @@ impl NetexImporter {
         self.journey_part_couple_by_id.insert(
             journey_part_couple.id.clone(), journey_part_couple.clone()
         );
+        Ok(())
+    }
+
+    fn read_journey_part(&mut self, journey_part: &JourneyPart) -> Result<(), NetexError> {
+        self.journey_part_by_id.insert(journey_part.id.clone(), journey_part.clone());
         Ok(())
     }
 
@@ -3352,7 +3419,7 @@ impl NetexImporter {
                 Some(empty_accommodation_types.clone())
             },
             // Economy and standard assumed to be equivalent to second here
-            second: if service_facility_set.fare_classes.text.contains(&FareClass::EconomyClass)
+            second: if service_facility_set.fare_classes.text.contains(&FareClass::SecondClass)
                 || service_facility_set.fare_classes.text.contains(&FareClass::StandardClass)
                 || service_facility_set.fare_classes.text.contains(&FareClass::EconomyClass)
                 || service_facility_set.fare_classes.text.contains(&FareClass::Turista) {
@@ -4078,6 +4145,7 @@ impl NetexImporter {
         &self,
         service_journey_pattern: &ServiceJourneyPattern,
         timetabled_passing_times: &Vec<TimetabledPassingTime>,
+        validity: &Vec<TrainValidityPeriod>,
         train_id: &str,
         mut schedule: Schedule,
     ) -> Result<(Vec<TrainLocation>, Schedule), NetexError> {
@@ -4110,6 +4178,172 @@ impl NetexImporter {
                     }
                 ),
             };
+            let mut divides_to_form = vec![];
+            let mut joins_to = vec![];
+            let mut divides_from = vec![];
+            let mut is_joined_to_by = vec![];
+            // OK so now we have everything, we are nearly ready to produce the train location.
+            // However, now we have coupling to worry about. Coupling data is suuuper weird and I
+            // might have got this wrong but I reckon you basically have to match by hand.
+            for maybe_coupled_train
+                in self.coupled_train_ids_by_train_id.get(train_id).unwrap_or(&HashSet::new()) {
+                // TODO figure out if validities are compatible and skip if not
+                let mut association_node = AssociationNode {
+                    other_train_id: maybe_coupled_train.clone(),
+                    other_train_location_id_suffix: None,
+                    validity: validity.clone(), // No specific separate validity for joins in NeTEx
+                    cancellations: vec![],
+                    replacements: vec![],
+                    day_diff: 0, // Placeholder for now, this is worked out from diff of start/end
+                                 // time as appropriate
+                    for_passengers: true,
+                    source: None, // Unlike trains there's nothing to say where a coupling came from
+                };
+                for journey_part_couple_id in
+                    self.journey_part_couple_ids_by_train_id
+                        .get(train_id)
+                        .unwrap_or(&HashSet::new())
+                        .iter() {
+                    let journey_part_couple =
+                        match self.journey_part_couple_by_id.get(journey_part_couple_id) {
+                        Some(journey_part_couple) => journey_part_couple,
+                        None => return Err(
+                            NetexError {
+                                error_type: NetexErrorType::JourneyPartCoupleNotFound(
+                                    journey_part_couple_id.clone()
+                                )
+                            }
+                        ),
+                    };
+                    if train_locations.len() != 0
+                        && journey_part_couple.from_stop_point_ref.from_stop_point_ref_ref
+                        == stop_point_in_journey_pattern
+                            .scheduled_stop_point_ref
+                            .scheduled_stop_point_ref_ref {
+                        // Get the main part
+                        let main_journey_part = match self.journey_part_by_id.get(
+                            &journey_part_couple.main_part_ref.main_part_ref_ref
+                        ) {
+                            Some(journey_part) => journey_part,
+                            None => return Err(
+                                NetexError {
+                                    error_type: NetexErrorType::JourneyPartNotFound(
+                                        journey_part_couple.main_part_ref.main_part_ref_ref.clone()
+                                    )
+                                }
+                            ),
+                        };
+                        if main_journey_part.parent_journey_ref.parent_journey_ref_ref
+                            == train_id {
+                            // OK, we are the main train, so our life is now hard. We need to find
+                            // the other train via the JourneyPartCouple to figure out the day
+                            // offset.
+                            for journey_part_ref
+                                in &journey_part_couple.journey_parts.journey_part_ref {
+                                if journey_part_ref.journey_part_ref_ref != main_journey_part.id {
+                                    let other_journey_part = match self.journey_part_by_id.get(
+                                        &journey_part_ref.journey_part_ref_ref
+                                    ) {
+                                        Some(journey_part) => journey_part,
+                                        None => return Err(
+                                            NetexError {
+                                                error_type: NetexErrorType::JourneyPartNotFound(
+                                                    journey_part_ref.journey_part_ref_ref.clone()
+                                                )
+                                            }
+                                        ),
+                                    };
+                                    // OK now we have the other journey part (let's not care if
+                                    // there's more than 1 for now, TODO) we can set the offset
+                                    // finally...
+                                    association_node.day_diff =
+                                        i8::try_from(
+                                            journey_part_couple.start_time_day_offset.unwrap_or(0)
+                                        ).unwrap()
+                                        - i8::try_from(
+                                            other_journey_part.start_time_day_offset.unwrap_or(0)
+                                        ).unwrap();
+                                }
+                            }
+                            is_joined_to_by.push(association_node.clone());
+                        } else {
+                            // We are the other train, so we can shortcut and use our current train
+                            // rather than having to find both journey parts
+                            association_node.day_diff =
+                                i8::try_from(
+                                    timetabled_passing_time.departure_day_offset.unwrap_or(0)
+                                ).unwrap()
+                                - i8::try_from(
+                                    journey_part_couple.start_time_day_offset.unwrap_or(0)
+                                ).unwrap();
+                            joins_to.push(association_node.clone());
+                        }
+                    } else if train_locations.len() != 0
+                        && journey_part_couple.to_stop_point_ref.to_stop_point_ref_ref
+                        == stop_point_in_journey_pattern
+                            .scheduled_stop_point_ref
+                            .scheduled_stop_point_ref_ref {
+                        // Get the main part
+                        let main_journey_part = match self.journey_part_by_id.get(
+                            &journey_part_couple.main_part_ref.main_part_ref_ref
+                        ) {
+                            Some(journey_part) => journey_part,
+                            None => return Err(
+                                NetexError {
+                                    error_type: NetexErrorType::JourneyPartNotFound(
+                                        journey_part_couple.main_part_ref.main_part_ref_ref.clone()
+                                    )
+                                }
+                            ),
+                        };
+                        if main_journey_part.parent_journey_ref.parent_journey_ref_ref
+                            == train_id {
+                            // OK, we are the main train, so our life is now hard. We need to find
+                            // the other train via the JourneyPartCouple to figure out the day
+                            // offset.
+                            for journey_part_ref
+                                in &journey_part_couple.journey_parts.journey_part_ref {
+                                if journey_part_ref.journey_part_ref_ref != main_journey_part.id {
+                                    let other_journey_part = match self.journey_part_by_id.get(
+                                        &journey_part_ref.journey_part_ref_ref
+                                    ) {
+                                        Some(journey_part) => journey_part,
+                                        None => return Err(
+                                            NetexError {
+                                                error_type: NetexErrorType::JourneyPartNotFound(
+                                                    journey_part_ref.journey_part_ref_ref.clone()
+                                                )
+                                            }
+                                        ),
+                                    };
+                                    // OK now we have the other journey part (let's not care if
+                                    // there's more than 1 for now, TODO) we can set the offset
+                                    // finally...
+                                    association_node.day_diff =
+                                        i8::try_from(
+                                            journey_part_couple.end_time_day_offset.unwrap_or(0)
+                                        ).unwrap()
+                                        - i8::try_from(
+                                            other_journey_part.end_time_day_offset.unwrap_or(0)
+                                        ).unwrap();
+                                }
+                            }
+                            divides_to_form.push(association_node.clone());
+                        } else {
+                            // We are the other train, so we can shortcut and use our current train
+                            // rather than having to find both journey parts
+                            association_node.day_diff =
+                                i8::try_from(
+                                    timetabled_passing_time.arrival_day_offset.unwrap_or(0)
+                                ).unwrap()
+                                - i8::try_from(
+                                    journey_part_couple.end_time_day_offset.unwrap_or(0)
+                                ).unwrap();
+                            divides_from.push(association_node.clone());
+                        }
+                    }
+                }
+            }
             let train_location = TrainLocation {
                 timing_tz: None,
                 id: stop_point_in_journey_pattern
@@ -4128,7 +4362,7 @@ impl NetexImporter {
                 public_arr_day: match timetabled_passing_time.arrival_day_offset {
                     Some(x) => Some(x),
                     None => match timetabled_passing_time.arrival_time {
-                        Some(x) => Some(0),
+                        Some(_) => Some(0),
                         None => None,
                     },
                 },
@@ -4136,7 +4370,7 @@ impl NetexImporter {
                 public_dep_day: match timetabled_passing_time.departure_day_offset {
                     Some(x) => Some(x),
                     None => match timetabled_passing_time.departure_time {
-                        Some(x) => Some(0),
+                        Some(_) => Some(0),
                         None => None,
                     },
                 },
@@ -4147,7 +4381,7 @@ impl NetexImporter {
                 engineering_allowance_s: None,
                 pathing_allowance_s: None,
                 performance_allowance_s: None,
-                activities: Activities { // all TODO
+                activities: Activities {
                     detach: false,
                     attach: false,
                     other_trains_pass: false,
@@ -4187,13 +4421,13 @@ impl NetexImporter {
                     request_set_down_by_telephone: false,
                     times_approximate: false,
                 },
-                change_en_route: None, // TODO?
-                divides_to_form: vec![], // TODO
-                joins_to: vec![], // TODO
-                becomes: None, // TODO
-                divides_from: vec![], // TODO
-                is_joined_to_by: vec![], // TODO
-                forms_from: None, // TODO
+                change_en_route: None,
+                divides_to_form: divides_to_form,
+                joins_to: joins_to,
+                becomes: None,
+                divides_from: divides_from,
+                is_joined_to_by: is_joined_to_by,
+                forms_from: None,
             };
             schedule
                 .trains_indexed_by_location
@@ -4209,7 +4443,7 @@ impl NetexImporter {
     fn read_service_journey(
         &self,
         service_journey: &ServiceJourney,
-        mut schedule: Schedule,
+        schedule: Schedule,
         default_timezone: &Tz,
     ) -> Result<Schedule, NetexError> {
         let mut operating_periods = vec![];
@@ -4332,6 +4566,7 @@ impl NetexImporter {
         let (route, mut schedule) = self.get_route(
             service_journey_pattern,
             &service_journey.passing_times.timetabled_passing_time,
+            &validity,
             &service_journey.id,
             schedule,
         )?;
@@ -4412,7 +4647,7 @@ impl SlowStreamingImporter for NetexImporter {
     async fn overlay(
         &mut self,
         mut reader: impl AsyncBufReadExt + Unpin + Send,
-        mut schedule: Schedule,
+        schedule: Schedule,
     ) -> Result<Schedule, Error> {
         // Can't seem to stream this for now
         let mut read_xml = Vec::new();
