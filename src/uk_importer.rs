@@ -1,9 +1,10 @@
 use crate::error::Error;
 use crate::importer::{EphemeralImporter, FastImporter, SlowStreamingImporter};
 use crate::schedule::{
-    Activities, AssociationNode, Catering, DaysOfWeek, Location, OperatingCharacteristics,
-    ReservationField, Reservations, Schedule, Train, TrainAllocation, TrainLocation, TrainOperator,
-    TrainPower, TrainSource, TrainType, TrainValidityPeriod, VariableTrain,
+    AccommodationTypes, AccommodationTypesByClass, Activities, AssociationNode, Catering,
+    DaysOfWeek, Line, Location, OperatingCharacteristics, ReservationField, Reservations, Schedule,
+    Train, TrainAllocation, TrainLocation, TrainOperator, TrainPower, TrainSource, TrainType,
+    TrainValidityPeriod, VariableTrain,
 };
 
 use async_trait::async_trait;
@@ -1664,7 +1665,7 @@ where
         match chr {
             'C' => catering.buffet = true,
             'F' => catering.first_class_restaurant = true,
-            'H' => catering.hot_food = true,
+            'H' => catering.hot_food_available = Some(true),
             'M' => catering.first_class_meal = true,
             'P' => wheelchair_reservations = true,
             'R' => catering.restaurant = true,
@@ -1697,6 +1698,10 @@ where
             } else {
                 ReservationField::NotApplicable
             },
+            groups: ReservationField::Unknown,
+            first_class: ReservationField::NotApplicable,
+            second_class: ReservationField::NotApplicable,
+            not_every_class: ReservationField::NotApplicable,
             bicycles: ReservationField::Mandatory,
             sleepers: if first_sleepers || standard_sleepers {
                 ReservationField::Mandatory
@@ -1709,6 +1714,7 @@ where
                 ReservationField::NotApplicable
             },
             wheelchairs: ReservationField::Mandatory,
+            supplement_charged: None,
         }),
         "E" => Ok(Reservations {
             seats: if first_seating || standard_seating {
@@ -1716,6 +1722,10 @@ where
             } else {
                 ReservationField::NotApplicable
             },
+            groups: ReservationField::Unknown,
+            first_class: ReservationField::NotApplicable,
+            second_class: ReservationField::NotApplicable,
+            not_every_class: ReservationField::NotApplicable,
             bicycles: ReservationField::Mandatory,
             sleepers: if first_sleepers || standard_sleepers {
                 ReservationField::NotMandatory
@@ -1732,6 +1742,7 @@ where
             } else {
                 ReservationField::NotMandatory
             },
+            supplement_charged: None,
         }),
         "R" => Ok(Reservations {
             seats: if first_seating || standard_seating {
@@ -1739,6 +1750,10 @@ where
             } else {
                 ReservationField::NotApplicable
             },
+            groups: ReservationField::Unknown,
+            first_class: ReservationField::NotApplicable,
+            second_class: ReservationField::NotApplicable,
+            not_every_class: ReservationField::NotApplicable,
             bicycles: ReservationField::NotMandatory,
             sleepers: if first_sleepers || standard_sleepers {
                 ReservationField::Recommended
@@ -1751,6 +1766,7 @@ where
                 ReservationField::NotApplicable
             },
             wheelchairs: ReservationField::Recommended,
+            supplement_charged: None,
         }),
         "S" => Ok(Reservations {
             seats: if first_seating || standard_seating {
@@ -1758,6 +1774,10 @@ where
             } else {
                 ReservationField::NotApplicable
             },
+            groups: ReservationField::Unknown,
+            first_class: ReservationField::NotApplicable,
+            second_class: ReservationField::NotApplicable,
+            not_every_class: ReservationField::NotApplicable,
             bicycles: ReservationField::NotMandatory,
             sleepers: if first_sleepers || standard_sleepers {
                 ReservationField::Possible
@@ -1770,6 +1790,7 @@ where
                 ReservationField::NotApplicable
             },
             wheelchairs: ReservationField::Possible,
+            supplement_charged: None,
         }),
         "" => Ok(Reservations {
             seats: if first_seating || standard_seating {
@@ -1777,6 +1798,10 @@ where
             } else {
                 ReservationField::NotApplicable
             },
+            groups: ReservationField::Unknown,
+            first_class: ReservationField::NotApplicable,
+            second_class: ReservationField::NotApplicable,
+            not_every_class: ReservationField::NotApplicable,
             bicycles: ReservationField::NotMandatory,
             sleepers: if first_sleepers || standard_sleepers {
                 ReservationField::Impossible
@@ -1797,6 +1822,7 @@ where
                     ReservationField::NotApplicable
                 }
             },
+            supplement_charged: None,
         }),
         x => Err(error_logic(CifErrorType::InvalidReservationType(
             x.to_string(),
@@ -3073,7 +3099,6 @@ impl CifImporter {
                 train_type,
                 public_id: Some(public_id.to_string()),
                 headcode,
-                service_group: Some(service_group.to_string()),
                 power_type: power_type,
                 timing_allocation: match timing_load_str {
                     None => None,
@@ -3086,19 +3111,88 @@ impl CifImporter {
                 actual_allocation: None,
                 timing_speed_m_per_s: speed_m_per_s,
                 operating_characteristics: Some(operating_characteristics),
-                has_first_class_seats: Some(first_seating),
-                has_second_class_seats: Some(standard_seating),
-                has_first_class_sleepers: Some(first_sleepers),
-                has_second_class_sleepers: Some(standard_sleepers),
-                carries_vehicles: Some(train_type == TrainType::CarCarryingPassenger),
+                accommodation: Some(
+                    AccommodationTypesByClass {
+                        unknown: None,
+                        first_premium: None,
+                        first: Some(
+                            AccommodationTypes {
+                                standing: None,
+                                seating: Some(first_seating),
+                                reclining_seating: None,
+                                special_seating: None,
+                                sleeper: Some(first_sleepers),
+                                single_sleeper: None,
+                                double_sleeper: None,
+                                special_sleeper: None,
+                                couchette: None,
+                                single_couchette: None,
+                                double_couchette: None,
+                                baby: None,
+                                family: None,
+                                recreation: None,
+                                panoramic: None,
+                                pullman: None,
+                                pushchair: None,
+                                wheelchair: None,
+                                has_female_only: None,
+                                has_male_only: None,
+                                has_same_sex_only: None,
+                            },
+                        ),
+                        second_premium: None,
+                        second: Some(
+                            AccommodationTypes {
+                                standing: None,
+                                seating: Some(standard_seating),
+                                reclining_seating: None,
+                                special_seating: None,
+                                sleeper: Some(standard_sleepers),
+                                single_sleeper: None,
+                                double_sleeper: None,
+                                special_sleeper: None,
+                                couchette: None,
+                                single_couchette: None,
+                                double_couchette: None,
+                                baby: None,
+                                family: None,
+                                recreation: None,
+                                panoramic: None,
+                                pullman: None,
+                                pushchair: None,
+                                wheelchair: None,
+                                has_female_only: None,
+                                has_male_only: None,
+                                has_same_sex_only: None,
+                            },
+                        ),
+                        third: None,
+                        unclassified: None,
+                    }
+                ),
                 reservations,
                 catering: Some(catering),
                 brand,
                 name: None,
+                line: Some(Line {
+                    id: service_group.to_string(),
+                    public_id: None,
+                    name: None,
+                    number: None,
+                    description: None,
+                    url: None,
+                    background_colour: None,
+                    foreground_colour: None,
+                }),
                 uic_code: None,
                 operator: None,
                 wheelchair_accessible: None,
-                bicycles_allowed: None,
+                toilets: None,
+                luggage: None,
+                families: None,
+                passenger_communications: None,
+                assistance: None,
+                passenger_information: None,
             },
             source: Some(if is_stp {
                 TrainSource::ShortTerm
@@ -3253,6 +3347,7 @@ impl CifImporter {
         train.variable_train.uic_code = uic_code;
         train.variable_train.operator = Some(TrainOperator {
             id: atoc_code.to_string(),
+            public_id: None,
             description: train_operator_desc,
         });
         train.performance_monitoring = Some(performance_monitoring);
@@ -3637,7 +3732,6 @@ impl CifImporter {
             train_type,
             public_id: Some(public_id.to_string()),
             headcode,
-            service_group: Some(service_group.to_string()),
             power_type: power_type,
             timing_allocation: match timing_load_str {
                 None => None,
@@ -3650,19 +3744,88 @@ impl CifImporter {
             actual_allocation: None,
             timing_speed_m_per_s: speed_m_per_s,
             operating_characteristics: Some(operating_characteristics),
-            has_first_class_seats: Some(first_seating),
-            has_second_class_seats: Some(standard_seating),
-            has_first_class_sleepers: Some(first_sleepers),
-            has_second_class_sleepers: Some(standard_sleepers),
-            carries_vehicles: Some(train_type == TrainType::CarCarryingPassenger),
+            accommodation: Some(
+                AccommodationTypesByClass {
+                    unknown: None,
+                    first_premium: None,
+                    first: Some(
+                        AccommodationTypes {
+                            standing: None,
+                            seating: Some(first_seating),
+                            reclining_seating: None,
+                            special_seating: None,
+                            sleeper: Some(first_sleepers),
+                            single_sleeper: None,
+                            double_sleeper: None,
+                            special_sleeper: None,
+                            couchette: None,
+                            single_couchette: None,
+                            double_couchette: None,
+                            baby: None,
+                            family: None,
+                            recreation: None,
+                            panoramic: None,
+                            pullman: None,
+                            pushchair: None,
+                            wheelchair: None,
+                            has_female_only: None,
+                            has_male_only: None,
+                            has_same_sex_only: None,
+                        },
+                    ),
+                    second_premium: None,
+                    second: Some(
+                        AccommodationTypes {
+                            standing: None,
+                            seating: Some(standard_seating),
+                            reclining_seating: None,
+                            special_seating: None,
+                            sleeper: Some(standard_sleepers),
+                            single_sleeper: None,
+                            double_sleeper: None,
+                            special_sleeper: None,
+                            couchette: None,
+                            single_couchette: None,
+                            double_couchette: None,
+                            baby: None,
+                            family: None,
+                            recreation: None,
+                            panoramic: None,
+                            pullman: None,
+                            pushchair: None,
+                            wheelchair: None,
+                            has_female_only: None,
+                            has_male_only: None,
+                            has_same_sex_only: None,
+                        },
+                    ),
+                    third: None,
+                    unclassified: None,
+                }
+            ),
             reservations: reservations,
             catering: Some(catering),
             brand: brand,
             name: None,
+            line: Some(Line {
+                id: service_group.to_string(),
+                public_id: None,
+                name: None,
+                number: None,
+                description: None,
+                url: None,
+                background_colour: None,
+                foreground_colour: None,
+            }),
             uic_code: uic_code,
             operator,
             wheelchair_accessible: None,
-            bicycles_allowed: None,
+            toilets: None,
+            luggage: None,
+            families: None,
+            passenger_communications: None,
+            assistance: None,
+            passenger_information: None,
         });
 
         Ok(schedule)
@@ -4520,7 +4683,6 @@ impl NrJsonImporter {
             train_type,
             public_id: Some(public_id.to_string()),
             headcode,
-            service_group: service_group.clone(),
             power_type: power_type,
             timing_allocation: match timing_load_str {
                 None => None,
@@ -4533,22 +4695,95 @@ impl NrJsonImporter {
             actual_allocation: None,
             timing_speed_m_per_s: speed_m_per_s,
             operating_characteristics: Some(operating_characteristics),
-            has_first_class_seats: Some(first_seating),
-            has_second_class_seats: Some(standard_seating),
-            has_first_class_sleepers: Some(first_sleepers),
-            has_second_class_sleepers: Some(standard_sleepers),
-            carries_vehicles: Some(train_type == TrainType::CarCarryingPassenger),
+            accommodation: Some(
+                AccommodationTypesByClass {
+                    unknown: None,
+                    first_premium: None,
+                    first: Some(
+                        AccommodationTypes {
+                            standing: None,
+                            seating: Some(first_seating),
+                            reclining_seating: None,
+                            special_seating: None,
+                            sleeper: Some(first_sleepers),
+                            single_sleeper: None,
+                            double_sleeper: None,
+                            special_sleeper: None,
+                            couchette: None,
+                            single_couchette: None,
+                            double_couchette: None,
+                            baby: None,
+                            family: None,
+                            recreation: None,
+                            panoramic: None,
+                            pullman: None,
+                            pushchair: None,
+                            wheelchair: None,
+                            has_female_only: None,
+                            has_male_only: None,
+                            has_same_sex_only: None,
+                        },
+                    ),
+                    second_premium: None,
+                    second: Some(
+                        AccommodationTypes {
+                            standing: None,
+                            seating: Some(standard_seating),
+                            reclining_seating: None,
+                            special_seating: None,
+                            sleeper: Some(standard_sleepers),
+                            single_sleeper: None,
+                            double_sleeper: None,
+                            special_sleeper: None,
+                            couchette: None,
+                            single_couchette: None,
+                            double_couchette: None,
+                            baby: None,
+                            family: None,
+                            recreation: None,
+                            panoramic: None,
+                            pullman: None,
+                            pushchair: None,
+                            wheelchair: None,
+                            has_female_only: None,
+                            has_male_only: None,
+                            has_same_sex_only: None,
+                        },
+                    ),
+                    third: None,
+                    unclassified: None,
+                }
+            ),
             reservations,
             catering: Some(catering),
             brand,
             name: None,
+            line: match service_group {
+                Some(service_group) => Some(Line {
+                    id: service_group.clone(),
+                    public_id: None,
+                    name: None,
+                    number: None,
+                    description: None,
+                    url: None,
+                    background_colour: None,
+                    foreground_colour: None,
+                }),
+                None => None,
+            },
             uic_code,
             operator: Some(TrainOperator {
                 id: atoc_code.to_string(),
+                public_id: None,
                 description: train_operator_desc,
             }),
             wheelchair_accessible: None,
-            bicycles_allowed: None,
+            toilets: None,
+            luggage: None,
+            families: None,
+            passenger_communications: None,
+            assistance: None,
+            passenger_information: None,
         })
     }
 

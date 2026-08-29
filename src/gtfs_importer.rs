@@ -1,8 +1,9 @@
 use crate::error::Error;
 use crate::importer::SlowGtfsImporter;
 use crate::schedule::{
-    Activities, DaysOfWeek, Location, ReservationField, Reservations, Schedule, Train,
-    TrainLocation, TrainOperator, TrainSource, TrainType, TrainValidityPeriod, VariableTrain,
+    Activities, DaysOfWeek, Line, Location, Luggage, ReservationField, Reservations, Schedule,
+    Train, TrainLocation, TrainOperator, TrainSource, TrainType, TrainValidityPeriod,
+    VariableTrain,
 };
 
 use async_trait::async_trait;
@@ -11,8 +12,8 @@ use chrono::{Datelike, NaiveTime, TimeZone};
 use chrono_tz::{ParseError, Tz};
 
 use gtfs_structures::{
-    Availability, BikesAllowedType, Calendar, CalendarDate, Exception, Gtfs, LocationType,
-    PickupDropOffType, RouteType, Stop, StopTime, TimepointType,
+    Availability, BikesAllowedType, Calendar, CalendarDate, Exception, ExtendedRouteType, Gtfs,
+    LocationType, PickupDropOffType, RouteType, Stop, StopTime, TimepointType,
 };
 
 use tokio::task::block_in_place;
@@ -32,6 +33,7 @@ pub enum GtfsErrorType {
     UnknownLocationType(i16),
     InvalidTimezone(String, ParseError),
     NoAgencyDefined,
+    UnknownExtendedRouteType(ExtendedRouteType),
     UnknownRouteType(RouteType),
     AgencyNotPresent(String),
     RouteNotPresent(String),
@@ -52,6 +54,9 @@ impl fmt::Display for GtfsErrorType {
             GtfsErrorType::UnknownLocationType(x) => write!(f, "Location type {} unknown", x),
             GtfsErrorType::InvalidTimezone(x, err) => write!(f, "Invalid timezone {}: {}", x, err),
             GtfsErrorType::NoAgencyDefined => write!(f, "No transport agency was defined"),
+            GtfsErrorType::UnknownExtendedRouteType(x) => {
+                write!(f, "Extended route type {:#?} unknown", x)
+            },
             GtfsErrorType::UnknownRouteType(x) => write!(f, "Route type {:#?} unknown", x),
             GtfsErrorType::AgencyNotPresent(x) => write!(f, "Agency {} not present", x),
             GtfsErrorType::RouteNotPresent(x) => write!(f, "Route {} not present", x),
@@ -560,17 +565,65 @@ impl GtfsImporter {
                 train_type: match gtfs.routes.get(&trip.route_id).unwrap().route_type {
                     RouteType::Tramway => TrainType::Tram,
                     RouteType::Subway => TrainType::Metro,
-                    RouteType::Rail => TrainType::OrdinaryPassenger,
+                    RouteType::Rail => TrainType::Passenger,
                     RouteType::Bus => TrainType::Bus,
                     RouteType::Ferry => TrainType::Ship,
                     RouteType::CableCar => TrainType::CableTram,
                     RouteType::Gondola => TrainType::CableCar,
                     RouteType::Funicular => TrainType::Funicular,
-                    RouteType::Coach => TrainType::Coach,
-                    RouteType::Taxi => TrainType::Taxi,
-                    RouteType::Air => TrainType::Air,
-                    RouteType::Other(11) => TrainType::Trolleybus,
-                    RouteType::Other(12) => TrainType::Monorail,
+                    RouteType::Extended(extended) => match extended {
+                        ExtendedRouteType::Railway => TrainType::Passenger,
+                        ExtendedRouteType::HighSpeedRail => TrainType::HighSpeedPassenger,
+                        ExtendedRouteType::LongDistanceTrains => TrainType::LongDistancePassenger,
+                        ExtendedRouteType::InterRegionalRail => TrainType::InterregionalPassenger,
+                        ExtendedRouteType::CarTransportRail => TrainType::CarCarryingPassenger,
+                        ExtendedRouteType::SleeperRail => TrainType::SleeperPassenger,
+                        ExtendedRouteType::RegionalRail => TrainType::RegionalPassenger,
+                        ExtendedRouteType::TouristRailway => TrainType::TouristPassenger,
+                        ExtendedRouteType::RailShuttleWithinComplex => TrainType::ShuttlePassenger,
+                        ExtendedRouteType::SuburbanRailway => TrainType::SuburbanPassenger,
+                        ExtendedRouteType::ReplacementRail => TrainType::ReplacementPassenger,
+                        ExtendedRouteType::SpecialRail => TrainType::SpecialPassenger,
+                        ExtendedRouteType::LorryTransportRail => TrainType::LorryCarryingPassenger,
+                        ExtendedRouteType::OtherRail => TrainType::Passenger,
+                        ExtendedRouteType::CrossCountryRail => TrainType::CrossCountryPassenger,
+                        ExtendedRouteType::VehicleTransportRail => TrainType::CarCarryingPassenger,
+                        ExtendedRouteType::RackAndPinionRailway =>
+                            TrainType::RackAndPinionPassenger,
+                        ExtendedRouteType::AdditionalRail => TrainType::ReliefPassenger,
+                        ExtendedRouteType::Coach => TrainType::Coach,
+                        ExtendedRouteType::InternationalCoach => TrainType::InternationalCoach,
+                        ExtendedRouteType::NationalCoach => TrainType::NationalCoach,
+                        ExtendedRouteType::ShuttleCoach => TrainType::ShuttleCoach,
+                        ExtendedRouteType::RegionalCoach => TrainType::RegionalCoach,
+                        ExtendedRouteType::SpecialCoach => TrainType::SpecialCoach,
+                        ExtendedRouteType::SightseeingCoach => TrainType::SightseeingCoach,
+                        ExtendedRouteType::TouristCoach => TrainType::TouristCoach,
+                        ExtendedRouteType::CommuterCoach => TrainType::CommuterCoach,
+                        ExtendedRouteType::OtherCoach => TrainType::Coach,
+                        ExtendedRouteType::UrbanRailway => TrainType::UrbanPassenger,
+                        ExtendedRouteType::Metro => TrainType::Metro,
+                        ExtendedRouteType::Underground => TrainType::Metro,
+                        ExtendedRouteType::UrbanRailwayServiceDetail => TrainType::UrbanPassenger,
+                        ExtendedRouteType::OtherUrbanRailway => TrainType::UrbanPassenger,
+                        ExtendedRouteType::Monorail => TrainType::Monorail,
+                        ExtendedRouteType::Bus => TrainType::Bus,
+                        // TODO other bus types not yet supported
+                        ExtendedRouteType::Tram => TrainType::Tram,
+                        // TODO other tram types not yet supported
+                        ExtendedRouteType::Air => TrainType::Air,
+                        ExtendedRouteType::Ferry => TrainType::Ship,
+                        ExtendedRouteType::CableCar => TrainType::CableCar,
+                        ExtendedRouteType::Funicular => TrainType::Funicular,
+                        ExtendedRouteType::Taxi => TrainType::Taxi,
+                        // TODO there's a few more here, panic for now
+                        x => {
+                            return Err(GtfsImportError {
+                                error_type: GtfsErrorType::UnknownExtendedRouteType(x),
+                                file: "routes".to_string(),
+                            })
+                        }
+                    },
                     x => {
                         return Err(GtfsImportError {
                             error_type: GtfsErrorType::UnknownRouteType(x),
@@ -580,33 +633,45 @@ impl GtfsImporter {
                 },
                 public_id: trip.trip_short_name.clone(),
                 headcode: trip.trip_headsign.clone(),
-                service_group: gtfs.routes.get(&trip.route_id).unwrap().long_name.clone(),
                 power_type: None,
                 timing_allocation: None,
                 actual_allocation: None,
                 timing_speed_m_per_s: None,
                 operating_characteristics: None,
-                has_first_class_seats: None,
-                has_second_class_seats: None,
-                has_first_class_sleepers: None,
-                has_second_class_sleepers: None,
-                carries_vehicles: None,
+                accommodation: None,
                 reservations: Reservations {
                     seats: ReservationField::Unknown,
+                    groups: ReservationField::Unknown,
+                    first_class: ReservationField::Unknown,
+                    second_class: ReservationField::Unknown,
+                    not_every_class: ReservationField::Unknown,
                     bicycles: ReservationField::Unknown,
                     sleepers: ReservationField::Unknown,
                     vehicles: ReservationField::Unknown,
                     wheelchairs: ReservationField::Unknown,
+                    supplement_charged: None,
                 },
                 catering: None,
                 brand: None,
-                name: gtfs.routes.get(&trip.route_id).unwrap().short_name.clone(),
+                name: None,
+                line: Some(Line {
+                    id: gtfs.routes.get(&trip.route_id).unwrap().id.clone(),
+                    public_id: None,
+                    name: gtfs.routes.get(&trip.route_id).unwrap().long_name.clone(),
+                    number: gtfs.routes.get(&trip.route_id).unwrap().short_name.clone(),
+                    description: gtfs.routes.get(&trip.route_id).unwrap().desc.clone(),
+                    url: gtfs.routes.get(&trip.route_id).unwrap().url.clone(),
+                    foreground_colour: 
+                        gtfs.routes.get(&trip.route_id).unwrap().text_color.clone(),
+                    background_colour: gtfs.routes.get(&trip.route_id).unwrap().color.clone(),
+                }),
                 uic_code: None,
                 operator: Some(TrainOperator {
                     id: match &agency.id {
                         Some(x) => x.clone(),
                         None => agency.name.clone(),
                     },
+                    public_id: None,
                     description: Some(agency.name.clone()),
                 }),
                 wheelchair_accessible: match trip.wheelchair_accessible {
@@ -620,17 +685,34 @@ impl GtfsImporter {
                         })
                     }
                 },
-                bicycles_allowed: match trip.bikes_allowed {
-                    BikesAllowedType::NoBikeInfo => None,
-                    BikesAllowedType::AtLeastOneBike => Some(true),
-                    BikesAllowedType::NoBikesAllowed => Some(false),
-                    x => {
-                        return Err(GtfsImportError {
-                            error_type: GtfsErrorType::UnknownBicyclesAllowed(x),
-                            file: "trips".to_string(),
-                        })
-                    }
-                },
+                toilets: None,
+                luggage: Some(Luggage {
+                    bag_storage: None,
+                    racks: None,
+                    skis: None,
+                    skis_on_rear: None,
+                    extra_large_racks: None,
+                    van: None,
+                    bicycles: match trip.bikes_allowed {
+                        BikesAllowedType::NoBikeInfo => None,
+                        BikesAllowedType::AtLeastOneBike => Some(true),
+                        BikesAllowedType::NoBikesAllowed => Some(false),
+                        x => {
+                            return Err(GtfsImportError {
+                                error_type: GtfsErrorType::UnknownBicyclesAllowed(x),
+                                file: "trips".to_string(),
+                            })
+                        }
+                    },
+                    bicycles_in_van: None,
+                    bicycles_in_carriage: None,
+                    pushchairs: None,
+                    vehicles: None,
+                }),
+                families: None,
+                passenger_communications: None,
+                assistance: None,
+                passenger_information: None,
             };
 
             let train = Train {

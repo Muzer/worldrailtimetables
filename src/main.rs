@@ -5,6 +5,7 @@ mod gtfs_url_fetcher;
 mod importer;
 mod ir_manager;
 mod manager;
+mod netex_importer;
 mod nir_fetcher;
 mod nir_manager;
 mod nr_fetcher;
@@ -13,6 +14,7 @@ mod nr_vstp_subscriber;
 mod schedule;
 mod schedule_manager;
 mod sncf_fetcher;
+mod sncf_manager;
 mod subscriber;
 mod uk_importer;
 mod webui;
@@ -24,6 +26,7 @@ use crate::ir_manager::IrManager;
 use crate::manager::Manager;
 use crate::nir_manager::{NirConfig, NirManager};
 use crate::nr_manager::{NrConfig, NrManager};
+use crate::sncf_manager::SncfManager;
 
 use std::sync::Arc;
 
@@ -38,18 +41,21 @@ async fn do_main() -> Result<(), error::Error> {
 
     let schedule_manager = Arc::new(schedule_manager::ScheduleManager::new());
 
-    let mut nr_manager = NrManager::new(config.nr, schedule_manager.clone()).await?;
-    let mut nir_manager = NirManager::new(config.nir, schedule_manager.clone()).await?;
-    let mut ir_manager = IrManager::new(schedule_manager.clone()).await?;
+    //let mut nr_manager = NrManager::new(config.nr, schedule_manager.clone()).await?;
+    //let mut nir_manager = NirManager::new(config.nir, schedule_manager.clone()).await?;
+    //let mut ir_manager = IrManager::new(schedule_manager.clone()).await?;
+    let mut sncf_manager = SncfManager::new(schedule_manager.clone()).await?;
 
-    let nr_manager_fut = tokio::spawn(async move { nr_manager.run().await });
-    let nir_manager_fut = tokio::spawn(async move { nir_manager.run().await });
-    let ir_manager_fut = tokio::spawn(async move { ir_manager.run().await });
+    //let nr_manager_fut = tokio::spawn(async move { nr_manager.run().await });
+    //let nir_manager_fut = tokio::spawn(async move { nir_manager.run().await });
+    //let ir_manager_fut = tokio::spawn(async move { ir_manager.run().await });
+    let sncf_manager_fut = tokio::spawn(async move { sncf_manager.run().await });
     let webui_fut = tokio::spawn(async move { webui::rocket(schedule_manager.clone()).await });
     tokio::select!(
-        x = nr_manager_fut => x,
-        x = nir_manager_fut => x,
-        x = ir_manager_fut => x,
+        //x = nr_manager_fut => x,
+        //x = nir_manager_fut => x,
+        //x = ir_manager_fut => x,
+        x = sncf_manager_fut => x,
         x = webui_fut => x
     )??;
 

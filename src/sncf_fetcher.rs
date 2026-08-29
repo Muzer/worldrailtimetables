@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures::stream::TryStreamExt;
 use rc_zip_tokio::ReadZipStreaming;
 use reqwest::Client;
-
+use tokio::io;
 use tokio::io::{AsyncBufRead, BufReader};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 
@@ -51,6 +51,9 @@ impl StreamingFetcher for SncfFetcher {
             .stream_zip_entries_throwing_caution_to_the_wind()
             .await?;
         if reader.entry().name == "trf2netex.log" {
+            let mut sink = io::sink();
+            let mut buf_read = BufReader::new(&mut reader);
+            io::copy_buf(&mut buf_read, &mut sink).await?;
             reader = match reader.finish().await? {
                 Some(x) => x,
                 None => {

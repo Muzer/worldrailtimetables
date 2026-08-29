@@ -1,6 +1,7 @@
 use chrono::{DateTime, NaiveTime, Weekday};
 use chrono_tz::Tz;
 
+use rgb::RGB8;
 use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
@@ -159,12 +160,31 @@ pub enum TrainType {
     FreightPetroleum,
     LocomotiveBrakeVan,
     Locomotive,
+    Passenger,
     OrdinaryPassenger,
     ExpressPassenger,
+    IntercityPassenger,
+    UrbanPassenger,
     InternationalPassenger,
+    LocalPassenger,
+    HighSpeedPassenger,
+    SuburbanPassenger,
+    RegionalPassenger,
+    InterregionalPassenger,
+    LongDistancePassenger,
     SleeperPassenger,
+    NightPassenger,
     InternationalSleeperPassenger,
     CarCarryingPassenger,
+    LorryCarryingPassenger,
+    TouristPassenger,
+    AirportLinkPassenger,
+    ShuttlePassenger,
+    ReplacementPassenger,
+    SpecialPassenger,
+    ReliefPassenger,
+    CrossCountryPassenger,
+    RackAndPinionPassenger,
     UnadvertisedPassenger,
     UnadvertisedExpressPassenger,
     EmptyPassenger,
@@ -186,8 +206,24 @@ pub enum TrainType {
     Trolleybus,
     Monorail,
     Coach,
+    UndefinedCoach,
+    InternationalCoach,
+    NationalCoach,
+    ShuttleCoach,
+    RegionalCoach,
+    SpecialCoach,
+    SchoolCoach,
+    SightseeingCoach,
+    TouristCoach,
+    CommuterCoach,
     Taxi,
     Air,
+    Unknown,
+    Water,
+    SnowAndIce,
+    Lift,
+    SelfDrive,
+    Other,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -195,6 +231,7 @@ pub enum TrainSource {
     LongTerm,
     ShortTerm,
     VeryShortTerm,
+    Provisional,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -231,6 +268,7 @@ pub struct TrainAllocation {
 #[derive(Clone, Debug, Serialize)]
 pub struct TrainOperator {
     pub id: String,
+    pub public_id: Option<String>,
     pub description: Option<String>,
 }
 
@@ -253,30 +291,51 @@ pub struct OperatingCharacteristics {
 pub enum ReservationField {
     Possible,
     Mandatory,
+    MandatoryFromOrigin,
     Recommended,
     Impossible,
     NotMandatory, // some railways might not have possible/impossible distinction
     NotApplicable,
+    Restricted,
+    NotAllowed, // for when a specific type of booking is not allowed at all, eg groups forbidden
     Unknown,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Reservations {
     pub seats: ReservationField,
+    pub groups: ReservationField,
+    pub first_class: ReservationField,
+    pub second_class: ReservationField,
+    pub not_every_class: ReservationField,
     pub bicycles: ReservationField,
     pub sleepers: ReservationField,
     pub vehicles: ReservationField,
     pub wheelchairs: ReservationField,
+    pub supplement_charged: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Catering {
+    pub at_seat_meal: bool,
+    pub bar: bool,
+    pub bistro: bool,
+    pub breakfast_in_car: bool,
     pub buffet: bool,
-    pub first_class_restaurant: bool,
-    pub hot_food: bool,
-    pub first_class_meal: bool,
-    pub restaurant: bool,
+    pub coffee_shop: bool,
+    pub self_service: bool,
     pub trolley: bool,
+    pub vending_machine_food: bool,
+    pub vending_machine_drink: bool,
+    pub mini_bar: bool,
+    pub restaurant: bool,
+    pub first_class_restaurant: bool,
+    pub first_class_meal: bool,
+    pub other: bool,
+    pub food_available: Option<bool>,
+    pub hot_food_available: Option<bool>,
+    pub drink_available: Option<bool>,
+    pub snacks_available: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -367,29 +426,156 @@ pub struct TrainLocation {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct AccommodationTypes {
+    pub standing: Option<bool>,
+    pub seating: Option<bool>,
+    pub reclining_seating: Option<bool>,
+    pub special_seating: Option<bool>,
+    pub sleeper: Option<bool>,
+    pub single_sleeper: Option<bool>,
+    pub double_sleeper: Option<bool>,
+    pub special_sleeper: Option<bool>,
+    pub couchette: Option<bool>,
+    pub single_couchette: Option<bool>,
+    pub double_couchette: Option<bool>,
+    pub baby: Option<bool>,
+    pub family: Option<bool>,
+    pub recreation: Option<bool>,
+    pub panoramic: Option<bool>,
+    pub pullman: Option<bool>,
+    pub pushchair: Option<bool>,
+    pub wheelchair: Option<bool>,
+    pub has_male_only: Option<bool>,
+    pub has_female_only: Option<bool>,
+    pub has_same_sex_only: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AccommodationTypesByClass {
+    pub unknown: Option<AccommodationTypes>,
+    pub first_premium: Option<AccommodationTypes>,
+    pub first: Option<AccommodationTypes>,
+    pub second_premium: Option<AccommodationTypes>,
+    pub second: Option<AccommodationTypes>,
+    pub third: Option<AccommodationTypes>,
+    pub unclassified: Option<AccommodationTypes>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Line {
+    pub id: String,
+    pub public_id: Option<String>,
+    pub name: Option<String>,
+    pub number: Option<String>,
+    pub description: Option<String>,
+    pub url: Option<String>,
+    pub background_colour: Option<RGB8>,
+    pub foreground_colour: Option<RGB8>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Toilets {
+    pub toilet: Option<bool>,
+    pub sink: Option<bool>,
+    pub disabled_toilet: Option<bool>,
+    pub shower: Option<bool>,
+    pub changing: Option<bool>,
+    pub baby_changing: Option<bool>,
+    pub disabled_baby_changing: Option<bool>,
+    pub shoe_shiner: Option<bool>,
+    pub other: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Luggage {
+    pub bag_storage: Option<bool>,
+    pub racks: Option<bool>,
+    pub skis: Option<bool>,
+    pub skis_on_rear: Option<bool>,
+    pub extra_large_racks: Option<bool>,
+    pub van: Option<bool>,
+    pub bicycles: Option<bool>,
+    pub bicycles_in_van: Option<bool>,
+    pub bicycles_in_carriage: Option<bool>,
+    pub pushchairs: Option<bool>,
+    pub vehicles: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Families {
+    pub children_facilities: Option<bool>,
+    pub military_family_facilities: Option<bool>,
+    pub nursery: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PassengerCommunications {
+    pub free_wifi: Option<bool>,
+    pub wifi: Option<bool>,
+    pub mains_sockets: Option<bool>,
+    pub telephone: Option<bool>,
+    pub radio: Option<bool>,
+    pub video: Option<bool>,
+    pub business: Option<bool>,
+    pub internet: Option<bool>,
+    pub post_office: Option<bool>,
+    pub postbox: Option<bool>,
+    pub usb_a: Option<bool>,
+    pub usb_c: Option<bool>,
+    pub other: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Assistance {
+    pub personal: Option<bool>,
+    pub boarding: Option<bool>,
+    pub wheelchair: Option<bool>,
+    pub unaccompanied_minor: Option<bool>,
+    pub use_of_wheelchair: Option<bool>,
+    pub guard: Option<bool>,
+    pub information: Option<bool>,
+    pub other: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PassengerInformation {
+    pub next_stop_indication: Option<bool>,
+    pub stop_announcements: Option<bool>,
+    pub information_display: Option<bool>,
+    pub realtime_connections: Option<bool>,
+    pub audible_information: Option<bool>,
+    pub hearing_impaired_audible_information: Option<bool>,
+    pub visible_information: Option<bool>,
+    pub visually_impaired_visible_information: Option<bool>,
+    pub large_print_timetable: Option<bool>,
+    pub other: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct VariableTrain {
     pub train_type: TrainType,
     pub public_id: Option<String>,
     pub headcode: Option<String>,
-    pub service_group: Option<String>,
     pub power_type: Option<TrainPower>,
     pub timing_allocation: Option<TrainAllocation>,
     pub actual_allocation: Option<TrainAllocation>,
     pub timing_speed_m_per_s: Option<f64>,
     pub operating_characteristics: Option<OperatingCharacteristics>,
-    pub has_first_class_seats: Option<bool>,
-    pub has_second_class_seats: Option<bool>,
-    pub has_first_class_sleepers: Option<bool>,
-    pub has_second_class_sleepers: Option<bool>,
-    pub carries_vehicles: Option<bool>,
+    pub accommodation: Option<AccommodationTypesByClass>,
     pub reservations: Reservations,
     pub catering: Option<Catering>,
     pub brand: Option<String>,
     pub name: Option<String>,
+    pub line: Option<Line>,
     pub uic_code: Option<String>,
     pub operator: Option<TrainOperator>,
     pub wheelchair_accessible: Option<bool>,
-    pub bicycles_allowed: Option<bool>,
+    pub toilets: Option<Toilets>,
+    pub luggage: Option<Luggage>,
+    pub families: Option<Families>,
+    pub passenger_communications: Option<PassengerCommunications>,
+    pub assistance: Option<Assistance>,
+    pub passenger_information: Option<PassengerInformation>,
 }
 
 #[derive(Clone, Debug, Serialize)]
