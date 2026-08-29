@@ -4277,7 +4277,9 @@ impl NetexImporter {
                                     journey_part_couple.start_time_day_offset.unwrap_or(0)
                                 ).unwrap();
                             joins_to.push(association_node.clone());
-                        }
+                        };
+                        // We've found something that fits, so don't add dupes for this train ID
+                        break;
                     } else if train_locations.len() != 0
                         && journey_part_couple.to_stop_point_ref.to_stop_point_ref_ref
                         == stop_point_in_journey_pattern
@@ -4340,7 +4342,9 @@ impl NetexImporter {
                                     journey_part_couple.end_time_day_offset.unwrap_or(0)
                                 ).unwrap();
                             divides_from.push(association_node.clone());
-                        }
+                        };
+                        // We've found something that fits, so don't add dupes for this train ID
+                        break;
                     }
                 }
             }
