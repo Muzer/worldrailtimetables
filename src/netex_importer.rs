@@ -2586,6 +2586,7 @@ pub struct NetexImporter {
     line_by_id: HashMap<String, NetexLine>,
     operator_by_id: HashMap<String, Operator>,
     scheduled_stop_point_by_id: HashMap<String, ScheduledStopPoint>,
+    service_journey_ids_by_train_number_id: HashMap<String, HashSet<String>>,
     service_journey_pattern_by_id: HashMap<String, ServiceJourneyPattern>,
     stop_place_by_id: HashMap<String, StopPlace>,
     train_number_by_id: HashMap<String, TrainNumber>,
@@ -2605,6 +2606,7 @@ impl NetexImporter {
             line_by_id: HashMap::new(),
             operator_by_id: HashMap::new(),
             scheduled_stop_point_by_id: HashMap::new(),
+            service_journey_ids_by_train_number_id: HashMap::new(),
             service_journey_pattern_by_id: HashMap::new(),
             stop_place_by_id: HashMap::new(),
             train_number_by_id: HashMap::new(),
@@ -2749,6 +2751,15 @@ impl NetexImporter {
             self.fill_journey_part_map(&journey_part)?;
         }
 
+        // We have to do an initial pass first to get a map of train number ID -> service journey
+        // IDs. This is because coupled trains are keyed off both train number ID and service
+        // journey ID in different places, and so without a first pass we don't know if we've
+        // already seen that train or not. No, I've no idea why it's done this way...
+        for service_journey
+            in &composite_frame.frames.timetable_frame.vehicle_journeys.service_journey {
+            self.fill_train_id_service_journey_map(&service_journey)?;
+        }
+
         // Now we can load the trains into the schedule
         for service_journey
             in &composite_frame.frames.timetable_frame.vehicle_journeys.service_journey {
@@ -2756,6 +2767,17 @@ impl NetexImporter {
         }
 
         Ok(schedule)
+    }
+
+    fn fill_train_id_service_journey_map(
+        &mut self, service_journey: &ServiceJourney
+    ) -> Result<(), NetexError> {
+        let train_number_ref = &service_journey.train_numbers.train_number_ref;
+        self.service_journey_ids_by_train_number_id
+            .entry(train_number_ref.train_number_ref_ref.clone())
+            .or_insert(HashSet::new())
+            .insert(service_journey.id.clone());
+        Ok(())
     }
 
     fn fill_journey_part_map(&mut self, journey_part: &JourneyPart) -> Result<(), NetexError> {
@@ -4215,136 +4237,177 @@ impl NetexImporter {
                             }
                         ),
                     };
-                    if train_locations.len() != 0
-                        && journey_part_couple.from_stop_point_ref.from_stop_point_ref_ref
-                        == stop_point_in_journey_pattern
-                            .scheduled_stop_point_ref
-                            .scheduled_stop_point_ref_ref {
-                        // Get the main part
-                        let main_journey_part = match self.journey_part_by_id.get(
-                            &journey_part_couple.main_part_ref.main_part_ref_ref
-                        ) {
-                            Some(journey_part) => journey_part,
-                            None => return Err(
-                                NetexError {
-                                    error_type: NetexErrorType::JourneyPartNotFound(
-                                        journey_part_couple.main_part_ref.main_part_ref_ref.clone()
-                                    )
+
+                    // Get the main part
+                    let main_journey_part = match self.journey_part_by_id.get(
+                        &journey_part_couple.main_part_ref.main_part_ref_ref
+                    ) {
+                        Some(journey_part) => journey_part,
+                        None => return Err(
+                            NetexError {
+                                error_type: NetexErrorType::JourneyPartNotFound(
+                                    journey_part_couple.main_part_ref.main_part_ref_ref.clone()
+                                )
+                            }
+                        ),
+                    };
+                    // We need to find the other train via the JourneyPartCouple to figure out the
+                    // two train number refs involved in this. Don't ask me why this is how it's
+                    // keyed, but it is. This is also needed to calculate the day offset in the
+                    // event that we are the main train.
+                    for journey_part_ref
+                        in &journey_part_couple.journey_parts.journey_part_ref {
+                        if journey_part_ref.journey_part_ref_ref != main_journey_part.id {
+                            let other_journey_part = match self.journey_part_by_id.get(
+                                &journey_part_ref.journey_part_ref_ref
+                            ) {
+                                Some(journey_part) => journey_part,
+                                None => return Err(
+                                    NetexError {
+                                        error_type: NetexErrorType::JourneyPartNotFound(
+                                            journey_part_ref.journey_part_ref_ref.clone()
+                                        )
+                                    }
+                                ),
+                            };
+
+                            // Continue inside this loop although I'm not sure if it can ever have
+                            // more than two entries.
+                            if self.service_journey_ids_by_train_number_id.get(
+                                &main_journey_part.train_number_ref.train_number_ref_ref
+                            ).unwrap_or(&HashSet::new()).contains(train_id) {
+                                // We are the main part — sanity check that the parent journey ref
+                                // also matches
+                                if main_journey_part.parent_journey_ref.parent_journey_ref_ref
+                                    != train_id {
+                                    continue;
+                                };
+
+                                // Now we check the other part matches the train we are searching
+                                if !self.service_journey_ids_by_train_number_id.get(
+                                    &other_journey_part.train_number_ref.train_number_ref_ref
+                                ).unwrap_or(&HashSet::new()).contains(maybe_coupled_train) {
+                                    continue;
                                 }
-                            ),
-                        };
-                        if main_journey_part.parent_journey_ref.parent_journey_ref_ref
-                            == train_id {
-                            // OK, we are the main train, so our life is now hard. We need to find
-                            // the other train via the JourneyPartCouple to figure out the day
-                            // offset.
-                            for journey_part_ref
-                                in &journey_part_couple.journey_parts.journey_part_ref {
-                                if journey_part_ref.journey_part_ref_ref != main_journey_part.id {
-                                    let other_journey_part = match self.journey_part_by_id.get(
-                                        &journey_part_ref.journey_part_ref_ref
-                                    ) {
-                                        Some(journey_part) => journey_part,
-                                        None => return Err(
-                                            NetexError {
-                                                error_type: NetexErrorType::JourneyPartNotFound(
-                                                    journey_part_ref.journey_part_ref_ref.clone()
-                                                )
-                                            }
-                                        ),
-                                    };
-                                    // OK now we have the other journey part (let's not care if
-                                    // there's more than 1 for now, TODO) we can set the offset
-                                    // finally...
+
+                                // OK, now we know:
+                                // 1) We are the main journey part
+                                // 2) The other train we are searching matches up
+                                // We are now ready to associate the two trains.
+
+                                // We use the backwards forms of the association if _we_ are the
+                                // main part.
+
+                                // You might naively think we could prevent it showing spurious
+                                // "joins to" and "divides from" messages at the start/end of
+                                // journeys respectively. Unfortunately if we want to indicate
+                                // trains that detach and terminate (for instance), we can't, as we
+                                // don't know the other train's stopping pattern at this point. So
+                                // just let those messages happen.
+                                if journey_part_couple.from_stop_point_ref.from_stop_point_ref_ref
+                                    == stop_point_in_journey_pattern
+                                        .scheduled_stop_point_ref
+                                        .scheduled_stop_point_ref_ref {
+                                    // If only WE have a positive value here, that means that OUR
+                                    // train started the PREVIOUS day, so the day diff will be
+                                    // POSITIVE to get to the NEXT day that the associated part will
+                                    // be running on. If only the OTHER TRAIN has a positive value
+                                    // here, that means that THE OTHER TRAIN started on the PREVIOUS
+                                    // day, so the day diff will be NEGATIVE to get to the PREVIOUS
+                                    // day that the associated part will be running on.
                                     association_node.day_diff =
                                         i8::try_from(
-                                            journey_part_couple.start_time_day_offset.unwrap_or(0)
+                                            main_journey_part.start_time_day_offset.unwrap_or(0)
                                         ).unwrap()
                                         - i8::try_from(
                                             other_journey_part.start_time_day_offset.unwrap_or(0)
                                         ).unwrap();
-                                }
-                            }
-                            is_joined_to_by.push(association_node.clone());
-                        } else {
-                            // We are the other train, so we can shortcut and use our current train
-                            // rather than having to find both journey parts
-                            association_node.day_diff =
-                                i8::try_from(
-                                    timetabled_passing_time.departure_day_offset.unwrap_or(0)
-                                ).unwrap()
-                                - i8::try_from(
-                                    journey_part_couple.start_time_day_offset.unwrap_or(0)
-                                ).unwrap();
-                            joins_to.push(association_node.clone());
-                        };
-                        // We've found something that fits, so don't add dupes for this train ID
-                        break;
-                    } else if train_locations.len() != 0
-                        && journey_part_couple.to_stop_point_ref.to_stop_point_ref_ref
-                        == stop_point_in_journey_pattern
-                            .scheduled_stop_point_ref
-                            .scheduled_stop_point_ref_ref {
-                        // Get the main part
-                        let main_journey_part = match self.journey_part_by_id.get(
-                            &journey_part_couple.main_part_ref.main_part_ref_ref
-                        ) {
-                            Some(journey_part) => journey_part,
-                            None => return Err(
-                                NetexError {
-                                    error_type: NetexErrorType::JourneyPartNotFound(
-                                        journey_part_couple.main_part_ref.main_part_ref_ref.clone()
-                                    )
-                                }
-                            ),
-                        };
-                        if main_journey_part.parent_journey_ref.parent_journey_ref_ref
-                            == train_id {
-                            // OK, we are the main train, so our life is now hard. We need to find
-                            // the other train via the JourneyPartCouple to figure out the day
-                            // offset.
-                            for journey_part_ref
-                                in &journey_part_couple.journey_parts.journey_part_ref {
-                                if journey_part_ref.journey_part_ref_ref != main_journey_part.id {
-                                    let other_journey_part = match self.journey_part_by_id.get(
-                                        &journey_part_ref.journey_part_ref_ref
-                                    ) {
-                                        Some(journey_part) => journey_part,
-                                        None => return Err(
-                                            NetexError {
-                                                error_type: NetexErrorType::JourneyPartNotFound(
-                                                    journey_part_ref.journey_part_ref_ref.clone()
-                                                )
-                                            }
-                                        ),
-                                    };
-                                    // OK now we have the other journey part (let's not care if
-                                    // there's more than 1 for now, TODO) we can set the offset
-                                    // finally...
+
+                                    is_joined_to_by.push(association_node.clone());
+                                } else
+                                    if journey_part_couple.to_stop_point_ref.to_stop_point_ref_ref
+                                    == stop_point_in_journey_pattern
+                                        .scheduled_stop_point_ref
+                                        .scheduled_stop_point_ref_ref {
                                     association_node.day_diff =
                                         i8::try_from(
-                                            journey_part_couple.end_time_day_offset.unwrap_or(0)
+                                            main_journey_part.end_time_day_offset.unwrap_or(0)
                                         ).unwrap()
                                         - i8::try_from(
                                             other_journey_part.end_time_day_offset.unwrap_or(0)
                                         ).unwrap();
+
+                                    divides_to_form.push(association_node.clone());
+                                }
+                            } else if self.service_journey_ids_by_train_number_id.get(
+                                &other_journey_part.train_number_ref.train_number_ref_ref
+                            ).unwrap_or(&HashSet::new()).contains(train_id) {
+                                // We are the other part — now we check the main part matches the
+                                // train we are searching for
+                                if !self.service_journey_ids_by_train_number_id.get(
+                                    &main_journey_part.train_number_ref.train_number_ref_ref
+                                ).unwrap_or(&HashSet::new()).contains(maybe_coupled_train) {
+                                    continue;
+                                }
+
+                                // Sanity check that the main journey part's parent journey ref also
+                                // matches the train we are searching for
+                                if main_journey_part.parent_journey_ref.parent_journey_ref_ref
+                                    != *maybe_coupled_train {
+                                    continue;
+                                };
+
+                                // OK, now we know:
+                                // 1) We are the other journey part
+                                // 2) The other train we are searching matches up
+                                // We are now ready to associate the two trains.
+
+                                // If we are the other part, we use the forwards forms of the
+                                // association.
+
+                                // You might naively think we could prevent it showing spurious
+                                // "joins to" and "divides from" messages at the start/end of
+                                // journeys respectively. Unfortunately if we want to indicate
+                                // trains that detach and terminate (for instance), we can't, as we
+                                // don't know the other train's stopping pattern at this point. So
+                                // just let those messages happen.
+                                if journey_part_couple.from_stop_point_ref.from_stop_point_ref_ref
+                                    == stop_point_in_journey_pattern
+                                        .scheduled_stop_point_ref
+                                        .scheduled_stop_point_ref_ref {
+                                    // If only WE have a positive value here, that means that OUR
+                                    // train started the PREVIOUS day, so the day diff will be
+                                    // POSITIVE to get to the NEXT day that the associated part will
+                                    // be running on. If only the OTHER TRAIN has a positive value
+                                    // here, that means that THE OTHER TRAIN started on the PREVIOUS
+                                    // day, so the day diff will be NEGATIVE to get to the PREVIOUS
+                                    // day that the associated part will be running on.
+                                    association_node.day_diff =
+                                        i8::try_from(
+                                            other_journey_part.start_time_day_offset.unwrap_or(0)
+                                        ).unwrap()
+                                        - i8::try_from(
+                                            main_journey_part.start_time_day_offset.unwrap_or(0)
+                                        ).unwrap();
+
+                                    joins_to.push(association_node.clone());
+                                } else
+                                    if journey_part_couple.to_stop_point_ref.to_stop_point_ref_ref
+                                    == stop_point_in_journey_pattern
+                                        .scheduled_stop_point_ref
+                                        .scheduled_stop_point_ref_ref {
+                                    association_node.day_diff =
+                                        i8::try_from(
+                                            other_journey_part.end_time_day_offset.unwrap_or(0)
+                                        ).unwrap()
+                                        - i8::try_from(
+                                            main_journey_part.end_time_day_offset.unwrap_or(0)
+                                        ).unwrap();
+
+                                    divides_from.push(association_node.clone());
                                 }
                             }
-                            divides_to_form.push(association_node.clone());
-                        } else {
-                            // We are the other train, so we can shortcut and use our current train
-                            // rather than having to find both journey parts
-                            association_node.day_diff =
-                                i8::try_from(
-                                    timetabled_passing_time.arrival_day_offset.unwrap_or(0)
-                                ).unwrap()
-                                - i8::try_from(
-                                    journey_part_couple.end_time_day_offset.unwrap_or(0)
-                                ).unwrap();
-                            divides_from.push(association_node.clone());
-                        };
-                        // We've found something that fits, so don't add dupes for this train ID
-                        break;
+                        }
                     }
                 }
             }

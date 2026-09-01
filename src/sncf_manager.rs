@@ -100,6 +100,26 @@ impl Manager for SncfManager {
             "SNCF Voyageurs TGV/Intercités/TER",
             "opendatasoft",
         );
+        // TODO SNCF Transilien (hopefully don't need the whole Ile de France dataset)
+        // https://eu.ftp.opendatasoft.com/sncf/gtfs/transilien-netexfr.zip 
+        // TODO pausing on this because 1) it doesn't use ordinary frames, 2) multiple files per zip
+        // TODO Transdev Rail Sud Intermétropole (GTFS seems better here, NeTEx available but
+        // outdated and poor quality)
+        // https://www.data.gouv.fr/fr/datasets/r/30782be6-90aa-40bb-940a-cb881a95ad26
+        // TODO Renfe AVE international operations (GTFS only)
+        // https://ssl.renfe.com/gtransit/Fichero_AV_INT/Renfe_AVE_Int.zip
+        // TODO E* (GTFS)
+        // https://integration-storage.dm.eurostar.com/gtfs-prod/gtfs_static_commercial_v2.zip
+        // TODO Trenitalia France (GTFS)
+        // https://thello.axelor.com/public/gtfs/gtfs.zip
+        // Fluo is included in the SNCF Voyageurs set
+        // Zou is also available separately, TODO see if it's worthwhile getting, especially instead
+        // of Transdev above maybe?
+        // https://proxy-data.zou.maregionsud.fr/NeTEx/NETEX_SIBR_zou_ferre_datasud.zip
+        // Breizhgo TER also available separately, though should be the same as SNCF TER in theory
+        // https://www.korrigo.bzh/ftp/OPENDATA/BREIZHGO_TER.netex.zip
+        // TODO Corsica
+        // https://www.data.gouv.fr/api/1/datasets/r/69c3db8a-a5fd-471f-b59f-46b9faded381
         let mut netex_importer = NetexImporter::new();
 
         self.reload_netex(&sncf_fetcher, &mut netex_importer).await?;
