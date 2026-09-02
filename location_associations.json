@@ -1,0 +1,430 @@
+[
+  {
+    "associated_locations": [
+      {
+        "namespace": "gbnr",
+        "public_id": "STP"
+      },
+      {
+        "namespace": "zzes",
+        "public_id": "7015400"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "frsv",
+        "public_id": "87271007"
+      },
+      {
+        "namespace": "zzes",
+        "public_id": "8727100"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "PBN"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "frsv",
+        "public_id": "87223263"
+      },
+      {
+        "namespace": "zzes",
+        "public_id": "8722326"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "LIU"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "frsv",
+        "public_id": "87111849"
+      },
+      {
+        "namespace": "zzes",
+        "public_id": "8711184"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "MCK"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "frsv",
+        "public_id": "87271494"
+      },
+      {
+        "namespace": "zzes",
+        "public_id": "8727149"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "zzes",
+        "public_id": "8400058"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "AMS"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "zzes",
+        "public_id": "8400561"
+      },
+      {
+        "namespace": "gbnr",
+        "id": "AMSTSCH"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "zzes",
+        "public_id": "8400530"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "ROT"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "frsv",
+        "public_id": "88140010"
+      },
+      {
+        "namespace": "zzes",
+        "public_id": "8814001"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "BXS"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "zzes",
+        "public_id": "8841004"
+      },
+      {
+        "namespace": "gbnr",
+        "id": "LIEGE"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "zzes",
+        "public_id": "8015345"
+      },
+      {
+        "namespace": "gbnr",
+        "id": "AACHEN"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "zzes",
+        "public_id": "8010053"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "DTM"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "zzes",
+        "public_id": "8010316"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "DUI"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "zzes",
+        "public_id": "8008094"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "DUS"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "zzes",
+        "public_id": "8010184"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "ESS"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "zzes",
+        "public_id": "8015458"
+      },
+      {
+        "namespace": "gbnr",
+        "id": "KOLNHBF"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "gbnr",
+        "public_id": "BFC"
+      },
+      {
+        "namespace": "gbni",
+        "id": "CL"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "gbnr",
+        "public_id": "LDR"
+      },
+      {
+        "namespace": "gbni",
+        "id": "LY"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "gbni",
+        "id": "GC"
+      },
+      {
+        "namespace": "ieir",
+        "id": "7020IR2162"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "gbni",
+        "id": "PD"
+      },
+      {
+        "namespace": "ieir",
+        "id": "7040IR0045"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "gbni",
+        "id": "NY"
+      },
+      {
+        "namespace": "ieir",
+        "id": "7040IR0042"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "gbni",
+        "id": "PH"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "PTS"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "gbni",
+        "id": "LR"
+      },
+      {
+        "namespace": "gbnr",
+        "id": "LARNEHB"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "gbni",
+        "id": "DK"
+      },
+      {
+        "namespace": "ieir",
+        "id": "8300IR0075"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "gbni",
+        "id": "DG"
+      },
+      {
+        "namespace": "ieir",
+        "id": "8300IR0074"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "gbni",
+        "id": "DN"
+      },
+      {
+        "namespace": "ieir",
+        "id": "8220IR0007"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "DCL"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "ieir",
+        "id": "8220IR0132"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "DHT"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "ieir",
+        "id": "8340IR0113"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "RSB"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "ieir",
+        "id": "8340IR0112"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "WXF"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "ieir",
+        "id": "8370IR0126"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "COK"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "ieir",
+        "id": "8390IR0052"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "TRL"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "ieir",
+        "id": "8440IR0106"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "WFD"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "ieir",
+        "id": "8430IR0100"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "LJN"
+      }
+    ]
+  },
+  {
+    "associated_locations": [
+      {
+        "namespace": "ieir",
+        "id": "8400IR0127"
+      },
+      {
+        "namespace": "gbnr",
+        "public_id": "LRK"
+      }
+    ]
+  }
+]

@@ -766,6 +766,10 @@ impl GtfsImporter {
 impl SlowGtfsImporter for GtfsImporter {
     async fn overlay(&mut self, gtfs: Gtfs, mut schedule: Schedule) -> Result<Schedule, Error> {
         schedule = block_in_place(move || self.overlay_worker(gtfs, schedule))?;
+        println!(
+            "Successfully loaded {} trains from GTFS",
+            schedule.trains.len(),
+        );
         Ok(schedule)
     }
 }

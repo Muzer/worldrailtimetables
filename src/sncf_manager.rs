@@ -14,8 +14,6 @@ use chrono_tz::Europe::Paris;
 use tokio::time;
 use tokio::time::Duration;
 
-use serde::Deserialize;
-
 use async_trait::async_trait;
 
 use std::sync::Arc;
@@ -44,15 +42,15 @@ impl SncfManager {
             let mut transaction = self.schedule_manager.transactional_write().await;
 
             let mut schedule = Schedule::new(
-                "frsn".to_string(),
-                "France — SNCF Réseau".to_string(),
+                "frsv".to_string(),
+                "France — SNCF Voyageurs".to_string(),
             );
 
             let mut reader = sncf_fetcher.fetch().await?;
             schedule = netex_importer.overlay(&mut reader, schedule).await?;
 
             // always replace the schedule
-            transaction.insert("frsn".to_string(), schedule);
+            transaction.insert("frsv".to_string(), schedule);
             transaction.commit();
         }
 
@@ -97,7 +95,6 @@ impl Manager for SncfManager {
         // TODO multiple of these for each region
         let sncf_fetcher = SncfFetcher::new(
             "https://eu.ftp.opendatasoft.com/sncf/plandata/export-opendata-sncf-netex.zip",
-            "SNCF Voyageurs TGV/Intercités/TER",
             "opendatasoft",
         );
         // TODO SNCF Transilien (hopefully don't need the whole Ile de France dataset)

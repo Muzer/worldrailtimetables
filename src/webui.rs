@@ -149,7 +149,7 @@ fn get_train_instance(trains: &Vec<Train>, date: NaiveDate) -> (Option<Train>, b
     return (final_train, cancelled, modified);
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
 enum AssociationCategory {
     Join,
     Divide,
@@ -157,9 +157,10 @@ enum AssociationCategory {
     IsJoinedToBy,
     DividesFrom,
     FormsFrom,
+    Duplicate,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 struct BasicAssocTrainDetails {
     id: String,
     public_id: Option<String>,
@@ -278,18 +279,100 @@ fn train(
     date: NaiveDateRocket,
     schedule_manager: &State<Arc<ScheduleManager>>,
 ) -> Option<Template> {
-    let (trains, locations, schedule_desc) = {
-        let schedule_manager = schedule_manager.read();
-        let schedule = &schedule_manager.get(namespace)?;
-        let train = schedule.trains.get(train_id)?;
+    let date = date.0;
+
+    let mut locations_by_namespace = HashMap::new();
+
+    let (trains, schedule_desc, duplicate_trains) = {
+        let schedule_manager_unlocked = schedule_manager.read();
+        let schedule = &schedule_manager_unlocked.get(namespace)?;
+        let trains = schedule.trains.get(train_id)?;
+        let mut duplicate_trains_out = HashSet::new();
+        for train in trains {
+            for (duplicate_train_id, duplicate_namespace)
+                in schedule_manager.get_duplicate_trains(namespace, train) {
+                let duplicate_schedule = &schedule_manager_unlocked.get(&duplicate_namespace);
+                let duplicate_schedule = match duplicate_schedule {
+                    Some(duplicate_schedule) => duplicate_schedule,
+                    None => continue,
+                };
+                let duplicate_trains = duplicate_schedule.trains.get(&duplicate_train_id);
+                let duplicate_trains = match duplicate_trains {
+                    Some(duplicate_trains) => duplicate_trains,
+                    None => continue,
+                };
+                let (duplicate_final_train, _, _) = get_train_instance(&duplicate_trains, date);
+                match duplicate_final_train {
+                    Some(duplicate_train) => {
+                        locations_by_namespace
+                            .entry(duplicate_namespace.clone())
+                            .or_insert(HashMap::new())
+                            .insert(
+                                duplicate_train.route.first().unwrap().id.clone(),
+                                duplicate_schedule.locations.get(
+                                    &duplicate_train.route.first().unwrap().id.clone()
+                                )?.clone()
+                            );
+                        locations_by_namespace
+                            .entry(duplicate_namespace.clone())
+                            .or_insert(HashMap::new())
+                            .insert(
+                                duplicate_train.route.last().unwrap().id.clone(),
+                                duplicate_schedule.locations.get(
+                                    &duplicate_train.route.last().unwrap().id.clone()
+                                )?.clone()
+                            );
+                        duplicate_trains_out.insert(BasicAssocTrainDetails {
+                            id: duplicate_train.id.clone(),
+                            public_id: duplicate_train.variable_train.public_id.clone(),
+                            origin_id: duplicate_train.route.first().unwrap().id.clone(),
+                            destination_id: duplicate_train.route.last().unwrap().id.clone(),
+                            date: date,
+                            namespace: duplicate_namespace.clone(),
+                            is_public: true,
+                            category: AssociationCategory::Duplicate,
+                            name: duplicate_train.variable_train.name.clone(),
+                            dep_time: if duplicate_train.route[0].public_dep.is_none() {
+                                convert_tz(
+                                    &date,
+                                    &Some(0),
+                                    &duplicate_train.route[0].working_dep,
+                                    &duplicate_train.route[0].timing_tz,
+                                    &duplicate_schedule
+                                        .locations
+                                        .get(&duplicate_train.route[0].id)
+                                        .unwrap()
+                                        .timezone,
+                                )
+                                .ok()?
+                                .unwrap()
+                            } else {
+                                convert_tz(
+                                    &date,
+                                    &Some(0),
+                                    &duplicate_train.route[0].public_dep,
+                                    &duplicate_train.route[0].timing_tz,
+                                    &duplicate_schedule
+                                        .locations
+                                        .get(&duplicate_train.route[0].id)
+                                        .unwrap()
+                                        .timezone,
+                                )
+                                .ok()?
+                                .unwrap()
+                            },
+                        });
+                    },
+                    None => (),
+                }
+            }
+        }
         (
-            train.clone(),
-            schedule.locations.clone(),
+            trains.clone(),
             schedule.description.clone(),
+            duplicate_trains_out,
         )
     };
-
-    let date = date.0;
 
     let (final_train, cancelled, modified) = get_train_instance(&trains, date);
 
@@ -303,6 +386,16 @@ fn train(
         AssociationCategory,
     )> = Vec::new();
     for location in &train.route {
+        {
+            let schedule_manager_unlocked = schedule_manager.read();
+            let schedule = &schedule_manager_unlocked.get(namespace)?;
+            locations_by_namespace
+                .entry(namespace.to_string())
+                .or_insert(HashMap::new())
+                .insert(
+                    location.id.clone(), schedule.locations.get(&location.id)?.clone()
+                );
+        };
         add_associated_trains(
             &mut associations,
             &location.divides_to_form,
@@ -379,42 +472,64 @@ fn train(
         // No association? No problem, must just not be running this day...
         match train {
             Some(train) => {
-                assoc_train_details
-                    .entry(location_id.clone() + "|" + 
-                        &location_suffix.as_ref().unwrap_or(&"".to_string()))
-                    .or_insert(vec![])
-                    .push(BasicAssocTrainDetails {
-                        id: train.id.clone(),
-                        public_id: train.variable_train.public_id.clone(),
-                        origin_id: train.route.first().unwrap().id.clone(),
-                        destination_id: train.route.last().unwrap().id.clone(),
-                        date: other_date.clone(),
-                        namespace: namespace.to_string(),
-                        is_public: *is_public,
-                        category: *category,
-                        name: train.variable_train.name.clone(),
-                        dep_time: if train.route[0].public_dep.is_none() {
-                            convert_tz(
-                                &other_date,
-                                &Some(0),
-                                &train.route[0].working_dep,
-                                &train.route[0].timing_tz,
-                                &locations.get(location_id).unwrap().timezone,
-                            )
-                            .ok()?
-                            .unwrap()
-                        } else {
-                            convert_tz(
-                                &other_date,
-                                &Some(0),
-                                &train.route[0].public_dep,
-                                &train.route[0].timing_tz,
-                                &locations.get(location_id).unwrap().timezone,
-                            )
-                            .ok()?
-                            .unwrap()
-                        },
-                    });
+                {
+                    let schedule_manager = schedule_manager.read();
+                    let schedule = schedule_manager.get(namespace)?;
+                    locations_by_namespace
+                        .entry(namespace.to_string())
+                        .or_insert(HashMap::new())
+                        .insert(
+                            train.route.first().unwrap().id.clone(),
+                            schedule.locations.get(
+                                &train.route.first().unwrap().id.clone()
+                            )?.clone()
+                        );
+                    locations_by_namespace
+                        .entry(namespace.to_string())
+                        .or_insert(HashMap::new())
+                        .insert(
+                            train.route.last().unwrap().id.clone(),
+                            schedule.locations.get(
+                                &train.route.last().unwrap().id.clone()
+                            )?.clone()
+                        );
+                    assoc_train_details
+                        .entry(location_id.clone() + "|" +
+                            &location_suffix.as_ref().unwrap_or(&"".to_string()))
+                        .or_insert(vec![])
+                        .push(BasicAssocTrainDetails {
+                            id: train.id.clone(),
+                            public_id: train.variable_train.public_id.clone(),
+                            origin_id: train.route.first().unwrap().id.clone(),
+                            destination_id: train.route.last().unwrap().id.clone(),
+                            date: other_date.clone(),
+                            namespace: namespace.to_string(),
+                            is_public: *is_public,
+                            category: *category,
+                            name: train.variable_train.name.clone(),
+                            dep_time: if train.route[0].public_dep.is_none() {
+                                convert_tz(
+                                    &other_date,
+                                    &Some(0),
+                                    &train.route[0].working_dep,
+                                    &train.route[0].timing_tz,
+                                    &schedule.locations.get(location_id).unwrap().timezone,
+                                )
+                                .ok()?
+                                .unwrap()
+                            } else {
+                                convert_tz(
+                                    &other_date,
+                                    &Some(0),
+                                    &train.route[0].public_dep,
+                                    &train.route[0].timing_tz,
+                                    &schedule.locations.get(location_id).unwrap().timezone,
+                                )
+                                .ok()?
+                                .unwrap()
+                            },
+                        });
+                };
             },
             None => (),
         };
@@ -433,12 +548,14 @@ fn train(
 
     // now convert all the timezones of all the stops
     for location in train.route.iter_mut() {
+        let schedule_manager = schedule_manager.read();
+        let schedule = schedule_manager.get(namespace)?;
         location.working_arr = convert_tz(
             &date,
             &location.working_arr_day,
             &location.working_arr,
             &location.timing_tz,
-            &locations.get(&location.id).unwrap().timezone,
+            &schedule.locations.get(&location.id).unwrap().timezone,
         )
         .ok()?;
         location.working_dep = convert_tz(
@@ -446,7 +563,7 @@ fn train(
             &location.working_dep_day,
             &location.working_dep,
             &location.timing_tz,
-            &locations.get(&location.id).unwrap().timezone,
+            &schedule.locations.get(&location.id).unwrap().timezone,
         )
         .ok()?;
         location.working_pass = convert_tz(
@@ -454,7 +571,7 @@ fn train(
             &location.working_pass_day,
             &location.working_pass,
             &location.timing_tz,
-            &locations.get(&location.id).unwrap().timezone,
+            &schedule.locations.get(&location.id).unwrap().timezone,
         )
         .ok()?;
         location.public_arr = convert_tz(
@@ -462,7 +579,7 @@ fn train(
             &location.public_arr_day,
             &location.public_arr,
             &location.timing_tz,
-            &locations.get(&location.id).unwrap().timezone,
+            &schedule.locations.get(&location.id).unwrap().timezone,
         )
         .ok()?;
         location.public_dep = convert_tz(
@@ -470,20 +587,21 @@ fn train(
             &location.public_dep_day,
             &location.public_dep,
             &location.timing_tz,
-            &locations.get(&location.id).unwrap().timezone,
+            &schedule.locations.get(&location.id).unwrap().timezone,
         )
         .ok()?;
     }
 
     let context = context! {
         train,
-        locations,
+        locations_by_namespace,
         cancelled,
         modified,
         namespace: namespace.to_string(),
         dates,
         schedule_desc,
         assoc_train_details,
+        duplicate_trains,
     };
 
     Some(Template::render("train", &context))
@@ -517,6 +635,7 @@ struct BasicTrainForLocation {
 
 fn get_origins(
     i: usize,
+    length: usize,
     location: &TrainLocation,
     schedule_manager: Arc<ScheduleManager>,
     date: NaiveDate,
@@ -526,6 +645,8 @@ fn get_origins(
 
     if i == 0 {
         let mut found_origin = false;
+        // This is irrelevant for European-style divides so we only need to check the asymmetric
+        // version
         for assoc in &location.divides_from {
             let final_assoc = match get_association(assoc, date) {
                 Some(x) => x,
@@ -567,6 +688,7 @@ fn get_origins(
 
                 origins.append(&mut get_origins(
                     i,
+                    train.as_ref().unwrap().route.len(),
                     other_location,
                     schedule_manager.clone(),
                     other_date,
@@ -579,7 +701,17 @@ fn get_origins(
         }
     }
 
-    for assoc in &location.joins_to {
+    let joins_to_check = if i == length - 1 {
+        location.joins_to.clone()
+    } else {
+        // If we are not the last location, this is likely a European-style join, in which case we
+        // need to treat it symmetrically
+        let mut joins_to_check = location.joins_to.clone();
+        joins_to_check.append(&mut location.is_joined_to_by.clone());
+        joins_to_check
+    };
+
+    for assoc in joins_to_check {
         let final_assoc = match get_association(&assoc, date) {
             Some(x) => x,
             None => continue,
@@ -618,6 +750,7 @@ fn get_origins(
 
             origins.append(&mut get_origins(
                 i,
+                train.as_ref().unwrap().route.len(),
                 other_location,
                 schedule_manager.clone(),
                 other_date,
@@ -641,6 +774,8 @@ fn get_destinations(
 
     if i == length - 1 {
         let mut found_destination = false;
+        // This is irrelevant for European-style joins so we only need to check the asymmetric
+        // version
         for assoc in &location.is_joined_to_by {
             let final_assoc = match get_association(assoc, date) {
                 Some(x) => x,
@@ -687,7 +822,7 @@ fn get_destinations(
                     continue;
                 }
 
-                destinations.append(&mut get_destinations(
+                destinations.splice(0..0, get_destinations(
                     i,
                     train.as_ref().unwrap().route.len(),
                     other_location,
@@ -698,11 +833,21 @@ fn get_destinations(
             }
         }
         if !found_destination {
-            destinations.push(location.id.clone());
+            destinations.insert(0, location.id.clone());
         }
     }
 
-    for assoc in &location.divides_to_form {
+    let divides_to_check = if i == 0 {
+        location.divides_to_form.clone()
+    } else {
+        // If we are not the first location, this is likely a European-style divide, in which case
+        // we need to treat it symmetrically
+        let mut divides_to_check = location.divides_to_form.clone();
+        divides_to_check.append(&mut location.divides_from.clone());
+        divides_to_check
+    };
+
+    for assoc in &divides_to_check {
         let final_assoc = match get_association(assoc, date) {
             Some(x) => x,
             None => continue,
@@ -745,7 +890,7 @@ fn get_destinations(
                 continue;
             }
 
-            destinations.append(&mut get_destinations(
+            destinations.splice(0..0, get_destinations(
                 i,
                 train.as_ref().unwrap().route.len(),
                 other_location,
@@ -761,35 +906,81 @@ fn get_destinations(
 
 fn location_line_up(
     namespace: &str,
-    location_ids: &HashSet<String>,
+    location_ids: &HashSet<(String, String)>,
     start_datetime: NaiveDateTime,
     end_datetime: NaiveDateTime,
-    from_station: Option<HashSet<String>>,
-    to_station: Option<HashSet<String>>,
+    from_station: Option<HashSet<(String, String)>>,
+    to_station: Option<HashSet<(String, String)>>,
     schedule_manager: Arc<ScheduleManager>,
 ) -> Option<Template> {
-    let (trains, locations) = {
-        let schedule_manager = schedule_manager.read();
-        let schedule = &schedule_manager.get(namespace)?;
+    let (trains, mut locations_by_namespace) = {
+        let schedule_manager_unlocked = schedule_manager.read();
+        let schedule = &schedule_manager_unlocked.get(namespace)?;
         let mut trains = vec![];
-        for location_id in location_ids {
-            if !schedule.locations.contains_key(location_id) {
-                return None;
-            }
-            for train_id in schedule
-                .trains_indexed_by_location
-                .get(location_id)
-                .unwrap_or(&HashSet::new())
-            {
-                let train = schedule.trains.get(train_id)?;
-                trains.push(train.clone());
+        let mut locations_by_namespace = HashMap::new();
+        for (location_id, location_namespace) in location_ids {
+            if location_namespace != namespace {
+                let location_schedule = &schedule_manager_unlocked.get(location_namespace);
+                let location_schedule = match location_schedule {
+                    Some(location_schedule) => location_schedule,
+                    None => continue,
+                };
+                if !location_schedule.locations.contains_key(location_id) {
+                    return None;
+                }
+                for train_id in location_schedule
+                    .trains_indexed_by_location
+                    .get(location_id)
+                    .unwrap_or(&HashSet::new())
+                {
+                    let train = location_schedule.trains.get(train_id)?;
+                    // OK, we have a train, but now we want to check if it has a duplicate in the
+                    // current namespace. We prefer to show trains in the current namespace over an
+                    // alternative, and we hide duplicates.
+                    if train
+                        .iter()
+                        .map(
+                            |train| schedule_manager
+                                .get_duplicate_trains(location_namespace, train)
+                                .iter()
+                                .any(|(_, duplicate_namespace)| duplicate_namespace == namespace)
+                        )
+                        .any(|x| x) {
+                        continue;
+                    };
+                    trains.push((train.clone(), location_namespace.clone()));
+                }
+                locations_by_namespace
+                    .entry(location_namespace.clone())
+                    .or_insert(HashMap::new())
+                    .insert(
+                        location_id.clone(), location_schedule.locations.get(location_id)?.clone()
+                    );
+            } else {
+                if !schedule.locations.contains_key(location_id) {
+                    return None;
+                }
+                for train_id in schedule
+                    .trains_indexed_by_location
+                    .get(location_id)
+                    .unwrap_or(&HashSet::new())
+                {
+                    let train = schedule.trains.get(train_id)?;
+                    trains.push((train.clone(), location_namespace.clone()));
+                }
+                locations_by_namespace
+                    .entry(location_namespace.clone())
+                    .or_insert(HashMap::new())
+                    .insert(
+                        location_id.clone(), schedule.locations.get(location_id)?.clone()
+                    );
             }
         }
-        (trains, schedule.locations.clone())
+        (trains, locations_by_namespace)
     };
 
     let mut actual_trains = vec![];
-    for train in trains {
+    for (train, train_namespace) in trains {
         // OK, this is somewhat hacky but I haven't yet thought of a better way.
         if train.len() == 0 {
             // deleted trains remain in map
@@ -805,6 +996,9 @@ fn location_line_up(
         let first_date = start_datetime.date().sub(Days::new(max_day_offset.into()));
         let end_date = end_datetime.date().add(Days::new(1)); // one past the end
         let mut cur_date = first_date;
+
+        let schedule_manager_unlocked = schedule_manager.read();
+        let schedule = &schedule_manager_unlocked.get(&train_namespace)?;
 
         while cur_date != end_date {
             let (train, cancelled, modified) = match get_train_instance(&train, cur_date) {
@@ -825,6 +1019,12 @@ fn location_line_up(
             let mut just_found_from = false;
             let mut cur_found_tos = 0;
             for (i, location) in train.route.iter().enumerate() {
+                locations_by_namespace
+                    .entry(train_namespace.clone())
+                    .or_insert(HashMap::new())
+                    .insert(
+                        location.id.clone(), schedule.locations.get(&location.id)?.clone()
+                    );
                 if just_found_from {
                     found_from = true;
                     just_found_from = false;
@@ -835,21 +1035,37 @@ fn location_line_up(
                 }
 
                 if !found_from {
-                    just_found_from = from_station.as_ref().unwrap().contains(&location.id);
+                    just_found_from = from_station.as_ref().unwrap().contains(
+                        &(location.id.clone(), train_namespace.clone())
+                    );
                 }
                 if to_station.is_some() {
-                    if to_station.as_ref().unwrap().contains(&location.id) {
+                    if to_station.as_ref().unwrap().contains(
+                        &(location.id.clone(), train_namespace.clone())
+                    ) {
                         cur_found_tos += 1;
                     }
                 }
 
-                origins_so_far.append(&mut get_origins(
+                let mut origins = get_origins(
                     i,
+                    train.route.len(),
                     &location,
                     schedule_manager.clone(),
                     cur_date,
-                    namespace,
-                ));
+                    &train_namespace,
+                );
+
+                for origin in &origins {
+                    locations_by_namespace
+                        .entry(train_namespace.clone())
+                        .or_insert(HashMap::new())
+                        .insert(
+                            origin.clone(), schedule.locations.get(origin)?.clone()
+                        );
+                }
+
+                origins_so_far.append(&mut origins);
 
                 let destinations = get_destinations(
                     i,
@@ -857,14 +1073,23 @@ fn location_line_up(
                     &location,
                     schedule_manager.clone(),
                     cur_date,
-                    namespace,
+                    &train_namespace,
                 );
 
-                for addition in &mut additions_for_this_train {
-                    addition.destinations.append(&mut destinations.clone());
+                for destination in &destinations {
+                    locations_by_namespace
+                        .entry(train_namespace.clone())
+                        .or_insert(HashMap::new())
+                        .insert(
+                            destination.clone(), schedule.locations.get(destination)?.clone()
+                        );
                 }
 
-                if !location_ids.contains(&location.id) {
+                for addition in &mut additions_for_this_train {
+                    addition.destinations.splice(0..0, destinations.clone());
+                }
+
+                if !location_ids.contains(&(location.id.clone(), train_namespace.clone())) {
                     continue;
                 }
 
@@ -971,7 +1196,7 @@ fn location_line_up(
                     runs_as_required: train.runs_as_required,
                     operator: variable_train.operator.clone(),
                     name: variable_train.name.clone(),
-                    namespace: namespace.to_string(),
+                    namespace: train_namespace.clone(),
                     date: cur_date,
                     is_first: i == 0,
                     is_last: i == train.route.len() - 1,
@@ -994,25 +1219,31 @@ fn location_line_up(
     }
 
     actual_trains.sort_by_key(|train| {
+        // Sort secondarily by ID as a simple tiebreaker to give a stable order
         if train.working_dep.is_some() {
-            train.working_dep
+            (train.working_dep, train.id.clone())
         } else if train.public_dep.is_some() {
-            train.public_dep
+            (train.public_dep, train.id.clone())
         } else if train.working_pass.is_some() {
-            train.working_pass
+            (train.working_pass, train.id.clone())
         } else if train.working_arr.is_some() {
-            train.working_arr
+            (train.working_arr, train.id.clone())
         } else if train.public_arr.is_some() {
-            train.public_arr
+            (train.public_arr, train.id.clone())
         } else {
-            return None;
+            (None, train.id.clone())
         }
     });
 
     let context = context! {
         actual_trains,
-        locations,
-        location_id: location_ids.iter().next().unwrap(),
+        locations_by_namespace,
+        location_id: &location_ids
+            .iter()
+            .filter(|x| x.1 == namespace)
+            .next()
+            .unwrap()
+            .0,
         namespace: namespace.to_string(),
     };
 
@@ -1057,20 +1288,100 @@ fn get_location_ids_and_first_tz(
     location_id: &str,
     namespace: &Namespace,
     schedule_manager: Arc<ScheduleManager>,
-) -> Option<(HashSet<String>, Tz)> {
-    let schedule_manager = schedule_manager.read();
-    let schedule = &schedule_manager.get(&namespace.namespace)?;
+) -> Option<(HashSet<(String, String)>, Tz)> {
+    let schedule_manager_unlocked = schedule_manager.read();
+    let schedule = &schedule_manager_unlocked.get(&namespace.namespace)?;
     match namespace.is_public_id {
         true => {
             let locations = schedule.locations_indexed_by_public_id.get(location_id)?;
             if locations.len() == 0 {
                 return None;
             }
+            let mut all_locations: HashSet<(String, String)> = locations.into_iter().map(
+                |location| (location.clone(), namespace.namespace.clone())
+            ).collect();
+            for location in locations {
+                match schedule_manager.location_associations_by_id.get(location) {
+                    Some(location_association) => {
+                        for associated_location in &location_association.associated_locations {
+                            let other_schedule = &schedule_manager_unlocked.get(
+                                &associated_location.namespace
+                            );
+                            let other_schedule = match other_schedule {
+                                Some(other_schedule) => other_schedule,
+                                None => continue,
+                            };
+                            match &associated_location.id {
+                                Some(id) => {
+                                    all_locations.insert(
+                                        (id.to_string(), associated_location.namespace.clone())
+                                    );
+                                },
+                                None => (),
+                            };
+                            match &associated_location.public_id {
+                                Some(public_id) => {
+                                    all_locations = all_locations.union(
+                                        &other_schedule.locations_indexed_by_public_id.get(
+                                            public_id
+                                        )?.into_iter().map(
+                                            |x| (x.clone(), associated_location.namespace.clone())
+                                        ).collect()
+                                    ).cloned().collect();
+                                },
+                                None => (),
+                            };
+                        }
+                    },
+                    None => (),
+                };
+                match schedule_manager.location_associations_by_public_id.get(location_id) {
+                    Some(location_association) => {
+                        for associated_location in &location_association.associated_locations {
+                            let other_schedule = &schedule_manager_unlocked.get(
+                                &associated_location.namespace
+                            );
+                            let other_schedule = match other_schedule {
+                                Some(other_schedule) => other_schedule,
+                                None => continue,
+                            };
+                            match &associated_location.id {
+                                Some(id) => {
+                                    all_locations.insert(
+                                        (id.to_string(), associated_location.namespace.clone())
+                                    );
+                                },
+                                None => (),
+                            };
+                            match &associated_location.public_id {
+                                Some(public_id) => {
+                                    all_locations = all_locations.union(
+                                        &other_schedule.locations_indexed_by_public_id.get(
+                                            public_id
+                                        )?.into_iter().map(
+                                            |x| (x.clone(), associated_location.namespace.clone())
+                                        ).collect()
+                                    ).cloned().collect();
+                                },
+                                None => (),
+                            };
+                        }
+                    },
+                    None => (),
+                };
+            }
             Some((
-                locations.clone(),
+                all_locations.clone(),
                 schedule
                     .locations
-                    .get(locations.iter().next().unwrap())
+                    .get(
+                        &all_locations
+                        .iter()
+                        .filter(|x| x.1 == namespace.namespace)
+                        .next()
+                        .unwrap()
+                        .0
+                    )
                     .unwrap()
                     .timezone
                     .clone(),
@@ -1079,11 +1390,87 @@ fn get_location_ids_and_first_tz(
         false => {
             let mut location_ids = HashSet::new();
             location_ids.insert(location_id.to_string());
+            let mut all_locations: HashSet<(String, String)> = location_ids.into_iter().map(
+                |location| (location.clone(), namespace.namespace.clone())
+            ).collect();
+            match schedule_manager.location_associations_by_id.get(location_id) {
+                Some(location_association) => {
+                    for associated_location in &location_association.associated_locations {
+                        let other_schedule = &schedule_manager_unlocked.get(
+                            &associated_location.namespace
+                        );
+                        let other_schedule = match other_schedule {
+                            Some(other_schedule) => other_schedule,
+                            None => continue,
+                        };
+                        match &associated_location.id {
+                            Some(id) => {
+                                all_locations.insert(
+                                    (id.to_string(), associated_location.namespace.clone())
+                                );
+                            },
+                            None => (),
+                        };
+                        match &associated_location.public_id {
+                            Some(public_id) => {
+                                all_locations = all_locations.union(
+                                    &other_schedule.locations_indexed_by_public_id.get(
+                                        public_id
+                                    )?.into_iter().map(
+                                        |x| (x.clone(), associated_location.namespace.clone())
+                                    ).collect()
+                                ).cloned().collect();
+                            },
+                            None => (),
+                        };
+                    }
+                },
+                None => (),
+            }
             let location = match schedule.locations.get(location_id) {
                 Some(x) => x,
                 None => return None,
             };
-            Some((location_ids, location.timezone))
+            match &location.public_id {
+                Some(public_id) => match schedule_manager.location_associations_by_public_id.get(
+                    public_id
+                ) {
+                    Some(location_association) => {
+                        for associated_location in &location_association.associated_locations {
+                            let other_schedule = &schedule_manager_unlocked.get(
+                                &associated_location.namespace
+                            );
+                            let other_schedule = match other_schedule {
+                                Some(other_schedule) => other_schedule,
+                                None => continue,
+                            };
+                            match &associated_location.id {
+                                Some(id) => {
+                                    all_locations.insert(
+                                        (id.to_string(), associated_location.namespace.clone())
+                                    );
+                                },
+                                None => (),
+                            };
+                            match &associated_location.public_id {
+                                Some(public_id) => {
+                                    all_locations = all_locations.union(
+                                        &other_schedule.locations_indexed_by_public_id.get(
+                                            public_id
+                                        )?.into_iter().map(
+                                            |x| (x.clone(), associated_location.namespace.clone())
+                                        ).collect()
+                                    ).cloned().collect();
+                                },
+                                None => (),
+                            };
+                        }
+                    },
+                    None => (),
+                },
+                None => (),
+            }
+            Some((all_locations, location.timezone))
         }
     }
 }

@@ -31,6 +31,7 @@
     </nav>
     <div class="container" role="main">
       <p>A site to allow you to browse train timetables of countries around the world, as long as they provide open data.</p>
+      <p>Data may be provided by the infrastructure operator, or passenger train operator(s). In the former case they will be placed in a namespace referencing the primary country in which they operate infrastructure. In the latter case they will be placed in a namespace referencing the country in which the majority of their operations run; if they run a majority of international trains, they will instead be placed in zz to indicate this.</p>
       <p>Currently-supported namespaces:</p>
       <ul>
         {% for namespace, description in namespaces %}
@@ -50,6 +51,14 @@
       <p>GTFS data published by the National Transport Authority. Contains Irish Public Sector Data licensed under a Creative Commons Attribution 4.0 International (CC BY 4.0) licence.</p>
       <p>Data types available: long-term schedules, short-term schedules</p>
       <p>Status: complete for the GTFS static feed; could investigate integrating passing points via the legacy real-time API, along with potentially short-notice alterations via that or GTFS RT.</p>
+      <h3>France &mdash; SNCF Voyageurs TGV/Intercités/TER</h3>
+      <p>HORAIRES SNCF NeTEx data published by SNCF Voyageurs. Contains information from <a href="https://data.sncf.com/explore/dataset/horaires-sncf/information/">horaires-sncf</a>, which is made available here under the <a href="https://opendatacommons.org/licenses/odbl/1-0/">Open Database License</a> (ODbL).</p>
+      <p>Data types available: long-term schedules, short-term schedules</p>
+      <p>Status: complete for the NeTEx static feed; could investigate potentially short-notice alterations via the realtime APIs.</p>
+      <h3>International &mdash; Eurostar</h3>
+      <p>GTFS data published by Eurostar. No licence specified.</p>
+      <p>Data types available: long-term schedules, short-term schedules</p>
+      <p>Status: complete for the GTFS static feed; could investigate potentially short-notice alterations via the GTFS RT API.</p>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
   </body>

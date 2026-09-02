@@ -12,15 +12,13 @@ use std::fmt;
 
 pub struct SncfFetcher {
     url: String,
-    subset: String,
     source: String,
 }
 
 impl SncfFetcher {
-    pub fn new(url: &str, subset: &str, source: &str) -> Self {
+    pub fn new(url: &str, source: &str) -> Self {
         Self {
             url: url.to_string(),
-            subset: subset.to_string(),
             source: source.to_string(),
         }
     }
@@ -40,7 +38,7 @@ impl fmt::Display for SncfFetcherError {
 #[async_trait]
 impl StreamingFetcher for SncfFetcher {
     async fn fetch(&self) -> Result<Box<dyn AsyncBufRead + Unpin + Send>, Error> {
-        println!("Fetching SNCF {} data from {}", self.subset, self.source);
+        println!("Fetching SNCF Voyageurs TGV/Intercités/TER data from {}", self.source);
         let client = Client::new();
         let response = client.get(self.url.clone()).send().await?.error_for_status()?;
         let mut reader = response

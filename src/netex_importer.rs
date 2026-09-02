@@ -4212,7 +4212,8 @@ impl NetexImporter {
                 // TODO figure out if validities are compatible and skip if not
                 let mut association_node = AssociationNode {
                     other_train_id: maybe_coupled_train.clone(),
-                    other_train_location_id_suffix: None,
+                    other_train_location_id_suffix: None, // TODO as elsewhere, departure/arrival
+                                                          // time
                     validity: validity.clone(), // No specific separate validity for joins in NeTEx
                     cancellations: vec![],
                     replacements: vec![],
@@ -4417,8 +4418,8 @@ impl NetexImporter {
                     .scheduled_stop_point_ref
                     .scheduled_stop_point_ref_ref
                     .clone(),
-                id_suffix: None, // We could use `stop_point_in_journey_pattern` but the coupled
-                                 // journeys don't actually use that, so no point really...
+                id_suffix: None, // The actual keying here is off departure/arrival time, TODO split
+                                 // this key into two to allow either one to be used as appropriate.
                 working_arr: None,
                 working_arr_day: None,
                 working_dep: None,

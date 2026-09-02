@@ -32,7 +32,7 @@
     <div class="container" role="main">
       {% set train_first = train.route | first %}
       {% set train_last = train.route | last %}
-      <h2>{{ namespace }}/{% if train.variable_train.public_id %}{{ train.variable_train.public_id }}{% else %}{{ train.id }}{% endif %} {% if cancelled %} CANCELLED {% endif %}{% if modified %} MODIFIED {% endif %} {% if train.variable_train.name %}&ldquo;{{ train.variable_train.name }}&rdquo;{% endif %} {% if train_first.public_dep %}{{ train_first.public_dep | truncate(length=5, end="") }}{% else %}{{ train_first.working_dep }}{% endif %} {{ locations[train_first.id].name }} to {{ locations[train_last.id].name }} on {{ dates | first | split(pat="T") | first }}</h2>
+      <h2>{{ namespace }}/{% if train.variable_train.public_id %}{{ train.variable_train.public_id }}{% else %}{{ train.id }}{% endif %} {% if cancelled %} CANCELLED {% endif %}{% if modified %} MODIFIED {% endif %} {% if train.variable_train.name %}&ldquo;{{ train.variable_train.name }}&rdquo;{% endif %} {% if train_first.public_dep %}{{ train_first.public_dep | truncate(length=5, end="") }}{% else %}{{ train_first.working_dep }}{% endif %} {{ locations_by_namespace[namespace][train_first.id].name }} to {{ locations_by_namespace[namespace][train_last.id].name }} on {{ dates | first | split(pat="T") | first }}</h2>
       <table class="table table-sm"><thead>
         <tr>
           <th>Station</th>
@@ -68,7 +68,7 @@
           {% elif location.working_pass %}
             {% set time = location.working_pass %}
           {% endif %}
-          <td style="border-bottom: none;"><a href="/location/{{ namespace }}{% if locations[location.id].public_id %}-public{% else %}-internal{% endif %}/{% if locations[location.id].public_id %}{{ locations[location.id].public_id }}{% else %}{{ location.id }}{% endif %}/{{ dates[day] | split(pat="T") | first }}/{{ time | truncate(length=5, end="") }}">{{ locations[location.id].name }}{% if locations[location.id].public_id %} [{{ locations[location.id].public_id }}]{% endif %}</a></td>
+          <td style="border-bottom: none;"><a href="/location/{{ namespace }}{% if locations_by_namespace[namespace][location.id].public_id %}-public{% else %}-internal{% endif %}/{% if locations_by_namespace[namespace][location.id].public_id %}{{ locations_by_namespace[namespace][location.id].public_id }}{% else %}{{ location.id }}{% endif %}/{{ dates[day] | split(pat="T") | first }}/{{ time | truncate(length=5, end="") }}">{{ locations_by_namespace[namespace][location.id].name }}{% if locations_by_namespace[namespace][location.id].public_id %} [{{ locations_by_namespace[namespace][location.id].public_id }}]{% endif %}</a></td>
           <td style="border-bottom: none;">{% if location.platform %}{{ location.platform }}{% if location.platform_zone %}-{{ location.platform_zone }}{% endif %}{% endif %}</td>
           <td style="border-bottom: none;">{% if location.path %}{{ location.path }}&ndash;{% endif %}{% if location.line %}{{ location.line }}{% endif %}</td>
           <td style="border-bottom: none;">{% if location.working_arr %}{% if location.activities.times_approximate %}~{% endif %}{{ location.working_arr }}{% if location.working_arr_day > 0 %} +{{ location.working_arr_day }}{% endif %}{% endif %}</td>
@@ -138,13 +138,24 @@
                 {% else %}
                   Forms from
                 {% endif %}
-                <a href="/train/{{ assoc_train.namespace }}/{{ assoc_train.id }}/{{ assoc_train.date | split(pat="T") | first }}">{{ namespace }}/{% if assoc_train.public_id %}{{ assoc_train.public_id }}{% else %}{{ assoc_train.id }}{% endif %} {% if assoc_train.name %}&ldquo;{{ assoc_train.name }}&rdquo;{% endif %} {{ assoc_train.dep_time | truncate(length=5, end="") }} {{ locations[assoc_train.origin_id].name }} to {{ locations[assoc_train.destination_id].name }}</a> {% if assoc_train.is_public %}for the public{% else %}for operational reasons{% endif %}.
+                <a href="/train/{{ assoc_train.namespace }}/{{ assoc_train.id }}/{{ assoc_train.date | split(pat="T") | first }}">{{ assoc_train.namespace }}/{% if assoc_train.public_id %}{{ assoc_train.public_id }}{% else %}{{ assoc_train.id }}{% endif %} {% if assoc_train.name %}&ldquo;{{ assoc_train.name }}&rdquo;{% endif %} {{ assoc_train.dep_time | truncate(length=5, end="") }} {{ locations_by_namespace[assoc_train.namespace][assoc_train.origin_id].name }} to {{ locations_by_namespace[assoc_train.namespace][assoc_train.destination_id].name }}</a> {% if assoc_train.is_public %}for the public{% else %}for operational reasons{% endif %}.
               {% endfor %}
             {% endif %}
           </td>
         </tr>
         {% endfor %}
       </table>
+      {% for duplicate_train in duplicate_trains %}
+      {% if loop.first %}
+      <h3>This train from other sources</h3>
+      <p>This train's run is also represented in the following additional sources</p>
+      <ul>
+      {% endif %}
+      <li><a href="/train/{{ duplicate_train.namespace }}/{{ duplicate_train.id }}/{{ duplicate_train.date | split(pat="T") | first }}">{{ duplicate_train.namespace }}/{% if duplicate_train.public_id %}{{ duplicate_train.public_id }}{% else %}{{ duplicate_train.id }}{% endif %} {% if duplicate_train.name %}&ldquo;{{ duplicate_train.name }}&rdquo;{% endif %} {{ duplicate_train.dep_time | truncate(length=5, end="") }} {{ locations_by_namespace[duplicate_train.namespace][duplicate_train.origin_id].name }} to {{ locations_by_namespace[duplicate_train.namespace][duplicate_train.destination_id].name }}</a>.</li>
+      {% if loop.last %}
+      </ul>
+      {% endif %}
+      {% endfor %}
       <h3>Train details</h3>
       <ul>
         <li>Schedule ID: {{ train.id }}</li>
@@ -292,7 +303,7 @@
       </ul>
       {% for location in train.route %}
         {% if location.change_en_route %}
-          <h4>From {{ locations[location.id].name }}</h4>
+          <h4>From {{ locations_by_namespace[namespace][location.id].name }}</h4>
           <ul>
             <li>Train type: {{ location.change_en_route.train_type }}</li>
             {% if location.change_en_route.public_id %}
