@@ -4182,7 +4182,7 @@ impl NetexImporter {
                 stop_point_in_journey_pattern.clone(),
             );
         }
-        for timetabled_passing_time in timetabled_passing_times {
+        for (i, timetabled_passing_time) in timetabled_passing_times.iter().enumerate() {
             let stop_point_in_journey_pattern = match stop_point_in_journey_pattern_by_id.get(
                 &timetabled_passing_time
                 .point_in_journey_pattern_ref
@@ -4450,44 +4450,17 @@ impl NetexImporter {
                 pathing_allowance_s: None,
                 performance_allowance_s: None,
                 activities: Activities {
-                    detach: false,
-                    attach: false,
-                    other_trains_pass: false,
-                    attach_or_detach_assisting_loco: false,
-                    x_on_arrival: false,
-                    banking_loco: false,
-                    crew_change: false,
-                    set_down_only: false,
-                    examination: false,
-                    gbprtt: false,
-                    prevent_column_merge: false,
-                    prevent_third_column_merge: false,
-                    passenger_count: false,
-                    ticket_collection: false,
-                    ticket_examination: false,
-                    first_class_ticket_examination: false,
-                    selective_ticket_examination: false,
-                    change_loco: false,
-                    unadvertised_stop: false,
-                    operational_stop: false,
-                    train_locomotive_on_rear: false,
-                    propelling: false,
-                    request_pick_up: false,
-                    request_set_down: false,
-                    reversing_move: false,
-                    run_round: false,
-                    staff_stop: false,
-                    normal_passenger_stop: false,
-                    train_begins: false,
-                    train_finishes: false,
-                    tops_reporting: false,
-                    token_etc: false,
-                    pick_up_only: false,
-                    watering_stock: false,
-                    cross_at_passing_point: false,
-                    request_pick_up_by_telephone: false,
-                    request_set_down_by_telephone: false,
-                    times_approximate: false,
+                    set_down_only: timetabled_passing_time.departure_time.is_none()
+                        && timetabled_passing_time.arrival_time.is_some(),
+                    pick_up_only: timetabled_passing_time.arrival_time.is_none()
+                        && timetabled_passing_time.departure_time.is_some(),
+                    unadvertised_stop: timetabled_passing_time.arrival_time.is_none()
+                        && timetabled_passing_time.departure_time.is_none(),
+                    normal_passenger_stop: timetabled_passing_time.departure_time.is_some()
+                        && timetabled_passing_time.arrival_time.is_some(),
+                    train_begins: i == 0,
+                    train_finishes: i == timetabled_passing_times.len() - 1,
+                    ..Default::default()
                 },
                 change_en_route: None,
                 divides_to_form: divides_to_form,
