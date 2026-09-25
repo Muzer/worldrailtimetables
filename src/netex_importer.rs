@@ -4,21 +4,26 @@ use std::fmt;
 use std::num::ParseIntError;
 
 use async_trait::async_trait;
-use chrono::{Datelike, NaiveDateTime, NaiveTime, TimeZone};
+
+use chrono::{Datelike, NaiveDateTime, NaiveTime};
 use chrono::naive::Days;
-use chrono_tz::{CET, Tz};
+use chrono_tz::CET;
+
 use quick_xml::de;
-use rgb::RGB8;
+
+use sea_orm::DatabaseTransaction;
+use sea_orm::entity::{ActiveHasMany, ActiveHasOne, ActiveValue};
+
 use serde::{Deserialize, Serialize};
+
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
 use crate::error::Error;
 use crate::importer::SlowStreamingImporter;
 use crate::schedule::{
-    AccommodationTypes, AccommodationTypesByClass, Activities, Assistance, AssociationNode,
-    Catering, DaysOfWeek, Families, Line, Location, Luggage, Schedule, PassengerCommunications,
-    PassengerInformation, ReservationField, Reservations, Toilets, Train, TrainLocation,
-    TrainOperator, TrainSource, TrainType, TrainValidityPeriod, VariableTrain,
+    AccommodationClass, accommodation_types, association_node, AssociationType, line, location,
+    schedule, ReservationField, train, train_cancellation, train_location, train_operator,
+    TrainSource, TrainType, train_validity_period, train_variant, variable_train
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1029,12 +1034,12 @@ pub struct Lines {
     #[serde(rename = "$text")]
     pub text: Option<String>,
     #[serde(rename = "Line")]
-    pub line: Vec<NetexLine>,
+    pub line: Vec<Line>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct NetexLine {
+pub struct Line {
     #[serde(rename = "@id")]
     pub id: String,
     #[serde(rename = "@version")]
@@ -1871,11 +1876,11 @@ pub struct ServiceFacilitySet {
     #[serde(rename = "$text")]
     pub text: Option<String>,
     #[serde(rename = "FareClasses")]
-    pub fare_classes: FareClasses,
+    pub fare_classes: Option<FareClasses>,
     #[serde(rename = "SanitaryFacilityList")]
     pub sanitary_facility_list: Option<SanitaryFacilities>,
     #[serde(rename = "AccommodationFacilityList")]
-    pub accommodation_facility_list: AccommodationFacilities,
+    pub accommodation_facility_list: Option<AccommodationFacilities>,
     #[serde(rename = "ServiceReservationFacilityList")]
     pub service_reservation_facility_list: Option<ReservationList>,
     #[serde(rename = "GroupBookingFacility")]
@@ -2484,17 +2489,11 @@ pub struct TypeOfServiceShortName {
 #[derive(Clone, Debug)]
 pub enum NetexErrorType {
     BadColour(ParseIntError),
-    CoupledJourneyNotFound(String),
     DayBitsDontMatchPeriodLength(i64),
     DayTypeAssignmentNotFound(String),
     DestinationDisplayNotFound(String),
-    DuplicateScheduledStopPoint(String),
-    InvalidDatetime,
     JourneyPartNotFound(String),
     JourneyPartCoupleNotFound(String),
-    LineNotFound(String),
-    NoLocationsInSchedule(String),
-    OperatorNotFound(String),
     ScheduledStopPointNotFound(String),
     ServiceJourneyPatternNotFound(String),
     StopPlaceNotFound(String),
@@ -2510,9 +2509,6 @@ impl fmt::Display for NetexErrorType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             NetexErrorType::BadColour(x) => write!(f, "Bad colour component {}", x),
-            NetexErrorType::CoupledJourneyNotFound(x) => write!(
-                f, "Coupled journey not found {}", x
-            ),
             NetexErrorType::DayBitsDontMatchPeriodLength(x) => write!(
                 f, "Number of day bits does not match period length {}", x
             ),
@@ -2522,19 +2518,12 @@ impl fmt::Display for NetexErrorType {
             NetexErrorType::DestinationDisplayNotFound(x) => write!(
                 f, "Destination display not found {}", x
             ),
-            NetexErrorType::DuplicateScheduledStopPoint(x) => write!(
-                f, "Duplicate scheduled stop point in PassengerStopAssignment {}", x
-            ),
-            NetexErrorType::InvalidDatetime => write!(f, "Invalid Datetime"),
             NetexErrorType::JourneyPartNotFound(x) => write!(
                 f, "Journey part couple not found {}", x
             ),
             NetexErrorType::JourneyPartCoupleNotFound(x) => write!(
                 f, "Journey part couple not found {}", x
             ),
-            NetexErrorType::LineNotFound(x) => write!(f, "Line not found {}", x),
-            NetexErrorType::NoLocationsInSchedule(x) => write!(f, "No locations in schedule {}", x),
-            NetexErrorType::OperatorNotFound(x) => write!(f, "Operator not found {}", x),
             NetexErrorType::ScheduledStopPointNotFound(x) => write!(
                 f, "Scheduled stop point not found {}", x
             ),
@@ -2583,8 +2572,6 @@ pub struct NetexImporter {
     journey_part_by_id: HashMap<String, JourneyPart>,
     journey_part_couple_by_id: HashMap<String, JourneyPartCouple>,
     journey_part_couple_ids_by_train_id: HashMap<String, HashSet<String>>,
-    line_by_id: HashMap<String, NetexLine>,
-    operator_by_id: HashMap<String, Operator>,
     scheduled_stop_point_by_id: HashMap<String, ScheduledStopPoint>,
     service_journey_ids_by_train_number_id: HashMap<String, HashSet<String>>,
     service_journey_pattern_by_id: HashMap<String, ServiceJourneyPattern>,
@@ -2603,8 +2590,6 @@ impl NetexImporter {
             journey_part_by_id: HashMap::new(),
             journey_part_couple_by_id: HashMap::new(),
             journey_part_couple_ids_by_train_id: HashMap::new(),
-            line_by_id: HashMap::new(),
-            operator_by_id: HashMap::new(),
             scheduled_stop_point_by_id: HashMap::new(),
             service_journey_ids_by_train_number_id: HashMap::new(),
             service_journey_pattern_by_id: HashMap::new(),
@@ -2616,10 +2601,10 @@ impl NetexImporter {
         }
     }
 
-    fn get_timezone(&self, locale: &Locale) -> Result<Tz, NetexError> {
+    fn get_timezone(&self, locale: &Locale) -> Result<String, NetexError> {
         match (&locale.time_zone_offset[..], &locale.summer_time_zone_offset[..]) {
             // There's a bug in some SNCF data that shows some stations as not having DST...
-            ("+1", "+2") | ("+1", "+1") => Ok(CET),
+            ("+1", "+2") | ("+1", "+1") => Ok(CET.name().to_string()),
             (&_, &_) => Err(
                 NetexError {
                     error_type: NetexErrorType::UnsupportedTimezone(
@@ -2631,36 +2616,35 @@ impl NetexImporter {
         }
     }
 
-    pub fn read_publication_delivery(
+    pub async fn read_publication_delivery(
         &mut self,
         publication_delivery: &PublicationDelivery,
-        mut schedule: Schedule,
-    ) -> Result<Schedule, NetexError> {
+        schedule: &schedule::ModelEx,
+        transaction: &DatabaseTransaction,
+    ) -> Result<(), Error> {
         let composite_frame = &publication_delivery.data_objects.composite_frame;
         let default_timezone = self.get_timezone(
             &composite_frame.frame_defaults.default_locale
         )?;
 
-        match &composite_frame.valid_between.from_date.and_local_timezone(
-            default_timezone
-        ).single() {
-            Some(from_date) => schedule.valid_begin = Some(*from_date),
-            None => return Err(NetexError { error_type: NetexErrorType::InvalidDatetime }),
-        };
+        let namespace = schedule.namespace.clone();
 
-        match &composite_frame.valid_between.to_date.and_local_timezone(
-            default_timezone
-        ).single() {
-            Some(to_date) => schedule.valid_end = Some(*to_date),
-            None => return Err(NetexError { error_type: NetexErrorType::InvalidDatetime }),
-        };
+        let mut active_schedule: schedule::ActiveModelEx = schedule.clone().into();
 
-        match &publication_delivery.publication_timestamp.and_local_timezone(
-            default_timezone
-        ).single() {
-            Some(publication_timestamp) => schedule.last_updated = Some(*publication_timestamp),
-            None => return Err(NetexError { error_type: NetexErrorType::InvalidDatetime }),
-        };
+        active_schedule.valid_begin = ActiveValue::Set(
+            Some(composite_frame.valid_between.from_date.clone())
+        );
+        active_schedule.valid_end = ActiveValue::Set(
+            Some(composite_frame.valid_between.to_date.clone())
+        );
+        active_schedule.last_updated = ActiveValue::Set(
+            Some(publication_delivery.publication_timestamp.clone())
+        );
+        active_schedule.timezone = ActiveValue::Set(Some(default_timezone.clone()));
+
+        println!("[{}] Updating root schedule...", namespace);
+        active_schedule.update(transaction).await?;
+        println!("[{}] Updated root schedule", namespace);
 
         // Stop places include crucial timezone info so we need to store them until we are ready for
         // the scheduled stop point
@@ -2675,10 +2659,14 @@ impl NetexImporter {
         }
 
         // Now go through the stop assignments and convert to locations
+        let mut location_count: usize = 0;
+        println!("[{}] Loading locations...", namespace);
         for stop_assignment
             in &composite_frame.frames.service_frame.stop_assignments.passenger_stop_assignment {
-            schedule = self.read_stop_assignment(&stop_assignment, schedule)?;
+            self.read_stop_assignment(&stop_assignment, &namespace, transaction).await?;
+            location_count += 1;
         }
+        println!("[{}] Persisted {} locations", namespace, location_count);
 
         // Store operating periods
         for uic_operating_period
@@ -2702,9 +2690,13 @@ impl NetexImporter {
         }
 
         // Load lines
+        let mut line_count: usize = 0;
+        println!("[{}] Loading lines...", namespace);
         for line in &composite_frame.frames.service_frame.lines.line {
-            self.read_line(&line)?;
+            self.read_line(&line, &namespace, transaction).await?;
+            line_count += 1;
         }
+        println!("[{}] Persisted {} lines", namespace, line_count);
 
         // Load destination displays
         for destination_display
@@ -2713,9 +2705,13 @@ impl NetexImporter {
         }
 
         // Load operators
+        let mut operator_count: usize = 0;
+        println!("[{}] Loading operators...", namespace);
         for operator in &composite_frame.frames.resource_frame.organisations.operator {
-            self.read_operator(&operator)?;
+            self.read_operator(&operator, &namespace, transaction).await?;
+            operator_count += 1;
         }
+        println!("[{}] Persisted {} operators", namespace, operator_count);
 
         // Load journey patterns
         for service_journey_pattern
@@ -2761,12 +2757,18 @@ impl NetexImporter {
         }
 
         // Now we can load the trains into the schedule
+        let mut train_count: usize = 0;
+        println!("[{}] Loading trains...", namespace);
         for service_journey
             in &composite_frame.frames.timetable_frame.vehicle_journeys.service_journey {
-            schedule = self.read_service_journey(&service_journey, schedule, &default_timezone)?;
+            self.read_service_journey(
+                &service_journey, &namespace, &default_timezone, transaction
+            ).await?;
+            train_count += 1;
         }
+        println!("[{}] Persisted {} trains", namespace, train_count);
 
-        Ok(schedule)
+        Ok(())
     }
 
     fn fill_train_id_service_journey_map(
@@ -2848,8 +2850,19 @@ impl NetexImporter {
         Ok(())
     }
 
-    fn read_operator(&mut self, operator: &Operator) -> Result<(), NetexError> {
-        self.operator_by_id.insert(operator.id.clone(), operator.clone());
+    async fn read_operator(
+        &mut self, operator: &Operator, namespace: &str, transaction: &DatabaseTransaction
+    ) -> Result<(), Error> {
+        let operator = train_operator::ActiveModelEx {
+            id: ActiveValue::Set(operator.id.clone()),
+            namespace: ActiveValue::Set(namespace.to_string()),
+            public_id: ActiveValue::Set(Some(operator.public_code.clone())),
+            description: ActiveValue::Set(Some(operator.name.clone())),
+            ..Default::default()
+        };
+
+        operator.insert(transaction).await?;
+
         Ok(())
     }
 
@@ -2862,8 +2875,73 @@ impl NetexImporter {
         Ok(())
     }
 
-    fn read_line(&mut self, line: &NetexLine) -> Result<(), NetexError> {
-        self.line_by_id.insert(line.id.clone(), line.clone());
+    async fn read_line(
+        &mut self, line: &Line, namespace: &str, transaction: &DatabaseTransaction
+    ) -> Result<(), Error> {
+        let line = line::ActiveModelEx {
+            id: ActiveValue::Set(line.id.clone()),
+            namespace: ActiveValue::Set(namespace.to_string()),
+            public_id: ActiveValue::Set(Some(line.public_code.clone())),
+            name: ActiveValue::Set(Some(line.name.clone())),
+            description: ActiveValue::Set(Some(line.description.clone())),
+            url: ActiveValue::Set(None),
+            background_colour: ActiveValue::Set(match &line.presentation {
+                Some(presentation) => match &presentation.colour {
+                    Some(colour) => Some(
+                        (match u32::from_str_radix(&colour[0..2], 16) {
+                            Ok(component) => component,
+                            Err(x) => return Err(NetexError {
+                                error_type: NetexErrorType::BadColour(x)
+                            }.into()),
+                        } << 16) + 
+                        (match u32::from_str_radix(&colour[2..4], 16){
+                            Ok(component) => component,
+                            Err(x) => return Err(NetexError {
+                                error_type: NetexErrorType::BadColour(x)
+                            }.into()),
+                        } << 8) + 
+                        match u32::from_str_radix(&colour[4..6], 16){
+                            Ok(component) => component,
+                            Err(x) => return Err(NetexError {
+                                error_type: NetexErrorType::BadColour(x)
+                            }.into()),
+                        }
+                    ),
+                    None => None,
+                },
+                None => None,
+            }),
+            foreground_colour: ActiveValue::Set(match &line.presentation {
+                Some(presentation) => match &presentation.text_colour {
+                    Some(colour) => Some(
+                        (match u32::from_str_radix(&colour[0..2], 16) {
+                            Ok(component) => component,
+                            Err(x) => return Err(NetexError {
+                                error_type: NetexErrorType::BadColour(x)
+                            }.into()),
+                        } << 16) + 
+                        (match u32::from_str_radix(&colour[2..4], 16){
+                            Ok(component) => component,
+                            Err(x) => return Err(NetexError {
+                                error_type: NetexErrorType::BadColour(x)
+                            }.into()),
+                        } << 8) + 
+                        match u32::from_str_radix(&colour[4..6], 16){
+                            Ok(component) => component,
+                            Err(x) => return Err(NetexError {
+                                error_type: NetexErrorType::BadColour(x)
+                            }.into()),
+                        }
+                    ),
+                    None => None,
+                },
+                None => None,
+            }),
+            ..Default::default()
+        };
+
+        line.insert(transaction).await?;
+
         Ok(())
     }
 
@@ -2902,11 +2980,12 @@ impl NetexImporter {
         Ok(())
     }
 
-    fn read_stop_assignment(
+    async fn read_stop_assignment(
         &self,
         passenger_stop_assignment: &PassengerStopAssignment,
-        mut schedule: Schedule,
-    ) -> Result<Schedule, NetexError> {
+        namespace: &str,
+        transaction: &DatabaseTransaction,
+    ) -> Result<(), Error> {
         let stop_place = match self.stop_place_by_id.get(
             &passenger_stop_assignment.stop_place_ref.stop_place_ref_ref
         ) {
@@ -2916,7 +2995,7 @@ impl NetexImporter {
                     error_type: NetexErrorType::StopPlaceNotFound(
                         passenger_stop_assignment.stop_place_ref.stop_place_ref_ref.clone()
                     )
-                }
+                }.into()
             ),
         };
 
@@ -2932,36 +3011,22 @@ impl NetexImporter {
                             .scheduled_stop_point_ref_ref
                             .clone()
                     )
-                }
+                }.into()
             ),
         };
 
-        let location = Location {
-            id: scheduled_stop_point.id.clone(),
-            name: scheduled_stop_point.name.text.clone(),
-            public_id: Some(scheduled_stop_point.public_code.clone()),
-            timezone: self.get_timezone(&stop_place.locale)?,
+        let location = location::ActiveModelEx {
+            id: ActiveValue::Set(scheduled_stop_point.id.clone()),
+            namespace: ActiveValue::Set(namespace.to_owned()),
+            name: ActiveValue::Set(scheduled_stop_point.name.text.clone()),
+            public_id: ActiveValue::Set(Some(scheduled_stop_point.public_code.clone())),
+            timezone: ActiveValue::Set(self.get_timezone(&stop_place.locale)?),
+            ..Default::default()
         };
 
-        if schedule.locations.contains_key(&scheduled_stop_point.id) {
-            return Err(
-                NetexError {
-                    error_type: NetexErrorType::DuplicateScheduledStopPoint(
-                        scheduled_stop_point.id.clone()
-                    )
-                }
-            );
-        }
+        location.insert(transaction).await?;
 
-        schedule.locations.insert(scheduled_stop_point.id.clone(), location);
-
-        schedule
-            .locations_indexed_by_public_id
-            .entry(scheduled_stop_point.public_code.clone())
-            .or_insert(HashSet::new())
-            .insert(scheduled_stop_point.id.clone());
-
-        Ok(schedule)
+        Ok(())
     }
 
     fn read_uic_operating_period(
@@ -3014,8 +3079,8 @@ impl NetexImporter {
         &self,
         valid_between: &ServiceJourneyValidBetween,
         operating_periods: &Vec<&UicOperatingPeriod>,
-        default_timezone: &Tz,
-    ) -> Result<Vec<TrainValidityPeriod>, NetexError> {
+        default_timezone: &str,
+    ) -> Result<Vec<train_validity_period::ActiveModelEx>, NetexError> {
         // Nothing outside `valid_between` is valid so we keep that as a hard cap
         let min_date = &valid_between.from_date.date();
         let max_date = &valid_between.to_date.date();
@@ -3107,22 +3172,21 @@ impl NetexImporter {
                         new_days_of_week
                     },
                     None => {
-                        let train_validity_period = TrainValidityPeriod {
-                            valid_begin: default_timezone.from_local_datetime(
-                                             &cur_start.and_hms_opt(0, 0, 0).unwrap()
-                                             ).unwrap(),
-                            valid_end: default_timezone.from_local_datetime(
-                                             &(cur_end - Days::new(1)).and_hms_opt(0, 0, 0).unwrap()
-                                             ).unwrap(),
-                            days_of_week: DaysOfWeek {
-                                monday: maybe_days_of_week[0].unwrap_or(false),
-                                tuesday: maybe_days_of_week[1].unwrap_or(false),
-                                wednesday: maybe_days_of_week[2].unwrap_or(false),
-                                thursday: maybe_days_of_week[3].unwrap_or(false),
-                                friday: maybe_days_of_week[4].unwrap_or(false),
-                                saturday: maybe_days_of_week[5].unwrap_or(false),
-                                sunday: maybe_days_of_week[6].unwrap_or(false),
-                            },
+                        let train_validity_period = train_validity_period::ActiveModelEx {
+                            valid_begin:
+                                ActiveValue::Set(cur_start.and_hms_opt(0, 0, 0).unwrap()),
+                            valid_end: ActiveValue::Set(
+                                    (cur_end - Days::new(1)).and_hms_opt(0, 0, 0).unwrap()
+                                ),
+                            timezone: ActiveValue::Set(default_timezone.to_string()),
+                            monday: ActiveValue::Set(maybe_days_of_week[0].unwrap_or(false)),
+                            tuesday: ActiveValue::Set(maybe_days_of_week[1].unwrap_or(false)),
+                            wednesday: ActiveValue::Set(maybe_days_of_week[2].unwrap_or(false)),
+                            thursday: ActiveValue::Set(maybe_days_of_week[3].unwrap_or(false)),
+                            friday: ActiveValue::Set(maybe_days_of_week[4].unwrap_or(false)),
+                            saturday: ActiveValue::Set(maybe_days_of_week[5].unwrap_or(false)),
+                            sunday: ActiveValue::Set(maybe_days_of_week[6].unwrap_or(false)),
+                            ..Default::default()
                         };
                         if maybe_days_of_week.iter().filter(
                             |x| { x.unwrap_or(false) }
@@ -3311,196 +3375,220 @@ impl NetexImporter {
 
     fn get_accommodation(
         &self, service_facility_set: &ServiceFacilitySet
-    ) -> Result<AccommodationTypesByClass, NetexError> {
+    ) -> Result<Vec<accommodation_types::ActiveModelEx>, NetexError> {
         // TODO can this be written in a more match-y way for completeness checks?
         // Sometimes these appear to be in some sort of order, but I don't think this is officially
         // defined so let's just be vague about it — I suspect the intent is to have multiple
         // ServiceFacilitySets but SNCF don't seem to do this
-        let empty_accommodation_types = AccommodationTypes {
-            standing: Some(false),
-            seating: Some(false),
-            reclining_seating: Some(false),
-            special_seating: Some(false),
-            sleeper: Some(false),
-            single_sleeper: Some(false),
-            double_sleeper: Some(false),
-            special_sleeper: Some(false),
-            couchette: Some(false),
-            single_couchette: Some(false),
-            double_couchette: Some(false),
-            baby: Some(false),
-            family: Some(false),
-            recreation: Some(false),
-            panoramic: Some(false),
-            pullman: Some(false),
-            pushchair: Some(false),
-            wheelchair: Some(false),
-            has_male_only: Some(false),
-            has_female_only: Some(false),
-            has_same_sex_only: Some(false),
-        };
-        let populated_accommodation_types = AccommodationTypes {
-            standing: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::Standing
+        let accommodation_facility_list = &service_facility_set.accommodation_facility_list;
+        let populated_accommodation_types = accommodation_types::ActiveModelEx {
+            standing: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::Standing
+                )
             )),
-            seating: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::Seating
+            seating: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::Seating
+                )
             )),
-            reclining_seating: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::RecliningSeats
+            reclining_seating: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::RecliningSeats
+                )
             )),
-            special_seating: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::SpecialSeating
+            special_seating: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::SpecialSeating
+                )
             )),
-            sleeper: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::Sleeper
+            sleeper: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::Sleeper
+                )
             )),
-            single_sleeper: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::SingleSleeper
+            single_sleeper: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::SingleSleeper
+                )
             )),
-            double_sleeper: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::DoubleSleeper
+            double_sleeper: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::DoubleSleeper
+                )
             )),
-            special_sleeper: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::SpecialSleeper
+            special_sleeper: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::SpecialSleeper
+                )
             )),
-            couchette: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::Couchette
+            couchette: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::Couchette
+                )
             )),
-            single_couchette: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::SingleCouchette
+            single_couchette: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::SingleCouchette
+                )
             )),
-            double_couchette: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::DoubleCouchette
+            double_couchette: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::DoubleCouchette
+                )
             )),
-            baby: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::BabyCompartment
+            baby: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::BabyCompartment
+                )
             )),
-            family: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::FamilyCarriage
+            family: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::FamilyCarriage
+                )
             )),
-            recreation: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::RecreationArea
+            recreation: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::RecreationArea
+                )
             )),
-            panoramic: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::PanoramaCoach
+            panoramic: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::PanoramaCoach
+                )
             )),
-            pullman: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::PullmanCoach
+            pullman: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::PullmanCoach
+                )
             )),
-            pushchair: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::Pushchair
+            pushchair: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::Pushchair
+                )
             )),
-            wheelchair: Some(service_facility_set.accommodation_facility_list.text.contains(
-                &AccommodationFacility::Wheelchair
+            wheelchair: ActiveValue::Set(accommodation_facility_list.as_ref().map(
+                |accommodation_facility_list| accommodation_facility_list.text.contains(
+                    &AccommodationFacility::Wheelchair
+                )
             )),
-            has_male_only: match &service_facility_set.gender_limitation {
+            has_male_only: ActiveValue::Set(match &service_facility_set.gender_limitation {
                 Some(gender_limitation) => Some(*gender_limitation == GenderLimitation::MaleOnly
                     || *gender_limitation == GenderLimitation::Both),
                 None => None,
-            },
-            has_female_only: match &service_facility_set.gender_limitation {
+            }),
+            has_female_only: ActiveValue::Set(match &service_facility_set.gender_limitation {
                 Some(gender_limitation) => Some(*gender_limitation == GenderLimitation::FemaleOnly
                     || *gender_limitation == GenderLimitation::Both),
                 None => None,
-            },
-            has_same_sex_only: match &service_facility_set.gender_limitation {
+            }),
+            has_same_sex_only: ActiveValue::Set(match &service_facility_set.gender_limitation {
                 Some(gender_limitation) =>
                     Some(*gender_limitation == GenderLimitation::SameSexOnly),
                 None => None,
+            }),
+            ..Default::default()
+        };
+        let mut result = vec![];
+        match &service_facility_set.fare_classes {
+            Some(fare_classes) => {
+                if fare_classes.text.contains(&FareClass::Unknown)
+                    || fare_classes.text.is_empty() {
+                    let mut accommodation = populated_accommodation_types.clone();
+                    accommodation.class = ActiveValue::Set(AccommodationClass::Unknown);
+                    result.push(accommodation);
+                }
+                if fare_classes.text.contains(&FareClass::BusinessClass) {
+                    let mut accommodation = populated_accommodation_types.clone();
+                    accommodation.class = ActiveValue::Set(AccommodationClass::FirstPremium);
+                    result.push(accommodation);
+                }
+                if fare_classes.text.contains(&FareClass::FirstClass)
+                    || fare_classes.text.contains(&FareClass::Preferente) {
+                    let mut accommodation = populated_accommodation_types.clone();
+                    accommodation.class = ActiveValue::Set(AccommodationClass::First);
+                    result.push(accommodation);
+                }
+                if fare_classes.text.contains(&FareClass::PremiumClass) {
+                    let mut accommodation = populated_accommodation_types.clone();
+                    accommodation.class = ActiveValue::Set(AccommodationClass::SecondPremium);
+                    result.push(accommodation);
+                }
+                if fare_classes.text.contains(&FareClass::SecondClass)
+                    || fare_classes.text.contains(&FareClass::StandardClass)
+                    || fare_classes.text.contains(&FareClass::EconomyClass)
+                    || fare_classes.text.contains(&FareClass::Turista) {
+                    let mut accommodation = populated_accommodation_types.clone();
+                    accommodation.class = ActiveValue::Set(AccommodationClass::Second);
+                    result.push(accommodation);
+                }
+                if fare_classes.text.contains(&FareClass::ThirdClass) {
+                    let mut accommodation = populated_accommodation_types.clone();
+                    accommodation.class = ActiveValue::Set(AccommodationClass::Third);
+                    result.push(accommodation);
+                }
+                if fare_classes.text.contains(&FareClass::Any) {
+                    let mut accommodation = populated_accommodation_types.clone();
+                    accommodation.class = ActiveValue::Set(AccommodationClass::Unclassified);
+                    result.push(accommodation);
+                }
+            },
+            None => {
+                let mut accommodation = populated_accommodation_types.clone();
+                accommodation.class = ActiveValue::Set(AccommodationClass::Unknown);
+                result.push(accommodation);
             },
         };
-        Ok(AccommodationTypesByClass {
-            // We collapse some of the duplicates down here
-            unknown: if service_facility_set.fare_classes.text.contains(&FareClass::Unknown)
-                || service_facility_set.fare_classes.text.is_empty() {
-                Some(populated_accommodation_types.clone())
-            } else {
-                Some(empty_accommodation_types.clone())
-            },
-            // Business assumed to be first premium here eg ÖBB, to revise if this is not the case
-            first_premium: if service_facility_set.fare_classes.text.contains(
-                &FareClass::BusinessClass
-            ) {
-                Some(populated_accommodation_types.clone())
-            } else {
-                Some(empty_accommodation_types.clone())
-            },
-            first: if service_facility_set.fare_classes.text.contains(&FareClass::FirstClass)
-                || service_facility_set.fare_classes.text.contains(&FareClass::Preferente) {
-                Some(populated_accommodation_types.clone())
-            } else {
-                Some(empty_accommodation_types.clone())
-            },
-            // Premium assumed to be second premium/standard premium here eg Eurostar
-            second_premium: if service_facility_set.fare_classes.text.contains(
-                &FareClass::PremiumClass
-            ) {
-                Some(populated_accommodation_types.clone())
-            } else {
-                Some(empty_accommodation_types.clone())
-            },
-            // Economy and standard assumed to be equivalent to second here
-            second: if service_facility_set.fare_classes.text.contains(&FareClass::SecondClass)
-                || service_facility_set.fare_classes.text.contains(&FareClass::StandardClass)
-                || service_facility_set.fare_classes.text.contains(&FareClass::EconomyClass)
-                || service_facility_set.fare_classes.text.contains(&FareClass::Turista) {
-                Some(populated_accommodation_types.clone())
-            } else {
-                Some(empty_accommodation_types.clone())
-            },
-            // Economy and standard assumed to be equivalent to second here
-            third: if service_facility_set.fare_classes.text.contains(&FareClass::ThirdClass) {
-                Some(populated_accommodation_types.clone())
-            } else {
-                Some(empty_accommodation_types.clone())
-            },
-            unclassified: if service_facility_set.fare_classes.text.contains(&FareClass::Any) {
-                Some(populated_accommodation_types.clone())
-            } else {
-                Some(empty_accommodation_types.clone())
-            },
-        })
+        Ok(result)
     }
 
     fn get_reservations(
         &self, service_facility_set: &ServiceFacilitySet
-    ) -> Result<Reservations, NetexError> {
+    ) -> Result<Option<variable_train::Reservations>, NetexError> {
+        let accommodation_facility_list = match &service_facility_set.accommodation_facility_list {
+            Some(accommodation_facility_list) => accommodation_facility_list.text.clone(),
+            None => vec![],
+        };
+        let fare_classes = match &service_facility_set.fare_classes {
+            Some(fare_classes) => fare_classes.text.clone(),
+            None => vec![],
+        };
         match &service_facility_set.service_reservation_facility_list {
-            Some(service_reservation_facility_list) => return Ok(Reservations {
-                seats: if service_facility_set.accommodation_facility_list.text.contains(
-                    &AccommodationFacility::Seating
-                ) {
-                    if service_reservation_facility_list.text.contains(
-                        &Reservation::ReservationsCompulsory
+            Some(service_reservation_facility_list)
+                => return Ok(Some(variable_train::Reservations {
+                seats: if accommodation_facility_list.contains(
+                        &AccommodationFacility::Seating
                     ) {
-                        ReservationField::Mandatory
-                    } else if service_reservation_facility_list.text.contains(
-                        &Reservation::ReservationsCompulsoryFromOriginStation
-                    ) {
-                        ReservationField::MandatoryFromOrigin
-                    } else if service_reservation_facility_list.text.contains(
-                        &Reservation::ReservationsRecommended
-                    ) {
-                        ReservationField::Recommended
-                    } else if service_reservation_facility_list.text.contains(
-                        &Reservation::ReservationsRecommended
-                    ) {
-                        ReservationField::Recommended
-                    } else if service_reservation_facility_list.text.contains(
-                        &Reservation::ReservationsPossible
-                    ) {
-                        ReservationField::Possible
-                    } else if service_reservation_facility_list.text.contains(
-                        &Reservation::NoReservationsPossible
-                    ) {
-                        ReservationField::Impossible
+                        if service_reservation_facility_list.text.contains(
+                            &Reservation::ReservationsCompulsory
+                        ) {
+                            ReservationField::Mandatory
+                        } else if service_reservation_facility_list.text.contains(
+                            &Reservation::ReservationsCompulsoryFromOriginStation
+                        ) {
+                            ReservationField::MandatoryFromOrigin
+                        } else if service_reservation_facility_list.text.contains(
+                            &Reservation::ReservationsRecommended
+                        ) {
+                            ReservationField::Recommended
+                        } else if service_reservation_facility_list.text.contains(
+                            &Reservation::ReservationsRecommended
+                        ) {
+                            ReservationField::Recommended
+                        } else if service_reservation_facility_list.text.contains(
+                            &Reservation::ReservationsPossible
+                        ) {
+                            ReservationField::Possible
+                        } else if service_reservation_facility_list.text.contains(
+                            &Reservation::NoReservationsPossible
+                        ) {
+                            ReservationField::Impossible
+                        } else {
+                            ReservationField::Unknown
+                        }
                     } else {
-                        ReservationField::Unknown
-                    }
-                } else {
-                    ReservationField::NotApplicable
-                },
+                        ReservationField::NotApplicable
+                    },
                 groups: if service_reservation_facility_list.text.contains(
                     &Reservation::ReservationsCompulsoryForGroups
                 ) || service_facility_set.group_booking_facility.clone().unwrap_or(
@@ -3530,7 +3618,7 @@ impl NetexImporter {
                 } else {
                     ReservationField::Unknown
                 },
-                first_class: if service_facility_set.fare_classes.text.contains(
+                first_class: if fare_classes.contains(
                     &FareClass::FirstClass
                 ) {
                     if service_reservation_facility_list.text.contains(
@@ -3551,7 +3639,7 @@ impl NetexImporter {
                 } else {
                     ReservationField::NotApplicable
                 },
-                second_class: if service_facility_set.fare_classes.text.contains(
+                second_class: if fare_classes.contains(
                     &FareClass::SecondClass
                 ) {
                     if service_reservation_facility_list.text.contains(
@@ -3572,13 +3660,14 @@ impl NetexImporter {
                 } else {
                     ReservationField::NotApplicable
                 },
-                not_every_class: if service_reservation_facility_list.text.contains(
-                    &Reservation::ReservationsPossibleForCertainClasses
-                ) {
-                    ReservationField::Possible
-                } else {
-                    ReservationField::NotApplicable
-                },
+                not_every_class:
+                    if service_reservation_facility_list.text.contains(
+                        &Reservation::ReservationsPossibleForCertainClasses
+                    ) {
+                        ReservationField::Possible
+                    } else {
+                        ReservationField::NotApplicable
+                    },
                 bicycles: if service_reservation_facility_list.text.contains(
                     &Reservation::BicycleReservationsCompulsory
                 ) || service_facility_set.luggage_carriage_facility_list.clone().unwrap_or(
@@ -3590,39 +3679,40 @@ impl NetexImporter {
                 } else {
                     ReservationField::NotMandatory
                 },
-                sleepers: if service_facility_set.accommodation_facility_list.text.contains(
-                    &AccommodationFacility::Sleeper
-                ) {
-                    if service_reservation_facility_list.text.contains(
-                        &Reservation::ReservationsCompulsory
+                sleepers:
+                    if accommodation_facility_list.contains(
+                        &AccommodationFacility::Sleeper
                     ) {
-                        ReservationField::Mandatory
-                    } else if service_reservation_facility_list.text.contains(
-                        &Reservation::ReservationsCompulsoryFromOriginStation
-                    ) {
-                        ReservationField::MandatoryFromOrigin
-                    } else if service_reservation_facility_list.text.contains(
-                        &Reservation::ReservationsRecommended
-                    ) {
-                        ReservationField::Recommended
-                    } else if service_reservation_facility_list.text.contains(
-                        &Reservation::ReservationsRecommended
-                    ) {
-                        ReservationField::Recommended
-                    } else if service_reservation_facility_list.text.contains(
-                        &Reservation::ReservationsPossible
-                    ) {
-                        ReservationField::Possible
-                    } else if service_reservation_facility_list.text.contains(
-                        &Reservation::NoReservationsPossible
-                    ) {
-                        ReservationField::Impossible
+                        if service_reservation_facility_list.text.contains(
+                            &Reservation::ReservationsCompulsory
+                        ) {
+                            ReservationField::Mandatory
+                        } else if service_reservation_facility_list.text.contains(
+                            &Reservation::ReservationsCompulsoryFromOriginStation
+                        ) {
+                            ReservationField::MandatoryFromOrigin
+                        } else if service_reservation_facility_list.text.contains(
+                            &Reservation::ReservationsRecommended
+                        ) {
+                            ReservationField::Recommended
+                        } else if service_reservation_facility_list.text.contains(
+                            &Reservation::ReservationsRecommended
+                        ) {
+                            ReservationField::Recommended
+                        } else if service_reservation_facility_list.text.contains(
+                            &Reservation::ReservationsPossible
+                        ) {
+                            ReservationField::Possible
+                        } else if service_reservation_facility_list.text.contains(
+                            &Reservation::NoReservationsPossible
+                        ) {
+                            ReservationField::Impossible
+                        } else {
+                            ReservationField::Unknown
+                        }
                     } else {
-                        ReservationField::Unknown
-                    }
-                } else {
-                    ReservationField::NotApplicable
-                },
+                        ReservationField::NotApplicable
+                    },
                 vehicles: ReservationField::Unknown,
                 wheelchairs: if service_reservation_facility_list.text.contains(
                     &Reservation::WheelchairOnlyReservations
@@ -3636,48 +3726,34 @@ impl NetexImporter {
                         &Reservation::ReservationsSupplementCharged
                     )
                 ),
-            }),
-            None => return Ok(Reservations {
-                seats: ReservationField::Unknown,
-                groups: ReservationField::Unknown,
-                first_class: ReservationField::Unknown,
-                second_class: ReservationField::Unknown,
-                not_every_class: ReservationField::Unknown,
-                bicycles: ReservationField::Unknown,
-                sleepers: ReservationField::Unknown,
-                vehicles: ReservationField::Unknown,
-                wheelchairs: ReservationField::Unknown,
-                supplement_charged: None,
-            }),
+            })),
+            None => return Ok(None),
         };
     }
 
     fn get_catering(
         &self, service_facility_set: &ServiceFacilitySet
-    ) -> Result<Option<Catering>, NetexError> {
+    ) -> Result<Option<variable_train::Catering>, NetexError> {
         match &service_facility_set.catering_facility_list {
-            Some(catering_facility_list) => Ok(Some(Catering {
+            Some(catering_facility_list) => Ok(Some(variable_train::Catering {
                 at_seat_meal: catering_facility_list.text.contains(&CateringFacility::MealAtSeat),
                 bar: catering_facility_list.text.contains(&CateringFacility::Bar),
                 bistro: catering_facility_list.text.contains(&CateringFacility::Bistro),
-                breakfast_in_car: catering_facility_list.text.contains(
-                    &CateringFacility::BreakfastInCar
-                ),
+                breakfast_in_car:
+                    catering_facility_list.text.contains(&CateringFacility::BreakfastInCar),
                 buffet: catering_facility_list.text.contains(&CateringFacility::Buffet),
                 coffee_shop: catering_facility_list.text.contains(&CateringFacility::CoffeeShop),
                 self_service: catering_facility_list.text.contains(&CateringFacility::SelfService),
                 trolley: catering_facility_list.text.contains(&CateringFacility::Trolley),
-                vending_machine_food: catering_facility_list.text.contains(
-                    &CateringFacility::FoodVendingMachine
-                ),
+                vending_machine_food:
+                    catering_facility_list.text.contains(&CateringFacility::FoodVendingMachine),
                 vending_machine_drink: catering_facility_list.text.contains(
                     &CateringFacility::BeverageVendingMachine
                 ),
                 mini_bar: catering_facility_list.text.contains(&CateringFacility::MiniBar),
                 restaurant: catering_facility_list.text.contains(&CateringFacility::Restaurant),
-                first_class_restaurant: catering_facility_list.text.contains(
-                    &CateringFacility::FirstClassRestaurant
-                ),
+                first_class_restaurant:
+                    catering_facility_list.text.contains(&CateringFacility::FirstClassRestaurant),
                 first_class_meal: false,
                 other: catering_facility_list.text.contains(&CateringFacility::Other),
                 food_available: if catering_facility_list.text.contains(
@@ -3713,103 +3789,21 @@ impl NetexImporter {
         }
     }
 
-    fn get_line(&self, line_ref: &str) -> Result<Line, NetexError> {
-        match self.line_by_id.get(line_ref) {
-            Some(line) => Ok(Line {
-                id: line_ref.to_string(),
-                public_id: Some(line.public_code.clone()),
-                name: Some(line.name.clone()),
-                number: None,
-                description: Some(line.description.clone()),
-                url: None,
-                background_colour: match &line.presentation {
-                    Some(presentation) => match &presentation.colour {
-                        Some(colour) => Some(RGB8 {
-                            r: match u8::from_str_radix(&colour[0..2], 16) {
-                                Ok(component) => component,
-                                Err(x) => return Err(NetexError {
-                                    error_type: NetexErrorType::BadColour(x)
-                                }),
-                            },
-                            g: match u8::from_str_radix(&colour[2..4], 16) {
-                                Ok(component) => component,
-                                Err(x) => return Err(NetexError {
-                                    error_type: NetexErrorType::BadColour(x)
-                                }),
-                            },
-                            b: match u8::from_str_radix(&colour[4..6], 16) {
-                                Ok(component) => component,
-                                Err(x) => return Err(NetexError {
-                                    error_type: NetexErrorType::BadColour(x)
-                                }),
-                            },
-                        }),
-                        None => None,
-                    },
-                    None => None,
-                },
-                foreground_colour: match &line.presentation {
-                    Some(presentation) => match &presentation.text_colour {
-                        Some(colour) => Some(RGB8 {
-                            r: match u8::from_str_radix(&colour[0..2], 16) {
-                                Ok(component) => component,
-                                Err(x) => return Err(NetexError {
-                                    error_type: NetexErrorType::BadColour(x)
-                                }),
-                            },
-                            g: match u8::from_str_radix(&colour[2..4], 16) {
-                                Ok(component) => component,
-                                Err(x) => return Err(NetexError {
-                                    error_type: NetexErrorType::BadColour(x)
-                                }),
-                            },
-                            b: match u8::from_str_radix(&colour[4..6], 16) {
-                                Ok(component) => component,
-                                Err(x) => return Err(NetexError {
-                                    error_type: NetexErrorType::BadColour(x)
-                                }),
-                            },
-                        }),
-                        None => None,
-                    },
-                    None => None,
-                },
-            }),
-            None => return Err(
-                NetexError {
-                    error_type: NetexErrorType::LineNotFound(line_ref.to_string())
-                }
-            ),
-        }
-    }
-
-    fn get_operator(&self, operator_ref: &str) -> Result<Option<TrainOperator>, NetexError> {
-        match self.operator_by_id.get(operator_ref) {
-            Some(operator) => Ok(Some(TrainOperator {
-                id: operator_ref.to_string(),
-                public_id: Some(operator.public_code.clone()),
-                description: Some(operator.name.clone()),
-            })),
-            // SNCF data has empty string operators sometimes
-            None => if operator_ref == "" {
-                Ok(None)
-            } else {
-                return Err(
-                    NetexError {
-                        error_type: NetexErrorType::OperatorNotFound(operator_ref.to_string())
-                    }
-                )
-            },
+    fn get_operator(&self, operator_ref: &str) -> Result<Option<String>, NetexError> {
+        if operator_ref == "" {
+            Ok(None)
+        } else {
+            Ok(Some(operator_ref.to_string()))
         }
     }
 
     fn get_toilets(
         &self, service_facility_set: &ServiceFacilitySet
-    ) -> Result<Option<Toilets>, NetexError> {
+    ) -> Result<Option<variable_train::Toilets>, NetexError> {
         match &service_facility_set.sanitary_facility_list {
             Some(sanitary_facility_list) => Ok(
                 if sanitary_facility_list.text.contains(&SanitaryFacility::SanitaryFacilityNone) {
-                    Some(Toilets {
+                    Some(variable_train::Toilets {
                         toilet: Some(false),
                         sink: Some(false),
                         disabled_toilet: Some(false),
@@ -3821,7 +3815,7 @@ impl NetexImporter {
                         other: Some(false),
                     })
                 } else {
-                    Some(Toilets {
+                    Some(variable_train::Toilets {
                         toilet: Some(
                             sanitary_facility_list.text.contains(&SanitaryFacility::Toilet)
                         ),
@@ -3840,9 +3834,11 @@ impl NetexImporter {
                         baby_changing: Some(sanitary_facility_list.text.contains(
                             &SanitaryFacility::BabyChange
                         )),
-                        disabled_baby_changing: Some(sanitary_facility_list.text.contains(
-                            &SanitaryFacility::WheelchairBabyChange
-                        )),
+                        disabled_baby_changing: Some(
+                            sanitary_facility_list.text.contains(
+                                &SanitaryFacility::WheelchairBabyChange
+                            )
+                        ),
                         shoe_shiner: Some(sanitary_facility_list.text.contains(
                             &SanitaryFacility::ShoeShiner
                         )),
@@ -3858,7 +3854,7 @@ impl NetexImporter {
 
     fn get_luggage(
         &self, service_facility_set: &ServiceFacilitySet
-    ) -> Result<Option<Luggage>, NetexError> {
+    ) -> Result<Option<variable_train::Luggage>, NetexError> {
         match &service_facility_set.luggage_carriage_facility_list {
             Some(luggage_carriage_facility_list) => Ok(
                 if luggage_carriage_facility_list.text.contains(&LuggageCarriage::Unknown) {
@@ -3880,7 +3876,7 @@ impl NetexImporter {
                     ) || luggage_carriage_facility_list.text.contains(
                         &LuggageCarriage::CyclesAllowedWithReservation
                     );
-                    Some(Luggage {
+                    Some(variable_train::Luggage {
                         bag_storage: if some_baggage_storage {
                             Some(luggage_carriage_facility_list.text.contains(
                                 &LuggageCarriage::BaggageStorage
@@ -3894,12 +3890,16 @@ impl NetexImporter {
                         skis: Some(luggage_carriage_facility_list.text.contains(
                             &LuggageCarriage::SkiRacks
                         )),
-                        skis_on_rear: Some(luggage_carriage_facility_list.text.contains(
-                            &LuggageCarriage::SkiRacksOnRear
-                        )),
-                        extra_large_racks: Some(luggage_carriage_facility_list.text.contains(
-                            &LuggageCarriage::ExtraLargeLuggageRacks
-                        )),
+                        skis_on_rear: Some(
+                            luggage_carriage_facility_list.text.contains(
+                                &LuggageCarriage::SkiRacksOnRear
+                            )
+                        ),
+                        extra_large_racks: Some(
+                            luggage_carriage_facility_list.text.contains(
+                                &LuggageCarriage::ExtraLargeLuggageRacks
+                            )
+                        ),
                         van: Some(luggage_carriage_facility_list.text.contains(
                             &LuggageCarriage::BaggageVan
                         )),
@@ -3910,18 +3910,26 @@ impl NetexImporter {
                         } else {
                             None
                         },
-                        bicycles_in_van: Some(luggage_carriage_facility_list.text.contains(
-                            &LuggageCarriage::CyclesAllowedInVan
-                        )),
-                        bicycles_in_carriage: Some(luggage_carriage_facility_list.text.contains(
-                            &LuggageCarriage::CyclesAllowedInCarriage
-                        )),
-                        pushchairs: Some(luggage_carriage_facility_list.text.contains(
-                            &LuggageCarriage::PushchairsAllowed
-                        )),
-                        vehicles: Some(luggage_carriage_facility_list.text.contains(
-                            &LuggageCarriage::VehicleTransport
-                        )),
+                        bicycles_in_van: Some(
+                            luggage_carriage_facility_list.text.contains(
+                                &LuggageCarriage::CyclesAllowedInVan
+                            )
+                        ),
+                        bicycles_in_carriage: Some(
+                            luggage_carriage_facility_list.text.contains(
+                                &LuggageCarriage::CyclesAllowedInCarriage
+                            )
+                        ),
+                        pushchairs: Some(
+                            luggage_carriage_facility_list.text.contains(
+                                &LuggageCarriage::PushchairsAllowed
+                            )
+                        ),
+                        vehicles: Some(
+                            luggage_carriage_facility_list.text.contains(
+                                &LuggageCarriage::VehicleTransport
+                            )
+                        ),
                     })
                 }
             ),
@@ -3931,17 +3939,19 @@ impl NetexImporter {
 
     fn get_families(
         &self, service_facility_set: &ServiceFacilitySet
-    ) -> Result<Option<Families>, NetexError> {
+    ) -> Result<Option<variable_train::Families>, NetexError> {
         match &service_facility_set.family_facility_list {
             Some(family_facility_list) => Ok(
-                Some(Families {
+                Some(variable_train::Families {
                     children_facilities: Some(
                         *family_facility_list == FamilyFacility::ServicesForChildren
                     ),
                     military_family_facilities: Some(
                         *family_facility_list == FamilyFacility::ServicesForArmyFamilies
                     ),
-                    nursery: Some(*family_facility_list == FamilyFacility::NurseryService),
+                    nursery: Some(
+                        *family_facility_list == FamilyFacility::NurseryService
+                    ),
                 })
             ),
             None => Ok(None),
@@ -3950,19 +3960,21 @@ impl NetexImporter {
 
     fn get_passenger_communications(
         &self, service_facility_set: &ServiceFacilitySet
-    ) -> Result<Option<PassengerCommunications>, NetexError> {
+    ) -> Result<Option<variable_train::PassengerCommunications>, NetexError> {
         match &service_facility_set.passenger_comms_facility_list {
             Some(passenger_comms_facility_list) => Ok(
-                Some(PassengerCommunications {
+                Some(variable_train::PassengerCommunications {
                     free_wifi: Some(passenger_comms_facility_list.text.contains(
                         &PassengerCommsFacility::FreeWifi
                     )),
                     wifi: Some(passenger_comms_facility_list.text.contains(
                         &PassengerCommsFacility::PublicWifi
                     )),
-                    mains_sockets: Some(passenger_comms_facility_list.text.contains(
-                        &PassengerCommsFacility::PowerSupplySockets
-                    )),
+                    mains_sockets: Some(
+                        passenger_comms_facility_list.text.contains(
+                            &PassengerCommsFacility::PowerSupplySockets
+                        )
+                    ),
                     telephone: Some(passenger_comms_facility_list.text.contains(
                         &PassengerCommsFacility::Telephone
                     )),
@@ -4001,7 +4013,7 @@ impl NetexImporter {
 
     fn get_assistance(
         &self, service_facility_set: &ServiceFacilitySet
-    ) -> Result<Option<Assistance>, NetexError> {
+    ) -> Result<Option<variable_train::Assistance>, NetexError> {
         let assistance_facility_merged = match &service_facility_set.assistance_facility_list {
             Some(assistance_facility_list) => Some(assistance_facility_list.text.clone()),
             None => match &service_facility_set.assistance_facility_enumeration {
@@ -4012,7 +4024,7 @@ impl NetexImporter {
         };
         match &assistance_facility_merged {
             Some(assistance_facility_list) => Ok(
-                Some(Assistance {
+                Some(variable_train::Assistance {
                     personal: Some(assistance_facility_list.contains(
                         &AssistanceFacility::PersonalAssistance
                     )
@@ -4069,12 +4081,12 @@ impl NetexImporter {
 
     fn get_passenger_information(
         &self, service_facility_set: &ServiceFacilitySet
-    ) -> Result<Option<PassengerInformation>, NetexError> {
+    ) -> Result<Option<variable_train::PassengerInformation>, NetexError> {
         if service_facility_set.passenger_information_facility_enumeration.is_none()
             && service_facility_set.accessibility_info_facility_enumeration.is_none() {
             return Ok(None);
         }
-        let mut passenger_info = PassengerInformation {
+        let mut passenger_info = variable_train::PassengerInformation {
             next_stop_indication: Some(false),
             stop_announcements: Some(false),
             information_display: Some(false),
@@ -4167,10 +4179,10 @@ impl NetexImporter {
         &self,
         service_journey_pattern: &ServiceJourneyPattern,
         timetabled_passing_times: &Vec<TimetabledPassingTime>,
-        validity: &Vec<TrainValidityPeriod>,
+        validity: &Vec<train_validity_period::ActiveModelEx>,
         train_id: &str,
-        mut schedule: Schedule,
-    ) -> Result<(Vec<TrainLocation>, Schedule), NetexError> {
+        namespace: &str,
+    ) -> Result<Vec<train_location::ActiveModelEx>, NetexError> {
         // OK, so, we use the `service_journey_pattern` to figure out the stopping points, and we
         // use `timetabled_passing_times` to figure out the times of those stopping points.
         let mut train_locations = vec![];
@@ -4200,27 +4212,26 @@ impl NetexImporter {
                     }
                 ),
             };
-            let mut divides_to_form = vec![];
-            let mut joins_to = vec![];
-            let mut divides_from = vec![];
-            let mut is_joined_to_by = vec![];
+            let mut associations = vec![];
             // OK so now we have everything, we are nearly ready to produce the train location.
             // However, now we have coupling to worry about. Coupling data is suuuper weird and I
             // might have got this wrong but I reckon you basically have to match by hand.
             for maybe_coupled_train
                 in self.coupled_train_ids_by_train_id.get(train_id).unwrap_or(&HashSet::new()) {
                 // TODO figure out if validities are compatible and skip if not
-                let mut association_node = AssociationNode {
-                    other_train_id: maybe_coupled_train.clone(),
-                    other_train_location_id_suffix: None, // TODO as elsewhere, departure/arrival
-                                                          // time
-                    validity: validity.clone(), // No specific separate validity for joins in NeTEx
-                    cancellations: vec![],
-                    replacements: vec![],
-                    day_diff: 0, // Placeholder for now, this is worked out from diff of start/end
-                                 // time as appropriate
-                    for_passengers: true,
-                    source: None, // Unlike trains there's nothing to say where a coupling came from
+                let mut association_node = association_node::ActiveModelEx {
+                    other_train_id: ActiveValue::Set(maybe_coupled_train.clone()),
+                    // TODO as elsewhere, departure/arrival time
+                    other_train_location_id_suffix: ActiveValue::Set(None), 
+                    namespace: ActiveValue::Set(namespace.to_string()),
+                    // No specific separate validity for joins in NeTEx, TODO could eventually
+                    // intersection the two in a two-pass solution
+                    validity: ActiveHasMany::Append(validity.clone()),
+                    // day_diff is set later
+                    for_passengers: ActiveValue::Set(true),
+                    // Unlike trains there's nothing to say where a coupling came from
+                    source: ActiveValue::Set(None),
+                    ..Default::default()
                 };
                 for journey_part_couple_id in
                     self.journey_part_couple_ids_by_train_id
@@ -4316,29 +4327,37 @@ impl NetexImporter {
                                     // here, that means that THE OTHER TRAIN started on the PREVIOUS
                                     // day, so the day diff will be NEGATIVE to get to the PREVIOUS
                                     // day that the associated part will be running on.
-                                    association_node.day_diff =
+                                    association_node.day_diff = ActiveValue::Set(
                                         i8::try_from(
                                             main_journey_part.start_time_day_offset.unwrap_or(0)
                                         ).unwrap()
                                         - i8::try_from(
                                             other_journey_part.start_time_day_offset.unwrap_or(0)
-                                        ).unwrap();
+                                        ).unwrap()
+                                    );
+                                    association_node.association_type = ActiveValue::Set(
+                                        AssociationType::MainJoinsToOther
+                                    );
 
-                                    is_joined_to_by.push(association_node.clone());
+                                    associations.push(association_node.clone());
                                 } else
                                     if journey_part_couple.to_stop_point_ref.to_stop_point_ref_ref
                                     == stop_point_in_journey_pattern
                                         .scheduled_stop_point_ref
                                         .scheduled_stop_point_ref_ref {
-                                    association_node.day_diff =
+                                    association_node.day_diff = ActiveValue::Set(
                                         i8::try_from(
                                             main_journey_part.end_time_day_offset.unwrap_or(0)
                                         ).unwrap()
                                         - i8::try_from(
                                             other_journey_part.end_time_day_offset.unwrap_or(0)
-                                        ).unwrap();
+                                        ).unwrap()
+                                    );
+                                    association_node.association_type = ActiveValue::Set(
+                                        AssociationType::MainDividesToFormOther
+                                    );
 
-                                    divides_to_form.push(association_node.clone());
+                                    associations.push(association_node.clone());
                                 }
                             } else if self.service_journey_ids_by_train_number_id.get(
                                 &other_journey_part.train_number_ref.train_number_ref_ref
@@ -4383,110 +4402,146 @@ impl NetexImporter {
                                     // here, that means that THE OTHER TRAIN started on the PREVIOUS
                                     // day, so the day diff will be NEGATIVE to get to the PREVIOUS
                                     // day that the associated part will be running on.
-                                    association_node.day_diff =
+                                    association_node.day_diff = ActiveValue::Set(
                                         i8::try_from(
                                             other_journey_part.start_time_day_offset.unwrap_or(0)
                                         ).unwrap()
                                         - i8::try_from(
                                             main_journey_part.start_time_day_offset.unwrap_or(0)
-                                        ).unwrap();
+                                        ).unwrap()
+                                    );
+                                    association_node.association_type = ActiveValue::Set(
+                                        AssociationType::MainIsJoinedToByOther
+                                    );
 
-                                    joins_to.push(association_node.clone());
+                                    associations.push(association_node.clone());
                                 } else
                                     if journey_part_couple.to_stop_point_ref.to_stop_point_ref_ref
                                     == stop_point_in_journey_pattern
                                         .scheduled_stop_point_ref
                                         .scheduled_stop_point_ref_ref {
-                                    association_node.day_diff =
+                                    association_node.day_diff = ActiveValue::Set(
                                         i8::try_from(
                                             other_journey_part.end_time_day_offset.unwrap_or(0)
                                         ).unwrap()
                                         - i8::try_from(
                                             main_journey_part.end_time_day_offset.unwrap_or(0)
-                                        ).unwrap();
+                                        ).unwrap()
+                                    );
+                                    association_node.association_type = ActiveValue::Set(
+                                        AssociationType::MainDividesFromOther
+                                    );
 
-                                    divides_from.push(association_node.clone());
+                                    associations.push(association_node.clone());
                                 }
                             }
                         }
                     }
                 }
             }
-            let train_location = TrainLocation {
-                timing_tz: None,
-                id: stop_point_in_journey_pattern
+            let train_location = train_location::ActiveModelEx {
+                timing_tz: ActiveValue::Set(None),
+                location_id: ActiveValue::Set(stop_point_in_journey_pattern
                     .scheduled_stop_point_ref
                     .scheduled_stop_point_ref_ref
-                    .clone(),
-                id_suffix: None, // The actual keying here is off departure/arrival time, TODO split
-                                 // this key into two to allow either one to be used as appropriate.
-                working_arr: None,
-                working_arr_day: None,
-                working_dep: None,
-                working_dep_day: None,
-                working_pass: None,
-                working_pass_day: None,
-                public_arr: timetabled_passing_time.arrival_time.clone(),
-                public_arr_day: match timetabled_passing_time.arrival_day_offset {
+                    .clone()),
+                // The actual keying here is off departure/arrival time, TODO split this key into
+                // two to allow either one to be used as appropriate.
+                id_suffix: ActiveValue::Set(None), 
+                namespace: ActiveValue::Set(namespace.to_string()),
+                index: ActiveValue::Set(i.try_into().unwrap()),
+                working_arr: ActiveValue::Set(None),
+                working_arr_day: ActiveValue::Set(None),
+                working_dep: ActiveValue::Set(None),
+                working_dep_day: ActiveValue::Set(None),
+                working_pass: ActiveValue::Set(None),
+                working_pass_day: ActiveValue::Set(None),
+                public_arr: ActiveValue::Set(timetabled_passing_time.arrival_time.clone()),
+                public_arr_day: ActiveValue::Set(match timetabled_passing_time.arrival_day_offset {
                     Some(x) => Some(x),
                     None => match timetabled_passing_time.arrival_time {
                         Some(_) => Some(0),
                         None => None,
                     },
-                },
-                public_dep: timetabled_passing_time.departure_time.clone(),
-                public_dep_day: match timetabled_passing_time.departure_day_offset {
-                    Some(x) => Some(x),
-                    None => match timetabled_passing_time.departure_time {
-                        Some(_) => Some(0),
-                        None => None,
-                    },
-                },
-                platform: None,
-                platform_zone: None,
-                line: None,
-                path: None,
-                engineering_allowance_s: None,
-                pathing_allowance_s: None,
-                performance_allowance_s: None,
-                activities: Activities {
-                    set_down_only: timetabled_passing_time.departure_time.is_none()
-                        && timetabled_passing_time.arrival_time.is_some(),
-                    pick_up_only: timetabled_passing_time.arrival_time.is_none()
-                        && timetabled_passing_time.departure_time.is_some(),
-                    unadvertised_stop: timetabled_passing_time.arrival_time.is_none()
-                        && timetabled_passing_time.departure_time.is_none(),
-                    normal_passenger_stop: timetabled_passing_time.departure_time.is_some()
-                        && timetabled_passing_time.arrival_time.is_some(),
-                    train_begins: i == 0,
-                    train_finishes: i == timetabled_passing_times.len() - 1,
-                    ..Default::default()
-                },
-                change_en_route: None,
-                divides_to_form: divides_to_form,
-                joins_to: joins_to,
-                becomes: None,
-                divides_from: divides_from,
-                is_joined_to_by: is_joined_to_by,
-                forms_from: None,
+                }),
+                public_dep: ActiveValue::Set(timetabled_passing_time.departure_time.clone()),
+                public_dep_day:
+                    ActiveValue::Set(match timetabled_passing_time.departure_day_offset {
+                        Some(x) => Some(x),
+                        None => match timetabled_passing_time.departure_time {
+                            Some(_) => Some(0),
+                            None => None,
+                        },
+                    }),
+                platform: ActiveValue::Set(None),
+                platform_zone: ActiveValue::Set(None),
+                line: ActiveValue::Set(None),
+                path: ActiveValue::Set(None),
+                engineering_allowance_s: ActiveValue::Set(None),
+                pathing_allowance_s: ActiveValue::Set(None),
+                performance_allowance_s: ActiveValue::Set(None),
+                set_down_only: ActiveValue::Set(timetabled_passing_time.departure_time.is_none()
+                    && timetabled_passing_time.arrival_time.is_some()),
+                pick_up_only: ActiveValue::Set(timetabled_passing_time.arrival_time.is_none()
+                    && timetabled_passing_time.departure_time.is_some()),
+                unadvertised_stop: ActiveValue::Set(
+                    timetabled_passing_time.arrival_time.is_none()
+                    && timetabled_passing_time.departure_time.is_none()
+                ),
+                normal_passenger_stop: ActiveValue::Set(
+                    timetabled_passing_time.departure_time.is_some()
+                    && timetabled_passing_time.arrival_time.is_some()
+                ),
+                train_begins: ActiveValue::Set(i == 0),
+                train_finishes: ActiveValue::Set(i == timetabled_passing_times.len() - 1),
+                request_pick_up: ActiveValue::Set(false),
+                request_set_down: ActiveValue::Set(false),
+                request_pick_up_by_telephone: ActiveValue::Set(false),
+                request_set_down_by_telephone: ActiveValue::Set(false),
+                times_approximate: ActiveValue::Set(false),
+                detach: ActiveValue::Set(false),
+                attach: ActiveValue::Set(false),
+                other_trains_pass: ActiveValue::Set(false),
+                attach_or_detach_assisting_loco: ActiveValue::Set(false),
+                x_on_arrival: ActiveValue::Set(false),
+                banking_loco: ActiveValue::Set(false),
+                crew_change: ActiveValue::Set(false),
+                examination: ActiveValue::Set(false),
+                gbprtt: ActiveValue::Set(false),
+                prevent_column_merge: ActiveValue::Set(false),
+                prevent_third_column_merge: ActiveValue::Set(false),
+                passenger_count: ActiveValue::Set(false),
+                ticket_collection: ActiveValue::Set(false),
+                ticket_examination: ActiveValue::Set(false),
+                first_class_ticket_examination: ActiveValue::Set(false),
+                selective_ticket_examination: ActiveValue::Set(false),
+                change_loco: ActiveValue::Set(false),
+                operational_stop: ActiveValue::Set(false),
+                train_locomotive_on_rear: ActiveValue::Set(false),
+                propelling: ActiveValue::Set(false),
+                reversing_move: ActiveValue::Set(false),
+                run_round: ActiveValue::Set(false),
+                staff_stop: ActiveValue::Set(false),
+                tops_reporting: ActiveValue::Set(false),
+                token_etc: ActiveValue::Set(false),
+                watering_stock: ActiveValue::Set(false),
+                cross_at_passing_point: ActiveValue::Set(false),
+                association_nodes: ActiveHasMany::Append(associations),
+                ..Default::default()
             };
-            schedule
-                .trains_indexed_by_location
-                .entry(train_location.id.clone())
-                .or_insert(HashSet::new())
-                .insert(train_id.to_string());
 
             train_locations.push(train_location);
         }
-        Ok((train_locations, schedule))
+        Ok(train_locations)
     }
 
-    fn read_service_journey(
+    async fn read_service_journey(
         &self,
         service_journey: &ServiceJourney,
-        schedule: Schedule,
-        default_timezone: &Tz,
-    ) -> Result<Schedule, NetexError> {
+        namespace: &str,
+        default_timezone: &str,
+        transaction: &DatabaseTransaction,
+    ) -> Result<(), Error> {
         let mut operating_periods = vec![];
         let day_type_ref = &service_journey.day_types.day_type_ref.day_type_ref_ref;
         match self.uic_operating_period_ids_by_day_type_id.get(day_type_ref) {
@@ -4496,14 +4551,14 @@ impl NetexImporter {
                     None => return Err(
                         NetexError {
                             error_type: NetexErrorType::UicOperatingPeriodNotFound(id.clone())
-                        }
+                        }.into()
                     ),
                 }
             },
             None => return Err(
                 NetexError {
                     error_type: NetexErrorType::DayTypeAssignmentNotFound(day_type_ref.clone())
-                }
+                }.into()
             ),
         }
         let validity = self.calculate_validities(
@@ -4521,31 +4576,20 @@ impl NetexImporter {
                     error_type: NetexErrorType::TrainNumberNotFound(
                         service_journey.train_numbers.train_number_ref.train_number_ref_ref.clone()
                     )
-                }
+                }.into()
             ),
         };
         let accommodation = match &service_journey.facilities {
-            Some(facilities) => Some(self.get_accommodation(
+            Some(facilities) => self.get_accommodation(
                 &facilities.service_facility_set
-            )?),
-            None => None,
+            )?,
+            None => vec![],
         };
         let reservations = match &service_journey.facilities {
             Some(facilities) => self.get_reservations(
                 &facilities.service_facility_set
             )?,
-            None => Reservations {
-                seats: ReservationField::Unknown,
-                groups: ReservationField::Unknown,
-                first_class: ReservationField::Unknown,
-                second_class: ReservationField::Unknown,
-                not_every_class: ReservationField::Unknown,
-                bicycles: ReservationField::Unknown,
-                sleepers: ReservationField::Unknown,
-                vehicles: ReservationField::Unknown,
-                wheelchairs: ReservationField::Unknown,
-                supplement_charged: None,
-            },
+            None => None,
         };
         let catering = match &service_journey.facilities {
             Some(facilities) => self.get_catering(
@@ -4553,8 +4597,8 @@ impl NetexImporter {
             )?,
             None => None,
         };
-        let line = Some(self.get_line(&service_journey.line_ref.line_ref_ref)?);
-        let operator = self.get_operator(&service_journey.operator_ref.operator_ref_ref)?;
+        let line_id = Some(service_journey.line_ref.line_ref_ref.clone());
+        let operator_id = self.get_operator(&service_journey.operator_ref.operator_ref_ref)?;
         let toilets = match &service_journey.facilities {
             Some(facilities) => self.get_toilets(
                 &facilities.service_facility_set
@@ -4600,16 +4644,16 @@ impl NetexImporter {
                     error_type: NetexErrorType::ServiceJourneyPatternNotFound(
                         service_journey.journey_pattern_ref.journey_pattern_ref_ref.clone()
                     )
-                }
+                }.into()
             ),
         };
         let headcode = self.get_headcode(service_journey_pattern)?;
-        let (route, mut schedule) = self.get_route(
+        let route = self.get_route(
             service_journey_pattern,
             &service_journey.passing_times.timetabled_passing_time,
             &validity,
             &service_journey.id,
-            schedule,
+            namespace,
         )?;
         let source = Some(match service_journey.service_alteration {
             ServiceAlteration::Planned => TrainSource::LongTerm,
@@ -4618,68 +4662,94 @@ impl NetexImporter {
             ServiceAlteration::Cancellation => TrainSource::LongTerm, // The original
             ServiceAlteration::Replaced => TrainSource::LongTerm, // The original
         });
-        let variable_train = VariableTrain {
-            train_type: train_type,
-            public_id: Some(train_number),
-            headcode: headcode,
-            power_type: None,
-            timing_allocation: None,
-            actual_allocation: None,
-            timing_speed_m_per_s: None,
-            operating_characteristics: None,
-            accommodation: accommodation,
-            reservations: reservations,
-            catering: catering,
-            brand: Some(service_journey.branding_ref.branding_ref_ref.clone()),
-            name: None,
-            line: line,
-            uic_code: None, // IDK even what this is any more
-            operator: operator,
-            wheelchair_accessible: None, // TODO does this need removing now?
-            toilets: toilets,
-            luggage: luggage,
-            families: families,
-            passenger_communications: passenger_communications,
-            assistance: assistance,
-            passenger_information: passenger_information,
+        let mut variable_train = variable_train::ActiveModelEx {
+            namespace: ActiveValue::Set(namespace.to_string()),
+            train_type: ActiveValue::Set(train_type),
+            public_id: ActiveValue::Set(Some(train_number)),
+            headcode: ActiveValue::Set(headcode),
+            power_type: ActiveValue::Set(None),
+            timing_speed_m_per_s: ActiveValue::Set(None),
+            accommodation: ActiveHasMany::Append(accommodation),
+            brand: ActiveValue::Set(Some(service_journey.branding_ref.branding_ref_ref.clone())),
+            name: ActiveValue::Set(None),
+            line_id: ActiveValue::Set(line_id),
+            // This may or may not be == public_id, but we can't tell
+            uic_code: ActiveValue::Set(None),
+            operator_id: ActiveValue::Set(operator_id),
+            // TODO does this need removing now?
+            wheelchair_accessible: ActiveValue::Set(None),
+            has_operating_characteristics: ActiveValue::Set(false),
+            ..Default::default()
+        };
+        match &catering {
+            Some(x) => variable_train.populate_catering(x),
+            None => variable_train.has_catering = ActiveValue::Set(false),
+        };
+        match &reservations {
+            Some(x) => variable_train.populate_reservations(x),
+            None => variable_train.has_reservations = ActiveValue::Set(false),
+        };
+        match &toilets {
+            Some(x) => variable_train.populate_toilets(x),
+            None => variable_train.has_toilets = ActiveValue::Set(false),
+        };
+        match &luggage {
+            Some(x) => variable_train.populate_luggage(x),
+            None => variable_train.has_luggage = ActiveValue::Set(false),
+        };
+        match &families {
+            Some(x) => variable_train.populate_families(x),
+            None => variable_train.has_families = ActiveValue::Set(false),
+        };
+        match &passenger_communications {
+            Some(x) => variable_train.populate_passenger_communications(x),
+            None => variable_train.has_passenger_communications = ActiveValue::Set(false),
+        };
+        match &assistance {
+            Some(x) => variable_train.populate_assistance(x),
+            None => variable_train.has_assistance = ActiveValue::Set(false),
+        };
+        match &passenger_information {
+            Some(x) => variable_train.populate_passenger_information(x),
+            None => variable_train.has_passenger_information = ActiveValue::Set(false),
         };
         let cancellations = if service_journey.service_alteration == ServiceAlteration::Cancellation
             || service_journey.service_alteration == ServiceAlteration::Replaced {
             // If a train is cancelled or replaced, it means its whole validity is cancelled. TODO
             // maybe later try to match up with the original train and merge the validity periods
             // and mark that as cancelled instead?
-            validity.iter().map(|period| (period.clone(), TrainSource::ShortTerm)).collect()
+            vec![train_cancellation::ActiveModelEx {
+                validity: ActiveHasMany::Append(validity.clone()),
+                source: ActiveValue::Set(Some(TrainSource::ShortTerm)),
+                ..Default::default()
+            }]
         } else {
             vec![]
         };
-        let train = Train {
-            id: service_journey.id.clone(),
-            validity: validity,
-            cancellations: cancellations,
-            replacements: vec![], // I don't think we can match up replacements with originals
-                                  // easily? So just have them as cancelled instead sadly.
-            variable_train: variable_train,
-            source: source,
-            runs_as_required: false,
-            performance_monitoring: None,
-            route: route,
+        let train_variant = train_variant::ActiveModelEx {
+            validity: ActiveHasMany::Append(validity),
+            cancellations: ActiveHasMany::Append(cancellations),
+            // I don't think we can match up replacements with originals easily? So just have them
+            // as cancelled instead sadly.
+            replacements: ActiveHasMany::Append(vec![]),
+            variable_train: ActiveHasOne::Set(Some(Box::new(variable_train))),
+            source: ActiveValue::Set(source),
+            runs_as_required: ActiveValue::Set(false),
+            performance_monitoring: ActiveValue::Set(None),
+            route: ActiveHasMany::Append(route),
+            ..Default::default()
         };
-        match &train.variable_train.public_id {
-            Some(x) => {
-                schedule
-                    .trains_indexed_by_public_id
-                    .entry(x.clone())
-                    .or_insert(HashSet::new())
-                    .insert(train.id.clone());
-            }
-            None => (),
-        }
-        schedule
-            .trains
-            .entry(train.id.clone())
-            .or_insert(vec![])
-            .push(train);
-        Ok(schedule)
+
+        let train = train::ActiveModelEx {
+            id: ActiveValue::Set(service_journey.id.clone()),
+            namespace: ActiveValue::Set(namespace.to_string()),
+            train_variants: ActiveHasMany::Append(vec![train_variant]),
+            ..Default::default()
+        };
+
+        train.insert(transaction).await?;
+
+        Ok(())
     }
 }
 
@@ -4688,8 +4758,9 @@ impl SlowStreamingImporter for NetexImporter {
     async fn overlay(
         &mut self,
         mut reader: impl AsyncBufReadExt + Unpin + Send,
-        schedule: Schedule,
-    ) -> Result<Schedule, Error> {
+        schedule: &schedule::ModelEx,
+        transaction: &DatabaseTransaction,
+    ) -> Result<(), Error> {
         // Can't seem to stream this for now
         let mut read_xml = Vec::new();
         reader.read_to_end(&mut read_xml).await?;
@@ -4698,12 +4769,10 @@ impl SlowStreamingImporter for NetexImporter {
             &mut deserializer
         )?;
 
-        let schedule = self.read_publication_delivery(&publication_delivery, schedule)?;
+        let namespace = schedule.namespace.clone();
+        self.read_publication_delivery(&publication_delivery, schedule, transaction).await?;
 
-        println!(
-            "Successfully loaded {} trains from NeTEx",
-            schedule.trains.len(),
-        );
-        Ok(schedule)
+        println!("[{}] Successfully loaded trains from NeTEx", namespace);
+        Ok(())
     }
 }

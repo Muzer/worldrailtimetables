@@ -1,6 +1,6 @@
 use crate::gtfs_importer::GtfsImportError;
 use crate::netex_importer::NetexError;
-use crate::nir_fetcher::{CkanError, NirFetcherError};
+//use crate::nir_fetcher::{CkanError, NirFetcherError};
 use crate::nr_vstp_subscriber::NrVstpError;
 use crate::sncf_fetcher::SncfFetcherError;
 use crate::uk_importer::{CifError, NrJsonError};
@@ -10,6 +10,7 @@ use config_file::ConfigFileError;
 use quick_xml::de::DeError;
 use rc_zip_tokio::rc_zip::error::Error as RcZipError;
 use reqwest;
+use sea_orm::DbErr;
 use serde_path_to_error::Error as SerdePathToErrorError;
 use tokio::task::JoinError;
 
@@ -18,6 +19,7 @@ use std::fmt;
 #[derive(Debug)]
 pub enum Error {
     ConfigFileError(ConfigFileError),
+    DbError(DbErr),
     DeError(SerdePathToErrorError<DeError>),
     HttpRequestError(reqwest::Error),
     IoError(std::io::Error),
@@ -33,8 +35,8 @@ pub enum Error {
     JoinError(JoinError),
     GtfsImportError(GtfsImportError),
     SncfFetcherError(SncfFetcherError),
-    CkanError(CkanError),
-    NirFetcherError(NirFetcherError),
+    //CkanError(CkanError),
+    //NirFetcherError(NirFetcherError),
     NetexError(NetexError),
 }
 
@@ -42,6 +44,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::ConfigFileError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::DbError(x) => write!(f, "WorldRailTimetables error: {}", x),
             Error::DeError(x) => write!(f, "WorldRailTimetables error: {}", x),
             Error::HttpRequestError(x) => write!(f, "WorldRailTimetables error: {}", x),
             Error::IoError(x) => write!(f, "WorldRailTimetables error: {}", x),
@@ -57,8 +60,8 @@ impl fmt::Display for Error {
             Error::JoinError(x) => write!(f, "WorldRailTimetables error: {}", x),
             Error::GtfsImportError(x) => write!(f, "WorldRailTimetables error: {}", x),
             Error::SncfFetcherError(x) => write!(f, "WorldRailTimetables error: {}", x),
-            Error::CkanError(x) => write!(f, "WorldRailTimetables error: {}", x),
-            Error::NirFetcherError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            //Error::CkanError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            //Error::NirFetcherError(x) => write!(f, "WorldRailTimetables error: {}", x),
             Error::NetexError(x) => write!(f, "WorldRailTimetables error: {}", x),
         }
     }
@@ -67,6 +70,12 @@ impl fmt::Display for Error {
 impl From<ConfigFileError> for Error {
     fn from(error: ConfigFileError) -> Self {
         Error::ConfigFileError(error)
+    }
+}
+
+impl From<DbErr> for Error {
+    fn from(error: DbErr) -> Self {
+        Error::DbError(error)
     }
 }
 
@@ -154,7 +163,7 @@ impl From<SncfFetcherError> for Error {
     }
 }
 
-impl From<CkanError> for Error {
+/*impl From<CkanError> for Error {
     fn from(error: CkanError) -> Self {
         Error::CkanError(error)
     }
@@ -164,7 +173,7 @@ impl From<NirFetcherError> for Error {
     fn from(error: NirFetcherError) -> Self {
         Error::NirFetcherError(error)
     }
-}
+}*/
 
 impl From<NetexError> for Error {
     fn from(error: NetexError) -> Self {

@@ -4,12 +4,15 @@ use crate::gtfs_importer::GtfsImporter;
 use crate::gtfs_url_fetcher::GtfsUrlFetcher;
 use crate::importer::SlowGtfsImporter;
 use crate::manager::Manager;
-use crate::schedule::Schedule;
+use crate::schedule::schedule;
 use crate::schedule_manager::ScheduleManager;
 
 use chrono::offset::Utc;
 use chrono::{Days, NaiveTime, TimeZone};
 use chrono_tz::Europe::Paris;
+
+use sea_orm::EntityTrait;
+use sea_orm::entity::ActiveValue;
 
 use tokio::time;
 use tokio::time::Duration;
@@ -33,21 +36,24 @@ impl EurostarManager {
         gtfs_importer: &mut GtfsImporter,
     ) -> Result<(), Error> {
         {
-            // lock for writing now, such that there will be no chance of smaller updates being
-            // lost
-            let mut transaction = self.schedule_manager.transactional_write().await;
+            let transaction = self.schedule_manager.transactional_write().await?;
 
-            let mut schedule = Schedule::new(
-                "zzes".to_string(),
-                "International — Eurostar".to_string(),
-            );
+            // Clear all the old data — all the deletes are set as cascades so should just need to
+            // clear the database.
+            schedule::Entity::delete_by_id("zzes")
+                .exec(&*transaction)
+                .await?;
+
+            let schedule = schedule::ActiveModelEx {
+                namespace: ActiveValue::Set("zzes".to_owned()),
+                description: ActiveValue::Set("International — Eurostar".to_owned()),
+                ..Default::default()
+            }.insert(&*transaction).await?;
 
             let gtfs = gtfs_fetcher.fetch().await?;
-            schedule = gtfs_importer.overlay(gtfs, schedule).await?;
+            gtfs_importer.overlay(gtfs, &schedule, &*transaction).await?;
 
-            // always replace the schedule
-            transaction.insert("zzes".to_string(), schedule);
-            transaction.commit();
+            transaction.commit().await?;
         }
 
         Ok(())
@@ -91,10 +97,17 @@ impl Manager for EurostarManager {
         let gtfs_fetcher = GtfsUrlFetcher::new(
             "https://integration-storage.dm.eurostar.com/gtfs-prod/gtfs_static_commercial_v2.zip",
             "eurostar.com",
+            "zzes",
         );
         let mut gtfs_importer = GtfsImporter::new();
 
-        self.reload_gtfs(&gtfs_fetcher, &mut gtfs_importer).await?;
+        match self.reload_gtfs(&gtfs_fetcher, &mut gtfs_importer).await {
+            Ok(()) => (),
+            Err(x) => {
+                println!("Startup error! {}", x);
+                return Err(x.into());
+            },
+        };
 
         tokio::try_join!(async {
             return self.update_gtfs(&gtfs_fetcher, &mut gtfs_importer).await;

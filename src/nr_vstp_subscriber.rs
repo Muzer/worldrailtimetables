@@ -2,26 +2,18 @@ use crate::error::Error;
 use crate::subscriber::Subscriber;
 use async_trait::async_trait;
 use serde::Deserialize;
-use tokio::task::JoinHandle;
 
-use tokio_stomp::client;
-use tokio_stomp::client::ClientTransport;
-use tokio_stomp::FromServer;
-use tokio_stomp::ToServer;
+use async_stomp::FromServer;
+use async_stomp::client::{ClientTransport, Connector, Subscriber as StompSubscriber};
 
-use futures::stream::SplitSink;
-use futures::stream::SplitStream;
 use futures::SinkExt;
 use futures::StreamExt;
-
-use tokio::time::Duration;
 
 use std::fmt;
 
 pub struct NrVstpSubscriber {
     config: NrVstpSubscriberConfig,
-    stream: Option<SplitStream<ClientTransport>>,
-    keepalive: Option<JoinHandle<Result<(), Error>>>,
+    stream: Option<ClientTransport>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -35,7 +27,6 @@ impl NrVstpSubscriber {
         Self {
             config,
             stream: None,
-            keepalive: None,
         }
     }
 }
@@ -51,49 +42,27 @@ impl fmt::Display for NrVstpError {
     }
 }
 
-async fn keep_alive(
-    mut sink: SplitSink<ClientTransport, tokio_stomp::Message<ToServer>>,
-) -> Result<(), Error> {
-    // horrible hacky workaround for tokio_stomp's lack of heartbeat support. I'm truly sorry.
-    loop {
-        tokio::time::sleep(Duration::from_secs(15)).await;
-        sink.send(
-            ToServer::Begin {
-                transaction: "foo".to_string(),
-            }
-            .into(),
-        )
-        .await?;
-        tokio::time::sleep(Duration::from_secs(15)).await;
-        sink.send(
-            ToServer::Abort {
-                transaction: "foo".to_string(),
-            }
-            .into(),
-        )
-        .await?;
-    }
-}
-
 #[async_trait]
 impl Subscriber for NrVstpSubscriber {
     async fn subscribe(&mut self) -> Result<(), Error> {
-        println!("Subscribing to VSTP data from Network Rail");
-        let (mut sink, stream) = client::connect(
-            "publicdatafeeds.networkrail.co.uk:61618",
-            "/".to_string(),
-            Some(self.config.username.clone()),
-            Some(self.config.password.clone()),
-        )
-        .await?
-        .split();
-        self.stream = Some(stream);
+        println!("[gbnr] Subscribing to VSTP data from Network Rail");
+        let mut connection = Connector::builder()
+            .server("publicdatafeeds.networkrail.co.uk:61618")
+            .virtualhost("/")
+            .login(self.config.username.clone())
+            .passcode(self.config.password.clone())
+            .heartbeat(15_000, 60_000)
+            .connect()
+            .await?;
 
-        sink.send(client::subscribe("/topic/VSTP_ALL", "1")).await?;
+        let subscriber = StompSubscriber::builder()
+            .destination("/topic/VSTP_ALL")
+            .id("1")
+            .subscribe();
 
-        self.keepalive = Some(tokio::spawn(async move {
-            return keep_alive(sink).await;
-        }));
+        connection.send(subscriber).await?;
+
+        self.stream = Some(connection);
 
         Ok(())
     }
@@ -107,7 +76,7 @@ impl Subscriber for NrVstpSubscriber {
                 }))
             }
         };
-        println!("Received VSTP data from Network Rail");
+        println!("[gbnr] Received VSTP data from Network Rail");
         let msg = match msg {
             Some(x) => x,
             None => {

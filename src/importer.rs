@@ -1,7 +1,9 @@
 use crate::error::Error;
-use crate::schedule::Schedule;
+use crate::schedule::schedule;
 
 use async_trait::async_trait;
+
+use sea_orm::DatabaseTransaction;
 
 use tokio::io::AsyncBufReadExt;
 
@@ -12,22 +14,21 @@ pub trait SlowStreamingImporter {
     async fn overlay(
         &mut self,
         reader: impl AsyncBufReadExt + Unpin + Send,
-        schedule: Schedule,
-    ) -> Result<Schedule, Error>;
+        schedule: &schedule::ModelEx,
+        transaction: &DatabaseTransaction,
+    ) -> Result<(), Error>;
 }
 
 #[async_trait]
 pub trait SlowGtfsImporter {
-    async fn overlay(&mut self, gtfs: Gtfs, schedule: Schedule) -> Result<Schedule, Error>;
+    async fn overlay(
+        &mut self, gtfs: Gtfs, schedule: &schedule::ModelEx, transaction: &DatabaseTransaction,
+    ) -> Result<(), Error>;
 }
 
 #[async_trait]
 pub trait FastImporter {
-    fn overlay(&self, data: Vec<u8>, schedule: Schedule) -> Result<Schedule, Error>;
-}
-
-#[async_trait]
-pub trait EphemeralImporter {
-    async fn repopulate(&self, schedule: Schedule) -> Result<Schedule, Error>;
-    async fn persist(&self) -> Result<(), Error>;
+    async fn overlay(
+        &self, data: Vec<u8>, schedule: &schedule::ModelEx, transaction: &DatabaseTransaction,
+    ) -> Result<(), Error>;
 }

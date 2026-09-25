@@ -33,7 +33,7 @@ impl NrFetcher {
 #[async_trait]
 impl StreamingFetcher for NrFetcher {
     async fn fetch(&self) -> Result<Box<dyn AsyncBufRead + Unpin + Send>, Error> {
-        println!("Fetching SCHEDULE from Network Rail");
+        println!("[gbnr] Fetching SCHEDULE from Network Rail");
         let client = Client::new();
         let response = client
             .get(self.url.clone())

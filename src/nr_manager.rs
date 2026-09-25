@@ -1,17 +1,20 @@
 use crate::error::Error;
 use crate::fetcher::StreamingFetcher;
-use crate::importer::{EphemeralImporter, FastImporter, SlowStreamingImporter};
+use crate::importer::{FastImporter, SlowStreamingImporter};
 use crate::manager::Manager;
 use crate::nr_fetcher::{NrFetcher, NrFetcherConfig};
 use crate::nr_vstp_subscriber::{NrVstpSubscriber, NrVstpSubscriberConfig};
-use crate::schedule::Schedule;
-use crate::schedule_manager::ScheduleManager;
+use crate::schedule::schedule;
+use crate::schedule_manager::{ScheduleManager, TransactionalWriter};
 use crate::subscriber::Subscriber;
-use crate::uk_importer::{CifImporter, CifImporterConfig, NrJsonImporter, NrJsonImporterConfig};
+use crate::uk_importer::{CifImporter, CifImporterConfig, NrJsonImporter};
 
 use chrono::offset::Utc;
 use chrono::{Datelike, Days, NaiveTime, TimeZone};
 use chrono_tz::Europe::London;
+
+use sea_orm::{EntityTrait, QueryFilter};
+use sea_orm::entity::ActiveValue;
 
 use tokio::time;
 use tokio::time::Duration;
@@ -26,7 +29,6 @@ use std::sync::Arc;
 pub struct NrConfig {
     fetcher: NrFetcherConfig,
     vstp_subscriber: NrVstpSubscriberConfig,
-    json_importer: NrJsonImporterConfig,
     cif_importer: CifImporterConfig,
 }
 
@@ -46,38 +48,152 @@ impl NrManager {
         })
     }
 
-    // TODO fetch these circular-ly for the daily updates as we are supposed to
+    async fn resynchronise_cif(
+        &self,
+        nr_fetcher: &NrFetcher,
+        nr_update_fetcher: &Vec<NrFetcher>,
+        cif_importer: &mut CifImporter,
+    ) -> Result<(), Error> {
+        {
+            let transaction = self.schedule_manager.transactional_write().await?;
+
+            // If we have run in the past 7 days, we can still resynchronise from incremental
+            // updates. Otherwise, we have to start afresh.
+
+            // CIF is advertised as being available from around 1am. Add 1h to this for safety, and
+            // an arbitrary minute offset to avoid on-the-hour spikes in demand. Thus we assume the
+            // new file starts at 02:09.
+
+            let schedule = schedule::Entity::load()
+                .filter(schedule::COLUMN.namespace.eq("gbnr"))
+                .one(&*transaction)
+                .await?;
+
+            // If no schedule, do a full reload
+            let mut schedule = match schedule {
+                Some(x) => x,
+                None => return self.reload_cif(
+                    nr_fetcher, nr_update_fetcher, cif_importer, Some(transaction)
+                ).await,
+            };
+
+            let now = London.from_utc_datetime(&Utc::now().naive_utc());
+
+            // This should always be set unless only VSTP has written to this schedule, which is an
+            // error
+            let last_updated = schedule.last_updated.unwrap();
+            
+            let last_updated_timetable_date
+                = if last_updated.time() > NaiveTime::from_hms_opt(2, 9, 0).unwrap() {
+                    last_updated.date().checked_add_days(Days::new(1)).unwrap()
+                } else {
+                    last_updated.date()
+                };
+
+            let expected_timetable_date
+                = if now.time() > NaiveTime::from_hms_opt(2, 9, 0).unwrap() {
+                now.date_naive()
+            } else {
+                now.date_naive().checked_sub_days(Days::new(1)).unwrap()
+            };
+
+            let date_diff = expected_timetable_date - last_updated_timetable_date;
+
+            // Although in theory this could be 7, in practice we don't know precisely when NR
+            // uploads the new data file so this would then produce an edge case. Even ignoring
+            // that, handling this case is actually quite tricky as we'd need to go once round the
+            // circle and so defining a stop condition is awkward. So do a full reload after 7 days
+            // of downtime rather than 8.
+            if date_diff.num_days() > 6 {
+                return self.reload_cif(
+                    nr_fetcher, nr_update_fetcher, cif_importer, Some(transaction)
+                ).await;
+            }
+
+            let current_day: usize = expected_timetable_date
+                .weekday()
+                .number_from_sunday()
+                .try_into()
+                .unwrap();
+
+            // 1-indexed, becomes 1 past the end of the array of fetchers
+            let current_day = current_day % 7;
+
+            let fetch_day: usize = last_updated_timetable_date
+                .weekday()
+                .number_from_sunday()
+                .try_into()
+                .unwrap();
+
+            // 1-indexed, becomes the start date of the array of fetchers
+            let fetch_day = fetch_day % 7;
+
+            let mut i: usize = fetch_day;
+
+            while i != current_day {
+                println!("[gbnr] Fetching updates for day {}", i);
+                let mut reader = nr_update_fetcher[i].fetch().await?;
+                cif_importer.overlay(&mut reader, &schedule, &transaction).await?;
+                // Reload the schedule after every overlay
+                schedule = schedule::Entity::load()
+                    .filter(schedule::COLUMN.namespace.eq("gbnr"))
+                    .one(&*transaction)
+                    .await?
+                    .unwrap();
+                i = (i + 1) % 7;
+            }
+        }
+
+        Ok(())
+    }
+
     async fn reload_cif(
         &self,
         nr_fetcher: &NrFetcher,
         nr_update_fetcher: &Vec<NrFetcher>,
         cif_importer: &mut CifImporter,
-        nr_json_importer: &NrJsonImporter,
+        transaction: Option<TransactionalWriter>,
     ) -> Result<(), Error> {
         {
-            // lock for writing now, such that there will be no chance of smaller updates being
-            // lost
-            let mut transaction = self.schedule_manager.transactional_write().await;
+            let transaction = match transaction {
+                Some(x) => x,
+                None => self.schedule_manager.transactional_write().await?,
+            };
 
-            let mut schedule = Schedule::new(
-                "gbnr".to_string(),
-                "United Kingdom — Network Rail".to_string(),
-            );
+            // Clear all the old data — all the deletes are set as cascades so should just need to
+            // clear the database.
+            schedule::Entity::delete_by_id("gbnr")
+                .exec(&*transaction)
+                .await?;
+
+            let schedule = schedule::ActiveModelEx {
+                namespace: ActiveValue::Set("gbnr".to_owned()),
+                description: ActiveValue::Set("United Kingdom — Network Rail".to_owned()),
+                ..Default::default()
+            }.insert(&*transaction).await?;
 
             let now = London.from_utc_datetime(&Utc::now().naive_utc());
             let mut reader = nr_fetcher.fetch().await?;
-            schedule = cif_importer.overlay(&mut reader, schedule).await?;
+            cif_importer.overlay(&mut reader, &schedule, &transaction).await?;
 
-            let mut current_day: usize = now
+            // Reload the schedule after every overlay
+            let mut schedule = schedule::Entity::load()
+                .filter(schedule::COLUMN.namespace.eq("gbnr"))
+                .one(&*transaction)
+                .await?
+                .unwrap();
+
+            let current_day: usize = now
                 .date_naive()
                 .weekday()
                 .number_from_sunday()
                 .try_into()
-                .unwrap(); // 1-indexed
-            if current_day == 7 {
-                current_day = 0;
-            }
-            if now.time() <= NaiveTime::from_hms_opt(1, 0, 0).unwrap() {
+                .unwrap();
+
+            // 1-indexed, becomes 1 past the end of the array of fetchers
+            let mut current_day = current_day % 7;
+
+            if now.time() <= NaiveTime::from_hms_opt(2, 9, 0).unwrap() {
                 if current_day == 0 {
                     current_day = 7;
                 }
@@ -85,19 +201,19 @@ impl NrManager {
             }
 
             for i in 0..current_day {
-                println!("Fetching updates for day {}", i);
+                println!("[gbnr] Fetching updates for day {}", i);
                 let mut reader = nr_update_fetcher[i].fetch().await?;
-                schedule = cif_importer.overlay(&mut reader, schedule).await?;
+                cif_importer.overlay(&mut reader, &schedule, &transaction).await?;
+                // Reload the schedule after every overlay
+                schedule = schedule::Entity::load()
+                    .filter(schedule::COLUMN.namespace.eq("gbnr"))
+                    .one(&*transaction)
+                    .await?
+                    .unwrap();
             }
 
-            schedule = nr_json_importer.repopulate(schedule).await?;
-
-            // always replace the schedule
-            transaction.insert("gbnr".to_string(), schedule);
-            transaction.commit();
+            transaction.commit().await?;
         }
-
-        nr_json_importer.persist().await?;
 
         Ok(())
     }
@@ -110,28 +226,23 @@ impl NrManager {
         loop {
             let res = nr_vstp_subscriber.receive().await?;
             {
-                let mut schedules = self.schedule_manager.immediate_write().await;
-                let mut schedule = match schedules.remove("gbnr") {
-                    Some(x) => x,
-                    None => Schedule::new(
-                        "gbnr".to_string(),
-                        "United Kingdom — Network Rail".to_string(),
-                    ),
-                };
-                schedule = nr_json_importer.overlay(res, schedule)?;
-                schedules.insert("gbnr".to_string(), schedule);
+                let transaction = self.schedule_manager.transactional_write().await?;
+                let schedule = schedule::Entity::load()
+                    .filter(schedule::COLUMN.namespace.eq("gbnr"))
+                    .one(&*transaction)
+                    .await?
+                    .unwrap();
+                nr_json_importer.overlay(res, &schedule, &transaction).await?;
+                transaction.commit().await?;
             }
-            nr_json_importer.persist().await?;
         }
     }
 
     // TODO fetch these circular-ly for the daily updates as we are supposed to
     async fn update_cif(
         &self,
-        nr_fetcher: &NrFetcher,
         nr_update_fetcher: &Vec<NrFetcher>,
         cif_importer: &mut CifImporter,
-        nr_json_importer: &NrJsonImporter,
     ) -> Result<(), Error> {
         loop {
             let now = London.from_utc_datetime(&Utc::now().naive_utc());
@@ -160,32 +271,28 @@ impl NrManager {
                 .weekday()
                 .number_from_sunday()
                 .try_into()
-                .unwrap(); // 1-indexed
-            if current_day == 7 {
-                self.reload_cif(
-                    nr_fetcher,
-                    nr_update_fetcher,
-                    cif_importer,
-                    nr_json_importer,
-                )
-                .await?;
-            } else {
-                {
-                    let mut transaction = self.schedule_manager.transactional_write().await;
+                .unwrap();
 
-                    let mut schedule = match transaction.remove("gbnr") {
-                        Some(x) => x,
-                        None => Schedule::new(
-                            "gbnr".to_string(),
-                            "United Kingdom — Network Rail".to_string(),
-                        ),
-                    };
-                    let mut reader = nr_update_fetcher[current_day].fetch().await?;
-                    schedule = cif_importer.overlay(&mut reader, schedule).await?;
-                    transaction.insert("gbnr".to_string(), schedule);
+            // 1-indexed, refers to the previous day so becomes the day we want to fetch for the
+            // next day
+            let current_day = current_day % 7;
 
-                    transaction.commit();
-                }
+            {
+                let transaction = self.schedule_manager.transactional_write().await?;
+                let schedule = match self.schedule_manager.get_schedule_by_id("gbnr").await? {
+                    Some(x) => x,
+                    None => schedule::ActiveModelEx {
+                        namespace: ActiveValue::Set("gbnr".to_owned()),
+                        description:
+                            ActiveValue::Set("United Kingdom — Network Rail".to_owned()),
+                        ..Default::default()
+                    }.insert(&*transaction).await?
+                };
+
+                let mut reader = nr_update_fetcher[current_day].fetch().await?;
+                cif_importer.overlay(&mut reader, &schedule, &transaction).await?;
+
+                transaction.commit().await?;
             }
         }
     }
@@ -206,15 +313,14 @@ impl Manager for NrManager {
         ];
         let mut cif_importer = CifImporter::new(self.config.cif_importer.clone());
         let mut nr_vstp_subscriber = NrVstpSubscriber::new(self.config.vstp_subscriber.clone());
-        let nr_json_importer = NrJsonImporter::new(self.config.json_importer.clone()).await?;
+        let nr_json_importer = NrJsonImporter::new().await?;
 
         nr_vstp_subscriber.subscribe().await?;
 
-        self.reload_cif(
+        self.resynchronise_cif(
             &nr_main_fetcher,
             &nr_update_fetchers,
             &mut cif_importer,
-            &nr_json_importer,
         )
         .await?;
 
@@ -227,10 +333,8 @@ impl Manager for NrManager {
             async {
                 return self
                     .update_cif(
-                        &nr_main_fetcher,
                         &nr_update_fetchers,
                         &mut cif_importer,
-                        &nr_json_importer,
                     )
                     .await;
             },

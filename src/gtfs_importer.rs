@@ -1,14 +1,13 @@
 use crate::error::Error;
 use crate::importer::SlowGtfsImporter;
 use crate::schedule::{
-    Activities, DaysOfWeek, Line, Location, Luggage, ReservationField, Reservations, Schedule,
-    Train, TrainLocation, TrainOperator, TrainSource, TrainType, TrainValidityPeriod,
-    VariableTrain,
+    line, location, schedule, train, train_cancellation, train_location, train_operator,
+    TrainSource, TrainType, train_validity_period, train_variant, variable_train,
 };
 
 use async_trait::async_trait;
 
-use chrono::{Datelike, NaiveTime, TimeZone};
+use chrono::{Datelike, NaiveTime};
 use chrono_tz::{ParseError, Tz};
 
 use gtfs_structures::{
@@ -16,9 +15,12 @@ use gtfs_structures::{
     LocationType, PickupDropOffType, RouteType, Stop, StopTime, TimepointType,
 };
 
-use tokio::task::block_in_place;
+use rgb::RGB8;
 
-use std::collections::{HashMap, HashSet};
+use sea_orm::DatabaseTransaction;
+use sea_orm::entity::{ActiveHasMany, ActiveHasOne, ActiveValue};
+
+use std::collections::{HashMap};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -90,16 +92,19 @@ impl fmt::Display for GtfsImportError {
     }
 }
 
-fn load_stop(stop: &Stop, default_timezone: &str) -> Result<Location, GtfsImportError> {
+fn load_stop(
+    stop: &Stop, default_timezone: &str, namespace: &str
+) -> Result<location::ActiveModelEx, GtfsImportError> {
     let timezone = stop
         .timezone
         .as_ref()
         .unwrap_or(&default_timezone.to_string())
         .clone();
-    Ok(Location {
-        id: stop.id.clone(),
+    Ok(location::ActiveModelEx {
+        id: ActiveValue::Set(stop.id.clone()),
+        namespace: ActiveValue::Set(namespace.to_owned()),
         name: match &stop.name {
-            Some(x) => x.clone(),
+            Some(x) => ActiveValue::Set(x.clone()),
             None => {
                 return Err(GtfsImportError {
                     error_type: GtfsErrorType::InvalidEmptyStopName(stop.id.clone()),
@@ -107,25 +112,26 @@ fn load_stop(stop: &Stop, default_timezone: &str) -> Result<Location, GtfsImport
                 })
             }
         },
-        public_id: match &stop.code {
-            Some(x) if x == "0" => None, // Irish Rail publishes all stops with the same stop code 0
+        public_id: ActiveValue::Set(match &stop.code {
+            Some(x) if x == "0" => None, // Irish Rail publishes many stops with stop code 0
             Some(x) => Some(x.clone()),
             None => None,
-        },
-        timezone: match Tz::from_str(&timezone) {
-            Ok(x) => x,
+        }),
+        timezone: ActiveValue::Set(match Tz::from_str(&timezone) {
+            Ok(x) => x.name().to_owned(),
             Err(x) => {
                 return Err(GtfsImportError {
                     error_type: GtfsErrorType::InvalidTimezone(timezone, x),
                     file: "stops".to_string(),
                 })
             }
-        },
+        }),
+        ..Default::default()
     })
 }
 
-fn calculate_days_of_week(calendar: &Calendar) -> DaysOfWeek {
-    DaysOfWeek {
+fn calculate_days_of_week(calendar: &Calendar) -> train_validity_period::DaysOfWeek {
+    train_validity_period::DaysOfWeek {
         monday: calendar.monday,
         tuesday: calendar.tuesday,
         wednesday: calendar.wednesday,
@@ -140,9 +146,9 @@ fn calculate_validities(
     calendar: &Option<&Calendar>,
     calendar_dates: &Option<&Vec<CalendarDate>>,
     timezone: &str,
-) -> Result<Vec<TrainValidityPeriod>, GtfsImportError> {
+) -> Result<Vec<train_validity_period::ActiveModelEx>, GtfsImportError> {
     let timezone = match Tz::from_str(&timezone) {
-        Ok(x) => x,
+        Ok(x) => x.name(),
         Err(x) => {
             return Err(GtfsImportError {
                 error_type: GtfsErrorType::InvalidTimezone(timezone.to_string(), x),
@@ -152,15 +158,16 @@ fn calculate_validities(
     };
 
     let mut validity = match calendar {
-        Some(x) => vec![TrainValidityPeriod {
-            valid_begin: timezone
-                .from_local_datetime(&x.start_date.and_hms_opt(0, 0, 0).unwrap())
-                .unwrap(),
-            valid_end: timezone
-                .from_local_datetime(&x.end_date.and_hms_opt(0, 0, 0).unwrap())
-                .unwrap(),
-            days_of_week: calculate_days_of_week(x),
-        }],
+        Some(x) => {
+            let mut validity = train_validity_period::ActiveModelEx {
+                timezone: ActiveValue::Set(timezone.to_owned()),
+                valid_begin: ActiveValue::Set(x.start_date.and_hms_opt(0, 0, 0).unwrap()),
+                valid_end: ActiveValue::Set(x.end_date.and_hms_opt(0, 0, 0).unwrap()),
+                ..Default::default()
+            };
+            validity.populate_days_of_week(&calculate_days_of_week(x));
+            vec![validity]
+        },
         None => vec![],
     };
 
@@ -169,15 +176,20 @@ fn calculate_validities(
         Some(x) => {
             for calendar_date in &**x {
                 match calendar_date.exception_type {
-                    Exception::Added => validity.push(TrainValidityPeriod {
-                        valid_begin: timezone
-                            .from_local_datetime(&calendar_date.date.and_hms_opt(0, 0, 0).unwrap())
-                            .unwrap(),
-                        valid_end: timezone
-                            .from_local_datetime(&calendar_date.date.and_hms_opt(0, 0, 0).unwrap())
-                            .unwrap(),
-                        days_of_week: DaysOfWeek::from_single_weekday(calendar_date.date.weekday()),
-                    }),
+                    Exception::Added => {
+                        let mut exception = train_validity_period::ActiveModelEx {
+                            timezone: ActiveValue::Set(timezone.to_owned()),
+                            valid_begin: ActiveValue::Set(
+                                calendar_date.date.and_hms_opt(0, 0, 0).unwrap()
+                            ),
+                            valid_end: ActiveValue::Set(
+                                calendar_date.date.and_hms_opt(0, 0, 0).unwrap()
+                            ),
+                            ..Default::default()
+                        };
+                        exception.populate_single_weekday(calendar_date.date.weekday());
+                        validity.push(exception);
+                    },
                     Exception::Deleted => (),
                 }
             }
@@ -190,9 +202,9 @@ fn calculate_validities(
 fn calculate_cancellations(
     calendar_dates: &Option<&Vec<CalendarDate>>,
     timezone: &str,
-) -> Result<Vec<(TrainValidityPeriod, TrainSource)>, GtfsImportError> {
+) -> Result<Vec<train_cancellation::ActiveModelEx>, GtfsImportError> {
     let timezone = match Tz::from_str(&timezone) {
-        Ok(x) => x,
+        Ok(x) => x.name(),
         Err(x) => {
             return Err(GtfsImportError {
                 error_type: GtfsErrorType::InvalidTimezone(timezone.to_string(), x),
@@ -208,24 +220,24 @@ fn calculate_cancellations(
         Some(x) => {
             for calendar_date in &**x {
                 match calendar_date.exception_type {
-                    Exception::Deleted => cancellations.push((
-                        TrainValidityPeriod {
-                            valid_begin: timezone
-                                .from_local_datetime(
-                                    &calendar_date.date.and_hms_opt(0, 0, 0).unwrap(),
-                                )
-                                .unwrap(),
-                            valid_end: timezone
-                                .from_local_datetime(
-                                    &calendar_date.date.and_hms_opt(0, 0, 0).unwrap(),
-                                )
-                                .unwrap(),
-                            days_of_week: DaysOfWeek::from_single_weekday(
-                                calendar_date.date.weekday(),
+                    Exception::Deleted => {
+                        let mut validity = train_validity_period::ActiveModelEx {
+                            timezone: ActiveValue::Set(timezone.to_owned()),
+                            valid_begin: ActiveValue::Set(
+                                calendar_date.date.and_hms_opt(0, 0, 0).unwrap()
                             ),
-                        },
-                        TrainSource::ShortTerm,
-                    )),
+                            valid_end: ActiveValue::Set(
+                                calendar_date.date.and_hms_opt(0, 0, 0).unwrap()
+                            ),
+                            ..Default::default()
+                        };
+                        validity.populate_single_weekday(calendar_date.date.weekday());
+                        cancellations.push(train_cancellation::ActiveModelEx {
+                            validity: ActiveHasMany::Append(vec![validity]),
+                            source: ActiveValue::Set(Some(TrainSource::ShortTerm)),
+                            ..Default::default()
+                        });
+                    },
                     Exception::Added => (),
                 }
             }
@@ -237,12 +249,11 @@ fn calculate_cancellations(
 
 fn calculate_route(
     stop_times: &Vec<StopTime>,
-    variable_train: &VariableTrain,
+    variable_train: &variable_train::ActiveModelEx,
     timezone: &str,
     stops: &HashMap<String, Arc<Stop>>,
-    train_id: &str,
-    schedule: &mut Schedule,
-) -> Result<Vec<TrainLocation>, GtfsImportError> {
+    namespace: &str,
+) -> Result<Vec<train_location::ActiveModelEx>, GtfsImportError> {
     let mut current_variable_train = variable_train.clone();
 
     if stop_times.len() < 2 {
@@ -351,94 +362,124 @@ fn calculate_route(
 
         let change_en_route = {
             if (stop_time.stop_headsign.is_some()
-                && stop_time.stop_headsign != current_variable_train.headcode)
+                && stop_time.stop_headsign != current_variable_train.headcode.clone().unwrap())
                 || (stop_time.stop_headsign.is_none()
-                    && variable_train.headcode != current_variable_train.headcode)
+                    && variable_train.headcode.clone().unwrap()
+                    != current_variable_train.headcode.clone().unwrap())
             {
-                current_variable_train.headcode = match &stop_time.stop_headsign {
+                current_variable_train.headcode = ActiveValue::Set(match &stop_time.stop_headsign {
                     Some(x) => Some(x.clone()),
-                    None => variable_train.headcode.clone(),
-                };
-                Some(current_variable_train.clone())
+                    None => variable_train.headcode.clone().unwrap(),
+                });
+                Some(Box::new(current_variable_train.clone()))
             } else {
                 None
             }
         };
 
-        let train_location = TrainLocation {
-            timing_tz: Some(match Tz::from_str(&timezone) {
-                Ok(x) => x,
+        let train_location = train_location::ActiveModelEx {
+            timing_tz: match Tz::from_str(&timezone) {
+                Ok(x) => ActiveValue::Set(Some(x.name().to_owned())),
                 Err(x) => {
                     return Err(GtfsImportError {
                         error_type: GtfsErrorType::InvalidTimezone(timezone.to_string(), x),
                         file: "agency".to_string(),
                     })
                 }
-            }),
-            id: actual_stop_id.clone(),
-            id_suffix: Some(stop_time.stop_sequence.to_string()),
-            working_arr,
-            working_arr_day,
-            working_dep,
-            working_dep_day,
-            working_pass: None,
-            working_pass_day: None,
-            public_arr,
-            public_arr_day,
-            public_dep,
-            public_dep_day,
-            platform: stops
+            },
+            index: ActiveValue::Set(i.try_into().unwrap()),
+            location_id: ActiveValue::Set(actual_stop_id.clone()),
+            namespace: ActiveValue::Set(namespace.to_owned()),
+            id_suffix: ActiveValue::Set(Some(stop_time.stop_sequence.to_string())),
+            working_arr: ActiveValue::Set(working_arr),
+            working_arr_day: ActiveValue::Set(working_arr_day),
+            working_dep: ActiveValue::Set(working_dep),
+            working_dep_day: ActiveValue::Set(working_dep_day),
+            working_pass: ActiveValue::Set(None),
+            working_pass_day: ActiveValue::Set(None),
+            public_arr: ActiveValue::Set(public_arr),
+            public_arr_day: ActiveValue::Set(public_arr_day),
+            public_dep: ActiveValue::Set(public_dep),
+            public_dep_day: ActiveValue::Set(public_dep_day),
+            platform: ActiveValue::Set(stops
                 .get(&actual_platform_id)
                 .unwrap()
                 .platform_code
-                .clone(),
-            platform_zone: match actual_zone_id {
+                .clone()),
+            platform_zone: ActiveValue::Set(match actual_zone_id {
                 None => None,
                 Some(x) => stops.get(&x).unwrap().name.clone(),
-            },
-            line: None,
-            path: None,
-            engineering_allowance_s: None,
-            pathing_allowance_s: None,
-            performance_allowance_s: None,
-            activities: Activities {
-                set_down_only: stop_time.pickup_type == PickupDropOffType::NotAvailable
-                    && stop_time.drop_off_type != PickupDropOffType::NotAvailable,
-                pick_up_only: stop_time.pickup_type != PickupDropOffType::NotAvailable
-                    && stop_time.drop_off_type == PickupDropOffType::NotAvailable,
-                unadvertised_stop: stop_time.pickup_type == PickupDropOffType::NotAvailable
-                    && stop_time.drop_off_type == PickupDropOffType::NotAvailable,
-                request_pick_up: stop_time.pickup_type == PickupDropOffType::CoordinateWithDriver,
-                request_set_down: stop_time.drop_off_type
-                    == PickupDropOffType::CoordinateWithDriver,
-                request_pick_up_by_telephone: stop_time.pickup_type
-                    == PickupDropOffType::ArrangeByPhone,
-                request_set_down_by_telephone: stop_time.drop_off_type
-                    == PickupDropOffType::ArrangeByPhone,
-                normal_passenger_stop: stop_time.pickup_type != PickupDropOffType::NotAvailable
-                    && stop_time.drop_off_type != PickupDropOffType::NotAvailable,
-                train_begins: i == 0,
-                train_finishes: i == stop_times.len() - 1,
-                times_approximate: match stop_time.timepoint {
-                    TimepointType::Approximate => true,
-                    TimepointType::Exact => false,
-                },
-                ..Default::default()
-            },
-            change_en_route,
-            divides_to_form: vec![],
-            joins_to: vec![],
-            becomes: None, // TODO implement
-            divides_from: vec![],
-            is_joined_to_by: vec![],
-            forms_from: None, // TODO implement
+            }),
+            line: ActiveValue::Set(None),
+            path: ActiveValue::Set(None),
+            engineering_allowance_s: ActiveValue::Set(None),
+            pathing_allowance_s: ActiveValue::Set(None),
+            performance_allowance_s: ActiveValue::Set(None),
+            set_down_only: ActiveValue::Set(
+                stop_time.pickup_type == PickupDropOffType::NotAvailable
+                    && stop_time.drop_off_type != PickupDropOffType::NotAvailable
+            ),
+            pick_up_only: ActiveValue::Set(
+                stop_time.pickup_type != PickupDropOffType::NotAvailable
+                    && stop_time.drop_off_type == PickupDropOffType::NotAvailable
+            ),
+            unadvertised_stop: ActiveValue::Set(
+                stop_time.pickup_type == PickupDropOffType::NotAvailable
+                    && stop_time.drop_off_type == PickupDropOffType::NotAvailable
+            ),
+            request_pick_up: ActiveValue::Set(
+                stop_time.pickup_type == PickupDropOffType::CoordinateWithDriver
+            ),
+            request_set_down: ActiveValue::Set(stop_time.drop_off_type
+                == PickupDropOffType::CoordinateWithDriver
+            ),
+            request_pick_up_by_telephone: ActiveValue::Set(stop_time.pickup_type
+                == PickupDropOffType::ArrangeByPhone
+            ),
+            request_set_down_by_telephone: ActiveValue::Set(stop_time.drop_off_type
+                == PickupDropOffType::ArrangeByPhone
+            ),
+            normal_passenger_stop: ActiveValue::Set(
+                stop_time.pickup_type != PickupDropOffType::NotAvailable
+                    && stop_time.drop_off_type != PickupDropOffType::NotAvailable
+            ),
+            train_begins: ActiveValue::Set(i == 0),
+            train_finishes: ActiveValue::Set(i == stop_times.len() - 1),
+            times_approximate: ActiveValue::Set(match stop_time.timepoint {
+                TimepointType::Approximate => true,
+                TimepointType::Exact => false,
+            }),
+            detach: ActiveValue::Set(false),
+            attach: ActiveValue::Set(false),
+            other_trains_pass: ActiveValue::Set(false),
+            attach_or_detach_assisting_loco: ActiveValue::Set(false),
+            x_on_arrival: ActiveValue::Set(false),
+            banking_loco: ActiveValue::Set(false),
+            crew_change: ActiveValue::Set(false),
+            examination: ActiveValue::Set(false),
+            gbprtt: ActiveValue::Set(false),
+            prevent_column_merge: ActiveValue::Set(false),
+            prevent_third_column_merge: ActiveValue::Set(false),
+            passenger_count: ActiveValue::Set(false),
+            ticket_collection: ActiveValue::Set(false),
+            ticket_examination: ActiveValue::Set(false),
+            first_class_ticket_examination: ActiveValue::Set(false),
+            selective_ticket_examination: ActiveValue::Set(false),
+            change_loco: ActiveValue::Set(false),
+            operational_stop: ActiveValue::Set(false),
+            train_locomotive_on_rear: ActiveValue::Set(false),
+            propelling: ActiveValue::Set(false),
+            reversing_move: ActiveValue::Set(false),
+            run_round: ActiveValue::Set(false),
+            staff_stop: ActiveValue::Set(false),
+            tops_reporting: ActiveValue::Set(false),
+            token_etc: ActiveValue::Set(false),
+            watering_stock: ActiveValue::Set(false),
+            cross_at_passing_point: ActiveValue::Set(false),
+            change_en_route: ActiveHasOne::Set(change_en_route),
+            association_nodes: ActiveHasMany::Append(vec![]), // TODO implement becomes/forms_from
+            ..Default::default()
         };
-
-        schedule
-            .trains_indexed_by_location
-            .entry(train_location.id.clone())
-            .or_insert(HashSet::new())
-            .insert(train_id.to_string());
 
         route.push(train_location);
     }
@@ -446,84 +487,76 @@ fn calculate_route(
     Ok(route)
 }
 
+fn colour_to_u32(colour: RGB8) -> u32 {
+    (u32::from(colour.r) << 16) + (u32::from(colour.g) << 8) + u32::from(colour.b)
+}
+
 impl GtfsImporter {
     pub fn new() -> GtfsImporter {
         GtfsImporter { base_gtfs: None }
     }
 
-    fn overlay_worker(
+    async fn overlay_worker(
         &mut self,
         gtfs: Gtfs,
-        mut schedule: Schedule,
-    ) -> Result<Schedule, GtfsImportError> {
+        schedule: &schedule::ModelEx,
+        transaction: &DatabaseTransaction,
+    ) -> Result<(), Error> {
         if gtfs.agencies.len() == 0 {
             return Err(GtfsImportError {
                 error_type: GtfsErrorType::NoAgencyDefined,
                 file: "agency".to_string(),
-            });
+            }.into());
         }
 
         let default_timezone = gtfs.agencies[0].timezone.clone();
 
-        let default_timezone_tz = match Tz::from_str(&default_timezone) {
-            Ok(x) => x,
+        let default_timezone = match Tz::from_str(&default_timezone) {
+            Ok(x) => x.name(),
             Err(x) => {
                 return Err(GtfsImportError {
                     error_type: GtfsErrorType::InvalidTimezone(default_timezone.to_string(), x),
                     file: "agency".to_string(),
-                })
+                }.into())
             }
         };
 
+        let namespace = schedule.namespace.clone();
+
+        let mut active_schedule: schedule::ActiveModelEx = schedule.clone().into();
+
         for feed_info in &gtfs.feed_info {
-            schedule.their_id = feed_info.version.clone();
-            schedule.valid_begin = feed_info.start_date.map(|x| {
-                default_timezone_tz
-                    .from_local_datetime(&x.and_hms_opt(0, 0, 0).unwrap())
-                    .unwrap()
-            });
-            schedule.valid_end = feed_info.end_date.map(|x| {
-                default_timezone_tz
-                    .from_local_datetime(&x.and_hms_opt(0, 0, 0).unwrap())
-                    .unwrap()
-            });
+            active_schedule.their_id = ActiveValue::Set(feed_info.version.clone());
+            active_schedule.valid_begin = ActiveValue::Set(feed_info.start_date.map(
+                |x| x.and_hms_opt(0, 0, 0).unwrap()
+            ));
+            active_schedule.valid_end = ActiveValue::Set(feed_info.end_date.map(
+                |x| x.and_hms_opt(0, 0, 0).unwrap()
+            ));
+            active_schedule.timezone = ActiveValue::Set(Some(default_timezone.to_owned()));
         }
 
-        for (stop_id, stop) in &gtfs.stops {
+        // We can't use the relationships of this to add things, as we can't use `save` due to our
+        // explicit setting of PKs.
+        println!("[{}] Updating root schedule...", namespace);
+        active_schedule.update(transaction).await?;
+        println!("[{}] Updated root schedule", namespace);
+
+        let mut location_count: usize = 0;
+        println!("[{}] Loading locations...", namespace);
+        for (_, stop) in &gtfs.stops {
             match stop.location_type {
                 LocationType::StopPoint => {
                     if stop.parent_station.is_none() {
-                        schedule
-                            .locations
-                            .insert(stop_id.clone(), load_stop(stop, &default_timezone)?);
-                        match &stop.code {
-                            Some(x) if x == "0" => (),
-                            Some(x) => {
-                                schedule
-                                    .locations_indexed_by_public_id
-                                    .entry(x.clone())
-                                    .or_insert(HashSet::new())
-                                    .insert(stop_id.clone());
-                            }
-                            None => (),
-                        }
+                        let location = load_stop(stop, &default_timezone, &namespace)?;
+                        location.insert(transaction).await?;
+                        location_count += 1;
                     }
                 }
                 LocationType::StopArea => {
-                    schedule
-                        .locations
-                        .insert(stop_id.clone(), load_stop(stop, &default_timezone)?);
-                    match &stop.code {
-                        Some(x) if x == "0" => (),
-                        Some(x) => {
-                            schedule
-                                .locations_indexed_by_public_id
-                                .entry(x.clone())
-                                .or_insert(HashSet::new())
-                                .insert(stop_id.clone());
-                        }
-                        None => (),
-                    }
+                    let location = load_stop(stop, &default_timezone, &namespace)?;
+                    location.insert(transaction).await?;
+                    location_count += 1;
                 }
                 LocationType::StationEntrance => (), // don't care
                 LocationType::GenericNode => (),     // also don't care
@@ -532,11 +565,55 @@ impl GtfsImporter {
                     return Err(GtfsImportError {
                         error_type: GtfsErrorType::UnknownLocationType(x),
                         file: "stops".to_string(),
-                    })
+                    }.into())
                 }
             }
         }
+        println!("[{}] Persisted {} locations", namespace, location_count);
 
+        let mut line_count: usize = 0;
+        println!("[{}] Loading lines...", namespace);
+        for (route_id, route) in &gtfs.routes {
+            let line = line::ActiveModelEx {
+                id: ActiveValue::Set(route_id.clone()),
+                namespace: ActiveValue::Set(namespace.to_owned()),
+                public_id: ActiveValue::Set(route.short_name.clone()),
+                name: ActiveValue::Set(route.long_name.clone()),
+                description: ActiveValue::Set(route.desc.clone()),
+                url: ActiveValue::Set(route.url.clone()),
+                foreground_colour: ActiveValue::Set(route.text_color.map(|x| colour_to_u32(x))),
+                background_colour: ActiveValue::Set(route.color.map(|x| colour_to_u32(x))),
+                ..Default::default()
+            };
+
+            line.insert(transaction).await?;
+            line_count += 1;
+        }
+
+        println!("[{}] Persisted {} lines", namespace, line_count);
+
+        let mut operator_count: usize = 0;
+        println!("[{}] Loading operators...", namespace);
+        for agency in &gtfs.agencies {
+            let operator = train_operator::ActiveModelEx {
+                id: ActiveValue::Set(match &agency.id {
+                    Some(x) => x.clone(),
+                    None => agency.name.clone(),
+                }),
+                namespace: ActiveValue::Set(namespace.to_owned()),
+                public_id: ActiveValue::Set(None),
+                description: ActiveValue::Set(Some(agency.name.clone())),
+                ..Default::default()
+            };
+
+            operator.insert(transaction).await?;
+            operator_count += 1;
+        }
+
+        println!("[{}] Persisted {} operators", namespace, operator_count);
+
+        let mut train_count: usize = 0;
+        println!("[{}] Loading trains...", namespace);
         for (trip_id, trip) in &gtfs.trips {
             let route = match &gtfs.routes.get(&trip.route_id) {
                 Some(x) => (*x).clone(),
@@ -544,7 +621,7 @@ impl GtfsImporter {
                     return Err(GtfsImportError {
                         error_type: GtfsErrorType::RouteNotPresent(trip.route_id.clone()),
                         file: "trips".to_string(),
-                    })
+                    }.into())
                 }
             };
 
@@ -555,14 +632,15 @@ impl GtfsImporter {
                         return Err(GtfsImportError {
                             error_type: GtfsErrorType::AgencyNotPresent(x.to_string()),
                             file: "routes".to_string(),
-                        })
+                        }.into())
                     }
                 },
                 None => gtfs.agencies[0].clone(),
             };
 
-            let variable_train = VariableTrain {
-                train_type: match gtfs.routes.get(&trip.route_id).unwrap().route_type {
+            let variable_train = variable_train::ActiveModelEx {
+                namespace: ActiveValue::Set(namespace.to_owned()),
+                train_type: ActiveValue::Set(match route.route_type {
                     RouteType::Tramway => TrainType::Tram,
                     RouteType::Subway => TrainType::Metro,
                     RouteType::Rail => TrainType::Passenger,
@@ -621,60 +699,26 @@ impl GtfsImporter {
                             return Err(GtfsImportError {
                                 error_type: GtfsErrorType::UnknownExtendedRouteType(x),
                                 file: "routes".to_string(),
-                            })
+                            }.into())
                         }
                     },
                     x => {
                         return Err(GtfsImportError {
                             error_type: GtfsErrorType::UnknownRouteType(x),
                             file: "routes".to_string(),
-                        })
+                        }.into())
                     }
-                },
-                public_id: trip.trip_short_name.clone(),
-                headcode: trip.trip_headsign.clone(),
-                power_type: None,
-                timing_allocation: None,
-                actual_allocation: None,
-                timing_speed_m_per_s: None,
-                operating_characteristics: None,
-                accommodation: None,
-                reservations: Reservations {
-                    seats: ReservationField::Unknown,
-                    groups: ReservationField::Unknown,
-                    first_class: ReservationField::Unknown,
-                    second_class: ReservationField::Unknown,
-                    not_every_class: ReservationField::Unknown,
-                    bicycles: ReservationField::Unknown,
-                    sleepers: ReservationField::Unknown,
-                    vehicles: ReservationField::Unknown,
-                    wheelchairs: ReservationField::Unknown,
-                    supplement_charged: None,
-                },
-                catering: None,
-                brand: None,
-                name: None,
-                line: Some(Line {
-                    id: gtfs.routes.get(&trip.route_id).unwrap().id.clone(),
-                    public_id: None,
-                    name: gtfs.routes.get(&trip.route_id).unwrap().long_name.clone(),
-                    number: gtfs.routes.get(&trip.route_id).unwrap().short_name.clone(),
-                    description: gtfs.routes.get(&trip.route_id).unwrap().desc.clone(),
-                    url: gtfs.routes.get(&trip.route_id).unwrap().url.clone(),
-                    foreground_colour: 
-                        gtfs.routes.get(&trip.route_id).unwrap().text_color.clone(),
-                    background_colour: gtfs.routes.get(&trip.route_id).unwrap().color.clone(),
                 }),
-                uic_code: None,
-                operator: Some(TrainOperator {
-                    id: match &agency.id {
-                        Some(x) => x.clone(),
-                        None => agency.name.clone(),
-                    },
-                    public_id: None,
-                    description: Some(agency.name.clone()),
-                }),
-                wheelchair_accessible: match trip.wheelchair_accessible {
+                public_id: ActiveValue::Set(trip.trip_short_name.clone()),
+                operator_id: ActiveValue::Set(agency.id.clone()),
+                line_id: ActiveValue::Set(Some(route.id.clone())),
+                headcode: ActiveValue::Set(trip.trip_headsign.clone()),
+                power_type: ActiveValue::Set(None),
+                timing_speed_m_per_s: ActiveValue::Set(None),
+                brand: ActiveValue::Set(None),
+                name: ActiveValue::Set(None),
+                uic_code: ActiveValue::Set(None),
+                wheelchair_accessible: ActiveValue::Set(match trip.wheelchair_accessible {
                     Availability::InformationNotAvailable => None,
                     Availability::Available => Some(true),
                     Availability::NotAvailable => Some(false),
@@ -682,94 +726,82 @@ impl GtfsImporter {
                         return Err(GtfsImportError {
                             error_type: GtfsErrorType::UnknownWheelchairAccessibility(x),
                             file: "trips".to_string(),
-                        })
+                        }.into())
                     }
-                },
-                toilets: None,
-                luggage: Some(Luggage {
-                    bag_storage: None,
-                    racks: None,
-                    skis: None,
-                    skis_on_rear: None,
-                    extra_large_racks: None,
-                    van: None,
-                    bicycles: match trip.bikes_allowed {
-                        BikesAllowedType::NoBikeInfo => None,
-                        BikesAllowedType::AtLeastOneBike => Some(true),
-                        BikesAllowedType::NoBikesAllowed => Some(false),
-                        x => {
-                            return Err(GtfsImportError {
-                                error_type: GtfsErrorType::UnknownBicyclesAllowed(x),
-                                file: "trips".to_string(),
-                            })
-                        }
-                    },
-                    bicycles_in_van: None,
-                    bicycles_in_carriage: None,
-                    pushchairs: None,
-                    vehicles: None,
                 }),
-                families: None,
-                passenger_communications: None,
-                assistance: None,
-                passenger_information: None,
+                has_luggage: ActiveValue::Set(true),
+                luggage_bicycles: ActiveValue::Set(match trip.bikes_allowed {
+                    BikesAllowedType::NoBikeInfo => None,
+                    BikesAllowedType::AtLeastOneBike => Some(true),
+                    BikesAllowedType::NoBikesAllowed => Some(false),
+                    x => {
+                        return Err(GtfsImportError {
+                            error_type: GtfsErrorType::UnknownBicyclesAllowed(x),
+                            file: "trips".to_string(),
+                        }.into())
+                    }
+                }),
+                has_operating_characteristics: ActiveValue::Set(false),
+                has_catering: ActiveValue::Set(false),
+                has_reservations: ActiveValue::Set(false),
+                has_toilets: ActiveValue::Set(false),
+                has_families: ActiveValue::Set(false),
+                has_passenger_communications: ActiveValue::Set(false),
+                has_assistance: ActiveValue::Set(false),
+                has_passenger_information: ActiveValue::Set(false),
+                ..Default::default()
             };
 
-            let train = Train {
-                id: trip_id.clone(),
-                validity: calculate_validities(
+            let train_variant = train_variant::ActiveModelEx {
+                validity: ActiveHasMany::Append(calculate_validities(
                     &gtfs.calendar.get(&trip.service_id),
                     &gtfs.calendar_dates.get(&trip.service_id),
                     &default_timezone,
-                )?,
-                cancellations: calculate_cancellations(
+                )?),
+                cancellations: ActiveHasMany::Append(calculate_cancellations(
                     &gtfs.calendar_dates.get(&trip.service_id),
                     &default_timezone,
-                )?,
-                replacements: vec![], // not a thing in GTFS
-                variable_train: variable_train.clone(),
-                source: Some(TrainSource::LongTerm), // no distinction between long and short in GTFS
-                runs_as_required: false,             // not a thing in GTFS
-                performance_monitoring: None,        // not a thing in GTFS
-                route: calculate_route(
+                )?),
+                variable_train: ActiveHasOne::Set(Some(Box::new(variable_train.clone()))),
+                // no distinction between long and short in GTFS
+                source: ActiveValue::Set(Some(TrainSource::LongTerm)),
+                runs_as_required: ActiveValue::Set(false),
+                performance_monitoring: ActiveValue::Set(None),
+                route: ActiveHasMany::Append(calculate_route(
                     &trip.stop_times,
                     &variable_train,
                     &default_timezone,
                     &gtfs.stops,
-                    &trip_id,
-                    &mut schedule,
-                )?,
+                    &namespace,
+                )?),
+                ..Default::default()
             };
 
-            match &train.variable_train.public_id {
-                Some(x) => {
-                    schedule
-                        .trains_indexed_by_public_id
-                        .entry(x.clone())
-                        .or_insert(HashSet::new())
-                        .insert(train.id.clone());
-                }
-                None => (),
-            }
-            schedule
-                .trains
-                .entry(train.id.clone())
-                .or_insert(vec![])
-                .push(train);
+            let train = train::ActiveModelEx {
+                id: ActiveValue::Set(trip_id.clone()),
+                namespace: ActiveValue::Set(namespace.clone()),
+                train_variants: ActiveHasMany::Append(vec![train_variant]),
+                ..Default::default()
+            };
+
+            train.insert(transaction).await?;
+            train_count += 1;
         }
+
+        println!("[{}] Persisted {} trains", namespace, train_count);
         self.base_gtfs = Some(gtfs);
-        Ok(schedule)
+        Ok(())
     }
 }
 
 #[async_trait]
 impl SlowGtfsImporter for GtfsImporter {
-    async fn overlay(&mut self, gtfs: Gtfs, mut schedule: Schedule) -> Result<Schedule, Error> {
-        schedule = block_in_place(move || self.overlay_worker(gtfs, schedule))?;
-        println!(
-            "Successfully loaded {} trains from GTFS",
-            schedule.trains.len(),
-        );
-        Ok(schedule)
+    async fn overlay(
+        &mut self, gtfs: Gtfs, schedule: &schedule::ModelEx, transaction: &DatabaseTransaction
+    ) -> Result<(), Error> {
+        let namespace = schedule.namespace.clone();
+        self.overlay_worker(gtfs, schedule, transaction).await?;
+        println!("[{}] Successfully loaded trains from GTFS", namespace);
+        Ok(())
     }
 }

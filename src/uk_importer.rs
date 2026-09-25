@@ -1,19 +1,22 @@
 use crate::error::Error;
-use crate::importer::{EphemeralImporter, FastImporter, SlowStreamingImporter};
+use crate::importer::{FastImporter, SlowStreamingImporter};
 use crate::schedule::{
-    AccommodationTypes, AccommodationTypesByClass, Activities, AssociationNode, Catering,
-    DaysOfWeek, Line, Location, OperatingCharacteristics, ReservationField, Reservations, Schedule,
-    Train, TrainAllocation, TrainLocation, TrainOperator, TrainPower, TrainSource, TrainType,
-    TrainValidityPeriod, VariableTrain,
+    AccommodationClass, accommodation_types, association_cancellation, association_node,
+    AssociationType, line, location, ReservationField, schedule, train, train_allocation,
+    train_cancellation, train_location, train_operator, TrainPower, TrainSource, TrainType,
+    train_validity_period, train_variant, variable_train,
 };
 
 use async_trait::async_trait;
 use chrono::format::ParseError;
 use chrono::naive::Days;
-use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
+use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use chrono_tz::Europe::London;
-use chrono_tz::Tz;
 use itertools::Itertools;
+
+use sea_orm::{DatabaseTransaction, EntityLoaderTrait, EntityTrait, QueryFilter};
+use sea_orm::entity::{ActiveBelongsTo, ActiveHasMany, ActiveHasOne, ActiveValue};
+use sea_orm::prelude::HasMany;
 
 use serde::{Deserialize, Serialize};
 
@@ -21,25 +24,38 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
 use std::ops::{Add, Sub};
-use std::sync::{Arc, RwLock};
 
 use tokio::fs;
 use tokio::io::AsyncBufReadExt;
-use tokio::sync::Mutex;
 
 #[derive(Clone, Default, Deserialize)]
 pub struct CifImporterConfig {
     location_overrides: Option<String>,
 }
 
+#[derive(Debug, PartialEq)]
+pub enum LastTrain {
+    Orphaned((String, NaiveDateTime)),
+    DatabaseInsert(train_variant::ActiveModelEx),
+    DatabaseSave(train_variant::ActiveModelEx),
+}
+
 #[derive(Default)]
 pub struct CifImporter {
-    last_train: Option<(String, DateTime<Tz>, ModificationType, bool)>,
+    last_train: Option<LastTrain>,
+    last_train_id: Option<String>,
     unwritten_assocs:
-        HashMap<(String, String, Option<String>), Vec<(AssociationNode, AssociationCategory)>>,
-    change_en_route: Option<VariableTrain>,
+        HashMap<(String, String, Option<String>), Vec<association_node::ActiveModelEx>>,
+    change_en_route: Option<Box<variable_train::ActiveModelEx>>,
     cr_location: Option<(String, Option<String>)>,
-    orphaned_overlay_trains: HashMap<(String, DateTime<Tz>), Train>,
+    orphaned_overlay_trains: HashMap<(String, NaiveDateTime), train_variant::ActiveModelEx>,
+    // The following caches are ephemeral; they are not considered canonical and lookups are still
+    // performed if a cache miss happens. They are cleared upon completion of an operation.
+    cached_operator_ids: HashSet<String>,
+    cached_line_ids: HashSet<String>,
+    cached_allocation_ids: HashSet<String>,
+    // This cache is persistent; it is populated at the start of a process and never cleared.
+    cached_train_variant_ids: HashMap<String, HashSet<i64>>,
     config: CifImporterConfig,
 }
 
@@ -157,16 +173,6 @@ enum ModificationType {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum AssociationCategory {
-    Join,
-    Divide,
-    Next,
-    IsJoinedToBy,
-    DividesFrom,
-    FormsFrom,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
 enum TrainStatus {
     Bus,
     Freight,
@@ -189,10 +195,20 @@ enum Class {
     None,
 }
 
-fn rev_days(days: &DaysOfWeek, day_diff: i8) -> DaysOfWeek {
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct OverriddenLocation {
+    id: String,
+    name: String,
+    public_id: Option<String>,
+    timezone: String,
+}
+
+fn rev_days(
+    days: &train_validity_period::DaysOfWeek, day_diff: i8
+) -> train_validity_period::DaysOfWeek {
     match day_diff {
         0 => days.clone(),
-        -1 => DaysOfWeek {
+        -1 => train_validity_period::DaysOfWeek {
             monday: days.tuesday,
             tuesday: days.wednesday,
             wednesday: days.thursday,
@@ -201,7 +217,7 @@ fn rev_days(days: &DaysOfWeek, day_diff: i8) -> DaysOfWeek {
             saturday: days.sunday,
             sunday: days.monday,
         },
-        1 => DaysOfWeek {
+        1 => train_validity_period::DaysOfWeek {
             monday: days.sunday,
             tuesday: days.monday,
             wednesday: days.tuesday,
@@ -214,7 +230,7 @@ fn rev_days(days: &DaysOfWeek, day_diff: i8) -> DaysOfWeek {
     }
 }
 
-fn rev_date(date: &DateTime<Tz>, day_diff: i8) -> DateTime<Tz> {
+fn rev_date(date: NaiveDateTime, day_diff: i8) -> NaiveDateTime {
     if day_diff < 0 {
         date.sub(Days::new(u64::try_from(-day_diff).unwrap()))
     } else {
@@ -223,973 +239,929 @@ fn rev_date(date: &DateTime<Tz>, day_diff: i8) -> DateTime<Tz> {
 }
 
 fn check_date_applicability(
-    existing_validity: &TrainValidityPeriod,
-    new_begin: DateTime<Tz>,
-    new_end: DateTime<Tz>,
-    new_days: &DaysOfWeek,
+    existing_validity: &train_validity_period::ActiveModelEx,
+    new_begin: NaiveDateTime,
+    new_end: NaiveDateTime,
+    new_days: &train_validity_period::DaysOfWeek,
 ) -> bool {
     // check for no overlapping days at all
-    if existing_validity
-        .days_of_week
+    if train_validity_period::DaysOfWeek::get_from_active_model(existing_validity)
         .into_iter()
         .zip(new_days.into_iter())
         .find(|(existing_day, new_day)| *existing_day && *new_day)
         .is_none()
     {
         false
-    } else if new_begin > existing_validity.valid_end || new_end < existing_validity.valid_begin {
+    } else if new_begin > existing_validity.valid_end.clone().unwrap()
+        || new_end < existing_validity.valid_begin.clone().unwrap() {
         false
     } else {
         true
     }
 }
 
-fn write_assocs_to_trains(
-    trains: &mut Vec<Train>,
+async fn write_assocs_to_trains(
+    train_variants: Vec<train_variant::ModelEx>,
     location: &str,
     location_suffix: &Option<String>,
-    assocs: &Vec<(AssociationNode, AssociationCategory)>,
-) {
-    for ref mut train in trains.iter_mut() {
-        // recurse on replacements
-        write_assocs_to_trains(
-            &mut train.replacements,
-            &location,
-            &location_suffix,
-            &assocs,
-        );
-
-        for ref mut train_location in train.route.iter_mut() {
-            if train_location.id == location && train_location.id_suffix == *location_suffix {
-                for (assoc, category) in assocs {
+    assocs: &Vec<association_node::ActiveModelEx>,
+    transaction: &DatabaseTransaction,
+) -> Result<(), Error> {
+    for train_variant in train_variants {
+        let mut train_variant: train_variant::ActiveModelEx = train_variant.into();
+        let mut changed = false;
+        for train_location in train_variant.route.as_mut_vec().iter_mut() {
+            if train_location.location_id.clone().unwrap() == location
+                && train_location.id_suffix.clone().unwrap() == *location_suffix {
+                for assoc in assocs {
                     if !check_date_applicability(
-                        &train.validity[0],
-                        assoc.validity[0].valid_begin,
-                        assoc.validity[0].valid_end,
-                        &assoc.validity[0].days_of_week,
+                        &train_variant.validity[0],
+                        assoc.validity[0].valid_begin.clone().unwrap(),
+                        assoc.validity[0].valid_end.clone().unwrap(),
+                        &train_validity_period::DaysOfWeek::get_from_active_model(
+                            &assoc.validity[0]
+                        ),
                     ) {
                         continue;
                     }
                     // we now know this is applicable to this train, so add it
-                    match category {
-                        AssociationCategory::Join => train_location.joins_to.push(assoc.clone()),
-                        AssociationCategory::Divide => {
-                            train_location.divides_to_form.push(assoc.clone())
-                        }
-                        AssociationCategory::Next => train_location.becomes = Some(assoc.clone()),
-                        AssociationCategory::IsJoinedToBy => {
-                            train_location.is_joined_to_by.push(assoc.clone())
-                        }
-                        AssociationCategory::DividesFrom => {
-                            train_location.divides_from.push(assoc.clone())
-                        }
-                        AssociationCategory::FormsFrom => {
-                            train_location.forms_from = Some(assoc.clone())
-                        }
-                    };
+                    train_location.association_nodes.push(assoc.clone());
+                    changed = true;
                 }
             }
         }
-    }
-}
-
-fn is_matching_assoc_for_modify_insertion(
-    assoc: &AssociationNode,
-    other_train_id: &str,
-    begin: &DateTime<Tz>,
-    other_train_location_suffix: &Option<String>,
-    is_stp: bool,
-    use_rev: bool,
-) -> bool {
-    return match is_stp {
-        false => assoc.source.unwrap() == TrainSource::LongTerm, // match the entire association for deleted or modified inserts
-        true => assoc.source.unwrap() == TrainSource::ShortTerm,
-    } && assoc.validity[0].valid_begin
-        == if use_rev {
-            rev_date(begin, assoc.day_diff)
-        } else {
-            *begin
-        }
-        && other_train_id == assoc.other_train_id
-        && *other_train_location_suffix == assoc.other_train_location_id_suffix;
-}
-
-fn is_matching_assoc_for_modify_replacement_or_cancel(
-    validity: &TrainValidityPeriod,
-    begin: &DateTime<Tz>,
-    day_diff: i8,
-    use_rev: bool,
-) -> bool {
-    validity.valid_begin
-        == if use_rev {
-            rev_date(begin, day_diff)
-        } else {
-            *begin
-        }
-}
-
-fn delete_single_assoc_replacements_cancellations(
-    assoc: &mut AssociationNode,
-    other_train_id: &str,
-    begin: &DateTime<Tz>,
-    other_train_location_suffix: &Option<String>,
-    stp_modification_type: &ModificationType,
-    use_rev: bool,
-) {
-    if other_train_id != assoc.other_train_id
-        || *other_train_location_suffix != assoc.other_train_location_id_suffix
-    {
-        return;
-    }
-    if *stp_modification_type == ModificationType::Amend {
-        assoc.replacements.retain(|assoc| {
-            !is_matching_assoc_for_modify_replacement_or_cancel(
-                &assoc.validity[0],
-                begin,
-                assoc.day_diff,
-                use_rev,
-            )
-        });
-    } else if *stp_modification_type == ModificationType::Delete {
-        assoc.cancellations.retain(|(validity, _source)| {
-            !is_matching_assoc_for_modify_replacement_or_cancel(
-                validity,
-                begin,
-                assoc.day_diff,
-                use_rev,
-            )
-        });
-    }
-}
-
-fn delete_single_vec_assocs(
-    assocs: &mut Vec<AssociationNode>,
-    other_train_id: &str,
-    begin: &DateTime<Tz>,
-    other_train_location_suffix: &Option<String>,
-    stp_modification_type: &ModificationType,
-    is_stp: bool,
-    use_rev: bool,
-) {
-    if *stp_modification_type == ModificationType::Insert {
-        assocs.retain(|assoc| {
-            !is_matching_assoc_for_modify_insertion(
-                assoc,
-                other_train_id,
-                begin,
-                other_train_location_suffix,
-                is_stp,
-                use_rev,
-            )
-        });
-    } else {
-        for ref mut assoc in assocs.iter_mut() {
-            delete_single_assoc_replacements_cancellations(
-                assoc,
-                other_train_id,
-                begin,
-                other_train_location_suffix,
-                stp_modification_type,
-                use_rev,
-            );
+        if changed {
+            train_variant.save(transaction).await?;
         }
     }
+    Ok(())
 }
 
-fn amend_individual_assoc(
-    assoc: &mut AssociationNode,
-    begin: &DateTime<Tz>,
-    end: &DateTime<Tz>,
-    days_of_week: &DaysOfWeek,
+fn amend_assoc(
+    assoc: &mut association_node::ActiveModelEx,
+    begin: &NaiveDateTime,
+    end: &NaiveDateTime,
+    days_of_week: &train_validity_period::DaysOfWeek,
     day_diff: Option<i8>,
     for_passengers: Option<bool>,
+    association_type: Option<AssociationType>,
     use_rev: bool,
 ) {
     let (new_begin, new_end, new_days) = match use_rev {
         false => (begin.clone(), end.clone(), days_of_week.clone()),
         true => (
-            rev_date(begin, assoc.day_diff),
-            rev_date(end, assoc.day_diff),
-            rev_days(days_of_week, assoc.day_diff),
+            rev_date(*begin, assoc.day_diff.clone().unwrap()),
+            rev_date(*end, assoc.day_diff.clone().unwrap()),
+            rev_days(days_of_week, assoc.day_diff.clone().unwrap()),
         ),
     };
-    assoc.validity = vec![TrainValidityPeriod {
-        valid_begin: new_begin.clone(),
-        valid_end: new_end.clone(),
-        days_of_week: new_days.clone(),
-    }];
+    let mut validity = train_validity_period::ActiveModelEx {
+        valid_begin: ActiveValue::Set(new_begin.clone()),
+        valid_end: ActiveValue::Set(new_end.clone()),
+        timezone: ActiveValue::Set(London.name().to_string()),
+        ..Default::default()
+    };
+    validity.populate_days_of_week(&new_days);
+    assoc.validity = ActiveHasMany::Replace(vec![validity]);
     match day_diff {
         None => (),
-        Some(x) => assoc.day_diff = x * if use_rev { -1 } else { 1 },
+        Some(x) => assoc.day_diff = ActiveValue::Set(x * if use_rev { -1 } else { 1 }),
     }
     match for_passengers {
         None => (),
-        Some(x) => assoc.for_passengers = x,
+        Some(x) => assoc.for_passengers = ActiveValue::Set(x),
+    }
+    match association_type {
+        None => (),
+        Some(x) => assoc.association_type = ActiveValue::Set(x),
     }
 }
 
-fn amend_single_assoc_replacements_cancellations(
-    assoc: &mut AssociationNode,
+async fn get_all_train_variants_for_assocs(
+    train_variant_ids: &HashSet<i64>, transaction: &DatabaseTransaction
+) -> Result<Vec<train_variant::ModelEx>, Error> {
+    // Short circuit the DB logic if the cache is empty
+    if train_variant_ids.len() == 0 {
+        return Ok(vec![]);
+    }
+    let all_train_variants = train_variant::Entity::load()
+        .filter(train_variant::COLUMN.id.is_in(train_variant_ids.clone()))
+        .all(transaction)
+        .await?;
+
+    Ok(all_train_variants)
+}
+
+async fn get_all_train_variants_for_delete(
+    train_variant_ids: &HashSet<i64>, transaction: &DatabaseTransaction
+) -> Result<Vec<train_variant::ModelEx>, Error> {
+    // Short circuit the DB logic if the cache is empty
+    if train_variant_ids.len() == 0 {
+        return Ok(vec![]);
+    }
+    let all_train_variants = train_variant::Entity::load()
+        .filter(train_variant::COLUMN.id.is_in(train_variant_ids.clone()))
+        .with(train_validity_period::Entity)
+        .with((train_cancellation::Entity, train_validity_period::Entity))
+        .all(transaction)
+        .await?;
+
+    Ok(all_train_variants)
+}
+
+async fn get_all_train_variants_for_delete_without_cache(
+    train_id: &str, namespace: &str, transaction: &DatabaseTransaction
+) -> Result<Vec<train_variant::ModelEx>, Error> {
+    let root_train_variants = train_variant::Entity::load()
+        .filter(train_variant::COLUMN.train_id.eq(train_id))
+        .filter(train_variant::COLUMN.namespace.eq(namespace))
+        .with(train_validity_period::Entity)
+        .all(transaction)
+        .await?;
+
+    let mut all_train_variants = root_train_variants.clone();
+    let mut prev_train_variants = root_train_variants;
+    loop {
+        prev_train_variants = train_variant::Entity::load()
+            .filter(train_variant::COLUMN.parent_train_variant_id.is_in(
+                prev_train_variants.iter().map(|x| Some(x.id))
+            ))
+            .with(train_validity_period::Entity)
+            .all(transaction)
+            .await?;
+        if prev_train_variants.len() > 0 {
+            all_train_variants.append(&mut prev_train_variants.clone());
+        } else {
+            break;
+        }
+    }
+
+    Ok(all_train_variants)
+}
+
+async fn get_all_train_variants_for_cancel(
+    train_variant_ids: &HashSet<i64>, transaction: &DatabaseTransaction
+) -> Result<Vec<train_variant::ModelEx>, Error> {
+    // Short circuit the DB logic if the cache is empty
+    if train_variant_ids.len() == 0 {
+        return Ok(vec![]);
+    }
+    let all_train_variants = train_variant::Entity::load()
+        .filter(train_variant::COLUMN.id.is_in(train_variant_ids.clone()))
+        .with(train_validity_period::Entity)
+        .all(transaction)
+        .await?;
+
+    Ok(all_train_variants)
+}
+
+async fn get_all_train_variants_for_cancel_without_cache(
+    train_id: &str, namespace: &str, transaction: &DatabaseTransaction
+) -> Result<Vec<train_variant::ModelEx>, Error> {
+    let root_train_variants = train_variant::Entity::load()
+        .filter(train_variant::COLUMN.train_id.eq(train_id))
+        .filter(train_variant::COLUMN.namespace.eq(namespace))
+        .with(train_validity_period::Entity)
+        .all(transaction)
+        .await?;
+
+    let mut all_train_variants = root_train_variants.clone();
+    let mut prev_train_variants = root_train_variants;
+    loop {
+        prev_train_variants = train_variant::Entity::load()
+            .filter(train_variant::COLUMN.parent_train_variant_id.is_in(
+                prev_train_variants.iter().map(|x| Some(x.id))
+            ))
+            .with(train_validity_period::Entity)
+            .all(transaction)
+            .await?;
+        if prev_train_variants.len() > 0 {
+            all_train_variants.append(&mut prev_train_variants.clone());
+        } else {
+            break;
+        }
+    }
+
+    Ok(all_train_variants)
+}
+
+async fn get_all_train_variants_for_amend_cancel(
+    train_variant_ids: &HashSet<i64>, transaction: &DatabaseTransaction
+) -> Result<Vec<train_variant::ModelEx>, Error> {
+    // Short circuit the DB logic if the cache is empty
+    if train_variant_ids.len() == 0 {
+        return Ok(vec![]);
+    }
+    let all_train_variants = train_variant::Entity::load()
+        .filter(train_variant::COLUMN.id.is_in(train_variant_ids.clone()))
+        .with((train_cancellation::Entity, train_validity_period::Entity))
+        .all(transaction)
+        .await?;
+
+    Ok(all_train_variants)
+}
+
+async fn get_all_train_variants_for_amend_cancel_without_cache(
+    train_id: &str, namespace: &str, transaction: &DatabaseTransaction
+) -> Result<Vec<train_variant::ModelEx>, Error> {
+    let root_train_variants = train_variant::Entity::load()
+        .filter(train_variant::COLUMN.train_id.eq(train_id))
+        .filter(train_variant::COLUMN.namespace.eq(namespace))
+        .with((train_cancellation::Entity, train_validity_period::Entity))
+        .all(transaction)
+        .await?;
+
+    let mut all_train_variants = root_train_variants.clone();
+    let mut prev_train_variants = root_train_variants;
+    loop {
+        prev_train_variants = train_variant::Entity::load()
+            .filter(train_variant::COLUMN.parent_train_variant_id.is_in(
+                prev_train_variants.iter().map(|x| Some(x.id))
+            ))
+            .with((train_cancellation::Entity, train_validity_period::Entity))
+            .all(transaction)
+            .await?;
+        if prev_train_variants.len() > 0 {
+            all_train_variants.append(&mut prev_train_variants.clone());
+        } else {
+            break;
+        }
+    }
+
+    Ok(all_train_variants)
+}
+
+async fn get_all_train_variants_for_amend(
+    train_variant_ids: &HashSet<i64>, transaction: &DatabaseTransaction
+) -> Result<Vec<train_variant::ModelEx>, Error> {
+    // Short circuit the DB logic if the cache is empty
+    if train_variant_ids.len() == 0 {
+        return Ok(vec![]);
+    }
+    let all_train_variants = train_variant::Entity::load()
+        .filter(train_variant::COLUMN.id.is_in(train_variant_ids.clone()))
+        .with(train_validity_period::Entity)
+        .all(transaction)
+        .await?;
+
+    Ok(all_train_variants)
+}
+
+async fn get_all_train_variants_for_amend_without_cache(
+    train_id: &str, namespace: &str, transaction: &DatabaseTransaction
+) -> Result<Vec<train_variant::ModelEx>, Error> {
+    let root_train_variants = train_variant::Entity::load()
+        .filter(train_variant::COLUMN.train_id.eq(train_id))
+        .filter(train_variant::COLUMN.namespace.eq(namespace))
+        .with(train_validity_period::Entity)
+        .all(transaction)
+        .await?;
+
+    let mut all_train_variants = root_train_variants.clone();
+    let mut prev_train_variants = root_train_variants;
+    loop {
+        prev_train_variants = train_variant::Entity::load()
+            .filter(train_variant::COLUMN.parent_train_variant_id.is_in(
+                prev_train_variants.iter().map(|x| Some(x.id))
+            ))
+            .with(train_validity_period::Entity)
+            .all(transaction)
+            .await?;
+        if prev_train_variants.len() > 0 {
+            all_train_variants.append(&mut prev_train_variants.clone());
+        } else {
+            break;
+        }
+    }
+
+    Ok(all_train_variants)
+}
+
+async fn get_all_train_variants_for_replace(
+    train_variant_ids: &HashSet<i64>, transaction: &DatabaseTransaction
+) -> Result<Vec<train_variant::ModelEx>, Error> {
+    // Short circuit the DB logic if the cache is empty
+    if train_variant_ids.len() == 0 {
+        return Ok(vec![]);
+    }
+    let all_train_variants = train_variant::Entity::load()
+        .filter(train_variant::COLUMN.id.is_in(train_variant_ids.clone()))
+        .with(train_validity_period::Entity)
+        .all(transaction)
+        .await?;
+
+    Ok(all_train_variants)
+}
+
+async fn get_all_train_variants_for_replace_without_cache(
+    train_id: &str, namespace: &str, transaction: &DatabaseTransaction
+) -> Result<Vec<train_variant::ModelEx>, Error> {
+    let root_train_variants = train_variant::Entity::load()
+        .filter(train_variant::COLUMN.train_id.eq(train_id))
+        .filter(train_variant::COLUMN.namespace.eq(namespace))
+        .with(train_validity_period::Entity)
+        .all(transaction)
+        .await?;
+
+    let mut all_train_variants = root_train_variants.clone();
+    let mut prev_train_variants = root_train_variants;
+    loop {
+        prev_train_variants = train_variant::Entity::load()
+            .filter(train_variant::COLUMN.parent_train_variant_id.is_in(
+                prev_train_variants.iter().map(|x| Some(x.id))
+            ))
+            .with(train_validity_period::Entity)
+            .all(transaction)
+            .await?;
+        if prev_train_variants.len() > 0 {
+            all_train_variants.append(&mut prev_train_variants.clone());
+        } else {
+            break;
+        }
+    }
+
+    Ok(all_train_variants)
+}
+
+async fn get_all_train_variants_for_assoc_write(
+    train_variant_ids: &HashSet<i64>, transaction: &DatabaseTransaction
+) -> Result<Vec<train_variant::ModelEx>, Error> {
+    // Short circuit the DB logic if the cache is empty
+    if train_variant_ids.len() == 0 {
+        return Ok(vec![]);
+    }
+    let all_train_variants = train_variant::Entity::load()
+        .filter(train_variant::COLUMN.id.is_in(train_variant_ids.clone()))
+        .with(train_validity_period::Entity)
+        .with(train_location::Entity)
+        .all(transaction)
+        .await?;
+
+    Ok(all_train_variants)
+}
+
+async fn get_all_associations_for_train_location(
+    train_variant_ids: &HashSet<i64>,
+    namespace: &str,
+    location: &str,
+    location_suffix: &Option<String>,
+    transaction: &DatabaseTransaction,
+) -> Result<Vec<association_node::ModelEx>, Error> {
+    let train_variant_ids: Vec<i64>
+        = get_all_train_variants_for_assocs(train_variant_ids, transaction)
+        .await?
+        .iter()
+        .map(|x| x.id)
+        .collect();
+    let train_location_ids: Vec<i64> = train_location::Entity::load()
+        .filter(train_location::COLUMN.train_variant_id.is_in(train_variant_ids))
+        .filter(train_location::COLUMN.namespace.eq(namespace))
+        .filter(train_location::COLUMN.location_id.eq(location))
+        .filter(train_location::COLUMN.id_suffix.eq(location_suffix.clone()))
+        .all(transaction)
+        .await?
+        .into_iter()
+        .map(|x| x.id)
+        .collect();
+    let root_nodes = association_node::Entity::load()
+        .filter(association_node::COLUMN.main_train_location_id.is_in(train_location_ids))
+        .with(train_validity_period::Entity)
+        .with((association_cancellation::Entity, train_validity_period::Entity))
+        .all(transaction)
+        .await?;
+    let mut all_association_nodes = root_nodes.clone();
+    let mut prev_association_nodes = root_nodes;
+    loop {
+        prev_association_nodes = association_node::Entity::load()
+            .filter(association_node::COLUMN.parent_association_node_id.is_in(
+                prev_association_nodes.iter().map(|x| Some(x.id))
+            ))
+            .with(train_validity_period::Entity)
+            .with((association_cancellation::Entity, train_validity_period::Entity))
+            .all(transaction)
+            .await?;
+        if prev_association_nodes.len() > 0 {
+            all_association_nodes.append(&mut prev_association_nodes.clone());
+        } else {
+            break;
+        }
+    }
+
+    Ok(all_association_nodes)
+}
+
+async fn trains_delete_assoc(
+    train_variant_ids: &HashSet<i64>,
     other_train_id: &str,
-    begin: &DateTime<Tz>,
-    end: &DateTime<Tz>,
-    days_of_week: &DaysOfWeek,
+    namespace: &str,
+    begin: &NaiveDateTime,
+    location: &str,
+    location_suffix: &Option<String>,
     other_train_location_suffix: &Option<String>,
     stp_modification_type: &ModificationType,
-    day_diff: Option<i8>,
-    for_passengers: Option<bool>,
-    use_rev: bool,
-) {
-    let (new_begin, new_end, new_days) = match use_rev {
-        false => (begin.clone(), end.clone(), days_of_week.clone()),
-        true => (
-            rev_date(begin, assoc.day_diff),
-            rev_date(end, assoc.day_diff),
-            rev_days(days_of_week, assoc.day_diff),
-        ),
+    is_stp: bool,
+    transaction: &DatabaseTransaction,
+) -> Result<(), Error> {
+    let assocs = get_all_associations_for_train_location(
+        train_variant_ids,
+        namespace,
+        location,
+        location_suffix,
+        transaction
+    ).await?;
+    match stp_modification_type {
+        ModificationType::Insert => {
+            let assoc_ids_to_delete: Vec<i64> = assocs.into_iter().filter(|assoc|
+                assoc.main_train_location_id.is_some()
+                && assoc.other_train_id == other_train_id
+                && matches!(
+                    assoc.association_type,
+                    AssociationType::MainDividesToFormOther
+                    | AssociationType::MainJoinsToOther
+                    | AssociationType::MainBecomesOther
+                ) && assoc.validity[0].valid_begin == *begin
+                && assoc.other_train_location_id_suffix == *other_train_location_suffix
+                && assoc.source.unwrap() ==
+                    if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }
+            ).map(|x| x.id).collect();
+            association_node::Entity::delete_many()
+                .filter(association_node::COLUMN.id.is_in(assoc_ids_to_delete))
+                .exec(transaction)
+                .await?;
+        },
+        ModificationType::Amend => {
+            let assoc_ids_to_delete: Vec<i64> = assocs.into_iter().filter(|assoc|
+                assoc.main_train_location_id.is_none()
+                && assoc.other_train_id == other_train_id
+                && matches!(
+                    assoc.association_type,
+                    AssociationType::MainDividesToFormOther
+                    | AssociationType::MainJoinsToOther
+                    | AssociationType::MainBecomesOther
+                ) && assoc.validity[0].valid_begin == *begin
+                && assoc.other_train_location_id_suffix == *other_train_location_suffix
+            ).map(|x| x.id).collect();
+            association_node::Entity::delete_many()
+                .filter(association_node::COLUMN.id.is_in(assoc_ids_to_delete))
+                .exec(transaction)
+                .await?;
+        },
+        ModificationType::Delete => {
+            let cancellation_ids_to_delete: Vec<i64> = assocs
+                .into_iter()
+                .filter(|assoc|
+                    assoc.other_train_id == other_train_id
+                    && assoc.other_train_location_id_suffix == *other_train_location_suffix
+                    && matches!(
+                        assoc.association_type,
+                        AssociationType::MainDividesToFormOther
+                        | AssociationType::MainJoinsToOther
+                        | AssociationType::MainBecomesOther
+                    )
+                ).flat_map(|assoc| assoc.cancellations.clone().into_iter().filter(|cancellation|
+                    cancellation.validity[0].valid_begin == *begin
+                ).collect::<Vec<association_cancellation::ModelEx>>()).map(|x| x.id)
+                .collect();
+            association_cancellation::Entity::delete_many()
+                .filter(association_cancellation::COLUMN.id.is_in(cancellation_ids_to_delete))
+                .exec(transaction)
+                .await?;
+        },
     };
-    if assoc.other_train_id != other_train_id
-        || assoc.other_train_location_id_suffix != *other_train_location_suffix
-    {
-        return;
-    }
-    if *stp_modification_type == ModificationType::Amend {
-        for replacement in assoc.replacements.iter_mut() {
-            if replacement.validity[0].valid_begin == *begin {
-                amend_individual_assoc(
-                    replacement,
-                    begin,
-                    end,
-                    days_of_week,
-                    day_diff,
-                    for_passengers,
-                    use_rev,
-                );
-            }
-        }
-    } else if *stp_modification_type == ModificationType::Delete {
-        for (cancellation, _source) in assoc.cancellations.iter_mut() {
-            if cancellation.valid_begin == *begin {
-                *cancellation = TrainValidityPeriod {
-                    valid_begin: new_begin.clone(),
-                    valid_end: new_end.clone(),
-                    days_of_week: new_days.clone(),
-                };
-            }
-        }
-    }
+    Ok(())
 }
 
-fn amend_single_vec_assocs(
-    assocs: &mut Vec<AssociationNode>,
+async fn trains_delete_rev_assoc(
+    train_variant_ids: &HashSet<i64>,
     other_train_id: &str,
-    begin: &DateTime<Tz>,
-    end: &DateTime<Tz>,
-    days_of_week: &DaysOfWeek,
+    namespace: &str,
+    begin: &NaiveDateTime,
+    location: &str,
+    location_suffix: &Option<String>,
+    other_train_location_suffix: &Option<String>,
+    stp_modification_type: &ModificationType,
+    is_stp: bool,
+    transaction: &DatabaseTransaction,
+) -> Result<(), Error> {
+    let assocs = get_all_associations_for_train_location(
+        train_variant_ids,
+        namespace,
+        location,
+        location_suffix,
+        transaction
+    ).await?;
+    match stp_modification_type {
+        ModificationType::Insert => {
+            let assoc_ids_to_delete: Vec<i64> = assocs.into_iter().filter(|assoc|
+                assoc.main_train_location_id.is_some()
+                && assoc.other_train_id == other_train_id
+                && matches!(
+                    assoc.association_type,
+                    AssociationType::MainDividesFromOther
+                    | AssociationType::MainIsJoinedToByOther
+                    | AssociationType::MainFormsFromOther
+                ) && assoc.validity[0].valid_begin == rev_date(*begin, assoc.day_diff)
+                && assoc.other_train_location_id_suffix == *other_train_location_suffix
+                && assoc.source.unwrap() ==
+                    if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }
+            ).map(|x| x.id).collect();
+            association_node::Entity::delete_many()
+                .filter(association_node::COLUMN.id.is_in(assoc_ids_to_delete))
+                .exec(transaction)
+                .await?;
+        },
+        ModificationType::Amend => {
+            let assoc_ids_to_delete: Vec<i64> = assocs.into_iter().filter(|assoc|
+                assoc.main_train_location_id.is_none()
+                && assoc.other_train_id == other_train_id
+                && matches!(
+                    assoc.association_type,
+                    AssociationType::MainDividesFromOther
+                    | AssociationType::MainIsJoinedToByOther
+                    | AssociationType::MainFormsFromOther
+                ) && assoc.validity[0].valid_begin == rev_date(*begin, assoc.day_diff)
+                && assoc.other_train_location_id_suffix == *other_train_location_suffix
+            ).map(|x| x.id).collect();
+            association_node::Entity::delete_many()
+                .filter(association_node::COLUMN.id.is_in(assoc_ids_to_delete))
+                .exec(transaction)
+                .await?;
+        },
+        ModificationType::Delete => {
+            let cancellation_ids_to_delete: Vec<i64> = assocs
+                .into_iter()
+                .filter(|assoc|
+                    assoc.other_train_id == other_train_id
+                    && assoc.other_train_location_id_suffix == *other_train_location_suffix
+                    && matches!(
+                        assoc.association_type,
+                        AssociationType::MainDividesFromOther
+                        | AssociationType::MainIsJoinedToByOther
+                        | AssociationType::MainFormsFromOther
+                    )
+                ).flat_map(|assoc| assoc.cancellations.clone().into_iter().filter(|cancellation|
+                    cancellation.validity[0].valid_begin == rev_date(*begin, assoc.day_diff)
+                ).collect::<Vec<association_cancellation::ModelEx>>()).map(|x| x.id)
+                .collect();
+            association_cancellation::Entity::delete_many()
+                .filter(association_cancellation::COLUMN.id.is_in(cancellation_ids_to_delete))
+                .exec(transaction)
+                .await?;
+        },
+    };
+    Ok(())
+}
+
+async fn trains_amend_assoc(
+    train_variant_ids: &HashSet<i64>,
+    other_train_id: &str,
+    namespace: &str,
+    begin: &NaiveDateTime,
+    end: &NaiveDateTime,
+    days_of_week: &train_validity_period::DaysOfWeek,
+    location: &str,
+    location_suffix: &Option<String>,
     other_train_location_suffix: &Option<String>,
     stp_modification_type: &ModificationType,
     is_stp: bool,
     day_diff: Option<i8>,
     for_passengers: Option<bool>,
-    use_rev: bool,
-) {
-    for ref mut assoc in assocs.iter_mut() {
-        if *stp_modification_type == ModificationType::Insert {
-            if is_matching_assoc_for_modify_insertion(
-                assoc,
-                other_train_id,
-                begin,
-                other_train_location_suffix,
-                is_stp,
-                use_rev,
-            ) {
-                amend_individual_assoc(
-                    assoc,
-                    begin,
-                    end,
-                    days_of_week,
-                    day_diff,
-                    for_passengers,
-                    use_rev,
-                );
-            }
-        } else {
-            amend_single_assoc_replacements_cancellations(
-                assoc,
-                other_train_id,
+    association_type: Option<AssociationType>,
+    transaction: &DatabaseTransaction,
+) -> Result<(), Error> {
+    let assocs = get_all_associations_for_train_location(
+        train_variant_ids,
+        namespace,
+        location,
+        location_suffix,
+        transaction
+    ).await?;
+    let assocs_to_amend: Vec<association_node::ModelEx> = assocs.into_iter().filter(|assoc|
+        assoc.other_train_id == other_train_id
+        && matches!(
+            assoc.association_type,
+            AssociationType::MainDividesToFormOther
+            | AssociationType::MainJoinsToOther
+            | AssociationType::MainBecomesOther
+        ) && assoc.other_train_location_id_suffix == *other_train_location_suffix
+    ).collect();
+    for assoc in &assocs_to_amend {
+        if *stp_modification_type == ModificationType::Insert
+            && assoc.source == Some(
+                if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }
+            )
+            && assoc.validity[0].valid_begin == *begin
+            && assoc.main_train_location_id.is_some()
+        {
+            let mut assoc: association_node::ActiveModelEx = assoc.clone().into();
+            amend_assoc(
+                &mut assoc,
                 begin,
                 end,
                 days_of_week,
-                other_train_location_suffix,
-                stp_modification_type,
                 day_diff,
                 for_passengers,
-                use_rev,
+                association_type,
+                false,
             );
+            assoc.save(transaction).await?;
+        }
+        else if *stp_modification_type == ModificationType::Amend
+            && assoc.validity[0].valid_begin == *begin
+            && assoc.main_train_location_id.is_none()
+        {
+            let mut assoc: association_node::ActiveModelEx = assoc.clone().into();
+            amend_assoc(
+                &mut assoc,
+                begin,
+                end,
+                days_of_week,
+                day_diff,
+                for_passengers,
+                association_type,
+                false,
+            );
+            assoc.save(transaction).await?;
+        }
+        else if *stp_modification_type == ModificationType::Delete
+        {
+            for cancellation in assoc.cancellations.iter() {
+                if cancellation.validity[0].valid_begin == *begin {
+                    let mut cancellation: association_cancellation::ActiveModelEx
+                        = cancellation.clone().into();
+                    let mut validity = train_validity_period::ActiveModelEx {
+                        valid_begin: ActiveValue::Set(*begin),
+                        valid_end: ActiveValue::Set(*end),
+                        timezone: ActiveValue::Set(London.name().to_string()),
+                        ..Default::default()
+                    };
+                    validity.populate_days_of_week(days_of_week);
+
+                    cancellation.validity = ActiveHasMany::Replace(vec![validity]);
+                    cancellation.save(transaction).await?;
+                }
+            }
         }
     }
+    Ok(())
 }
 
-fn cancel_single_assoc(
-    assoc: &mut AssociationNode,
+async fn trains_amend_rev_assoc(
+    train_variant_ids: &HashSet<i64>,
     other_train_id: &str,
-    begin: &DateTime<Tz>,
-    end: &DateTime<Tz>,
-    days_of_week: &DaysOfWeek,
+    namespace: &str,
+    begin: &NaiveDateTime,
+    end: &NaiveDateTime,
+    days_of_week: &train_validity_period::DaysOfWeek,
+    location: &str,
+    location_suffix: &Option<String>,
     other_train_location_suffix: &Option<String>,
-    use_rev: bool,
-) {
-    if other_train_id == assoc.other_train_id
-        && *other_train_location_suffix == assoc.other_train_location_id_suffix
-    {
-        let (rev_begin, rev_end, rev_days_of_week) = if use_rev {
-            (
-                rev_date(&begin, assoc.day_diff),
-                rev_date(&end, assoc.day_diff),
-                rev_days(&days_of_week, assoc.day_diff),
+    stp_modification_type: &ModificationType,
+    is_stp: bool,
+    day_diff: Option<i8>,
+    for_passengers: Option<bool>,
+    association_type: Option<AssociationType>,
+    transaction: &DatabaseTransaction,
+) -> Result<(), Error> {
+    let assocs = get_all_associations_for_train_location(
+        train_variant_ids,
+        namespace,
+        location,
+        location_suffix,
+        transaction
+    ).await?;
+    let assocs_to_amend: Vec<association_node::ModelEx> = assocs.into_iter().filter(|assoc|
+        assoc.other_train_id == other_train_id
+        && matches!(
+            assoc.association_type,
+            AssociationType::MainDividesFromOther
+            | AssociationType::MainIsJoinedToByOther
+            | AssociationType::MainFormsFromOther
+        ) && assoc.other_train_location_id_suffix == *other_train_location_suffix
+    ).collect();
+    for assoc in &assocs_to_amend {
+        if *stp_modification_type == ModificationType::Insert
+            && assoc.source == Some(
+                if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }
             )
-        } else {
-            (*begin, *end, *days_of_week)
-        };
-
-        if !check_date_applicability(&assoc.validity[0], rev_begin, rev_end, &rev_days_of_week) {
-            return;
+            && assoc.validity[0].valid_begin == rev_date(*begin, assoc.day_diff)
+            && assoc.main_train_location_id.is_some()
+        {
+            let mut assoc: association_node::ActiveModelEx = assoc.clone().into();
+            amend_assoc(
+                &mut assoc,
+                begin,
+                end,
+                days_of_week,
+                day_diff,
+                for_passengers,
+                association_type,
+                true,
+            );
+            assoc.save(transaction).await?;
         }
-        let new_cancel = TrainValidityPeriod {
-            valid_begin: rev_begin,
-            valid_end: rev_end,
-            days_of_week: rev_days_of_week.clone(),
+        else if *stp_modification_type == ModificationType::Amend
+            && assoc.source == Some(
+                if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }
+            )
+            && assoc.validity[0].valid_begin == rev_date(*begin, assoc.day_diff)
+            && assoc.main_train_location_id.is_none()
+        {
+            let mut assoc: association_node::ActiveModelEx = assoc.clone().into();
+            amend_assoc(
+                &mut assoc,
+                begin,
+                end,
+                days_of_week,
+                day_diff,
+                for_passengers,
+                association_type,
+                true,
+            );
+            assoc.save(transaction).await?;
+        }
+        else if *stp_modification_type == ModificationType::Delete
+        {
+            for cancellation in assoc.cancellations.iter() {
+                if cancellation.validity[0].valid_begin == rev_date(*begin, assoc.day_diff) {
+                    let mut cancellation: association_cancellation::ActiveModelEx
+                        = cancellation.clone().into();
+                    let mut validity = train_validity_period::ActiveModelEx {
+                        valid_begin: ActiveValue::Set(rev_date(*begin, assoc.day_diff)),
+                        valid_end: ActiveValue::Set(rev_date(*end, assoc.day_diff)),
+                        timezone: ActiveValue::Set(London.name().to_string()),
+                        ..Default::default()
+                    };
+                    validity.populate_days_of_week(&rev_days(&days_of_week, assoc.day_diff));
+
+                    cancellation.validity = ActiveHasMany::Replace(vec![validity]);
+                    cancellation.save(transaction).await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn trains_cancel_assoc(
+    train_variant_ids: &HashSet<i64>,
+    other_train_id: &str,
+    namespace: &str,
+    begin: &NaiveDateTime,
+    end: &NaiveDateTime,
+    days_of_week: &train_validity_period::DaysOfWeek,
+    location: &str,
+    location_suffix: &Option<String>,
+    other_train_location_suffix: &Option<String>,
+    transaction: &DatabaseTransaction,
+) -> Result<(), Error> {
+    let assocs = get_all_associations_for_train_location(
+        train_variant_ids,
+        namespace,
+        location,
+        location_suffix,
+        transaction
+    ).await?;
+    let assocs_to_cancel: Vec<association_node::ModelEx> = assocs.into_iter().filter(|assoc|
+        assoc.other_train_id == other_train_id
+        && matches!(
+            assoc.association_type,
+            AssociationType::MainDividesToFormOther
+            | AssociationType::MainJoinsToOther
+            | AssociationType::MainBecomesOther
+        ) && assoc.other_train_location_id_suffix == *other_train_location_suffix
+    ).collect();
+    for assoc in &assocs_to_cancel {
+        if !check_date_applicability(
+            &assoc.validity[0].clone().into(), *begin, *end, days_of_week
+        ) {
+            continue;
+        }
+        let mut validity = train_validity_period::ActiveModelEx {
+            valid_begin: ActiveValue::Set(*begin),
+            valid_end: ActiveValue::Set(*end),
+            timezone: ActiveValue::Set(London.name().to_string()),
+            ..Default::default()
         };
+        validity.populate_days_of_week(days_of_week);
+        let new_cancel = association_cancellation::ActiveModelEx {
+            validity: ActiveHasMany::Append(vec![validity]),
+            source: ActiveValue::Set(Some(TrainSource::ShortTerm)),
+            ..Default::default()
+        };
+        let mut assoc: association_node::ActiveModelEx = assoc.clone().into();
         assoc
             .cancellations
-            .push((new_cancel, TrainSource::ShortTerm))
+            .push(new_cancel);
+        assoc.save(transaction).await?;
     }
+    Ok(())
 }
 
-fn cancel_single_vec_assocs(
-    assocs: &mut Vec<AssociationNode>,
+async fn trains_cancel_rev_assoc(
+    train_variant_ids: &HashSet<i64>,
     other_train_id: &str,
-    begin: &DateTime<Tz>,
-    end: &DateTime<Tz>,
-    days_of_week: &DaysOfWeek,
-    other_train_location_suffix: &Option<String>,
-    use_rev: bool,
-) {
-    for ref mut assoc in assocs.iter_mut() {
-        cancel_single_assoc(
-            assoc,
-            other_train_id,
-            begin,
-            end,
-            days_of_week,
-            other_train_location_suffix,
-            use_rev,
-        );
-    }
-}
-
-fn replace_single_vec_assocs(
-    assocs: &mut Vec<AssociationNode>,
-    other_train_id: &str,
-    other_train_location_suffix: &Option<String>,
-    new_assoc: &AssociationNode,
-) {
-    for ref mut assoc in assocs.iter_mut() {
-        if other_train_id == assoc.other_train_id
-            && *other_train_location_suffix == assoc.other_train_location_id_suffix
-        {
-            // check for no overlapping days at all
-            if !check_date_applicability(
-                &assoc.validity[0],
-                new_assoc.validity[0].valid_begin,
-                new_assoc.validity[0].valid_end,
-                &new_assoc.validity[0].days_of_week,
-            ) {
-                continue;
-            }
-            assoc.replacements.push(new_assoc.clone());
-        }
-    }
-}
-
-fn find_replacement_train<'a>(
-    trains: &'a mut Vec<Train>,
-    begin: &DateTime<Tz>,
-) -> Option<&'a mut Train> {
-    for train in trains.iter_mut() {
-        for replacement_train in train.replacements.iter_mut() {
-            if replacement_train.validity[0].valid_begin == *begin {
-                return Some(replacement_train);
-            }
-        }
-    }
-    None
-}
-
-fn trains_delete_assoc(
-    trains: &mut Vec<Train>,
-    other_train_id: &str,
-    begin: &DateTime<Tz>,
+    namespace: &str,
+    begin: &NaiveDateTime,
+    end: &NaiveDateTime,
+    days_of_week: &train_validity_period::DaysOfWeek,
     location: &str,
     location_suffix: &Option<String>,
     other_train_location_suffix: &Option<String>,
-    stp_modification_type: &ModificationType,
-    is_stp: bool,
-) {
-    for ref mut train in trains.iter_mut() {
-        // recurse on replacements
-        trains_delete_assoc(
-            &mut train.replacements,
-            &other_train_id,
-            &begin,
-            &location,
-            &location_suffix,
-            &other_train_location_suffix,
-            &stp_modification_type,
-            is_stp,
-        );
-
-        for ref mut train_location in train.route.iter_mut() {
-            if train_location.id != location || train_location.id_suffix != *location_suffix {
-                continue;
-            }
-            delete_single_vec_assocs(
-                &mut train_location.divides_to_form,
-                other_train_id,
-                begin,
-                other_train_location_suffix,
-                stp_modification_type,
-                is_stp,
-                false,
+    transaction: &DatabaseTransaction,
+) -> Result<(), Error> {
+    let assocs = get_all_associations_for_train_location(
+        train_variant_ids,
+        namespace,
+        location,
+        location_suffix,
+        transaction
+    ).await?;
+    let assocs_to_cancel: Vec<association_node::ModelEx> = assocs.into_iter().filter(|assoc|
+        assoc.other_train_id == other_train_id
+        && matches!(
+            assoc.association_type,
+            AssociationType::MainDividesToFormOther
+            | AssociationType::MainJoinsToOther
+            | AssociationType::MainBecomesOther
+        ) && assoc.other_train_location_id_suffix == *other_train_location_suffix
+    ).collect();
+    for assoc in &assocs_to_cancel {
+        let (rev_begin, rev_end, rev_days_of_week) =
+            (
+                rev_date(*begin, assoc.day_diff),
+                rev_date(*end, assoc.day_diff),
+                rev_days(&days_of_week, assoc.day_diff),
             );
-            delete_single_vec_assocs(
-                &mut train_location.joins_to,
-                other_train_id,
-                begin,
-                other_train_location_suffix,
-                stp_modification_type,
-                is_stp,
-                false,
-            );
-            if let Some(ref mut assoc) = &mut train_location.becomes {
-                delete_single_assoc_replacements_cancellations(
-                    assoc,
-                    other_train_id,
-                    begin,
-                    other_train_location_suffix,
-                    stp_modification_type,
-                    false,
-                );
-                if *stp_modification_type == ModificationType::Insert
-                    && is_matching_assoc_for_modify_insertion(
-                        assoc,
-                        other_train_id,
-                        begin,
-                        other_train_location_suffix,
-                        is_stp,
-                        false,
-                    )
-                {
-                    train_location.becomes = None;
-                }
-            }
+        if !check_date_applicability(
+            &assoc.validity[0].clone().into(), rev_begin, rev_end, &rev_days_of_week
+        ) {
+            continue;
         }
+        let mut validity = train_validity_period::ActiveModelEx {
+            valid_begin: ActiveValue::Set(rev_begin),
+            valid_end: ActiveValue::Set(rev_end),
+            timezone: ActiveValue::Set(London.name().to_string()),
+            ..Default::default()
+        };
+        validity.populate_days_of_week(&rev_days_of_week);
+        let new_cancel = association_cancellation::ActiveModelEx {
+            validity: ActiveHasMany::Append(vec![validity]),
+            source: ActiveValue::Set(Some(TrainSource::ShortTerm)),
+            ..Default::default()
+        };
+        let mut assoc: association_node::ActiveModelEx = assoc.clone().into();
+        assoc
+            .cancellations
+            .push(new_cancel);
+        assoc.save(transaction).await?;
     }
+    Ok(())
 }
 
-fn trains_delete_rev_assoc(
-    trains: &mut Vec<Train>,
+async fn trains_replace_assoc(
+    train_variant_ids: &HashSet<i64>,
     other_train_id: &str,
-    begin: &DateTime<Tz>,
+    namespace: &str,
     location: &str,
     location_suffix: &Option<String>,
     other_train_location_suffix: &Option<String>,
-    stp_modification_type: &ModificationType,
-    is_stp: bool,
-) {
-    for ref mut train in trains.iter_mut() {
-        // recurse on replacements
-        trains_delete_rev_assoc(
-            &mut train.replacements,
-            &other_train_id,
-            &begin,
-            &location,
-            &location_suffix,
-            &other_train_location_suffix,
-            &stp_modification_type,
-            is_stp,
-        );
-
-        for ref mut train_location in train.route.iter_mut() {
-            if train_location.id != location || train_location.id_suffix != *location_suffix {
-                continue;
-            }
-            delete_single_vec_assocs(
-                &mut train_location.divides_from,
-                other_train_id,
-                begin,
-                other_train_location_suffix,
-                stp_modification_type,
-                is_stp,
-                true,
-            );
-            delete_single_vec_assocs(
-                &mut train_location.is_joined_to_by,
-                other_train_id,
-                begin,
-                other_train_location_suffix,
-                stp_modification_type,
-                is_stp,
-                true,
-            );
-            if let Some(ref mut assoc) = &mut train_location.forms_from {
-                delete_single_assoc_replacements_cancellations(
-                    assoc,
-                    other_train_id,
-                    begin,
-                    other_train_location_suffix,
-                    stp_modification_type,
-                    true,
-                );
-                if *stp_modification_type == ModificationType::Insert
-                    && is_matching_assoc_for_modify_insertion(
-                        assoc,
-                        other_train_id,
-                        begin,
-                        other_train_location_suffix,
-                        is_stp,
-                        true,
-                    )
-                {
-                    train_location.forms_from = None;
-                }
-            }
+    new_assoc: &association_node::ActiveModelEx,
+    transaction: &DatabaseTransaction,
+) -> Result<(), Error> {
+    let assocs = get_all_associations_for_train_location(
+        train_variant_ids,
+        namespace,
+        location,
+        location_suffix,
+        transaction
+    ).await?;
+    let assocs_to_replace: Vec<association_node::ModelEx> = assocs.into_iter().filter(|assoc|
+        assoc.other_train_id == other_train_id
+        && matches!(
+            assoc.association_type,
+            AssociationType::MainDividesToFormOther
+            | AssociationType::MainJoinsToOther
+            | AssociationType::MainBecomesOther
+        ) && assoc.other_train_location_id_suffix == *other_train_location_suffix
+    ).collect();
+    for assoc in &assocs_to_replace {
+        if !check_date_applicability(
+            &assoc.validity[0].clone().into(),
+            new_assoc.validity[0].valid_begin.clone().unwrap(),
+            new_assoc.validity[0].valid_end.clone().unwrap(),
+            &train_validity_period::DaysOfWeek::get_from_active_model(&new_assoc.validity[0]),
+        ) {
+            continue;
         }
+        let mut assoc: association_node::ActiveModelEx = assoc.clone().into();
+        assoc
+            .replacements
+            .push(new_assoc.clone());
+        assoc.save(transaction).await?;
     }
-}
 
-fn trains_amend_assoc(
-    trains: &mut Vec<Train>,
-    other_train_id: &str,
-    begin: &DateTime<Tz>,
-    end: &DateTime<Tz>,
-    days_of_week: &DaysOfWeek,
-    location: &str,
-    location_suffix: &Option<String>,
-    other_train_location_suffix: &Option<String>,
-    stp_modification_type: &ModificationType,
-    is_stp: bool,
-    day_diff: Option<i8>,
-    for_passengers: Option<bool>,
-) {
-    for ref mut train in trains.iter_mut() {
-        // recurse on replacements
-        trains_amend_assoc(
-            &mut train.replacements,
-            &other_train_id,
-            &begin,
-            &end,
-            &days_of_week,
-            &location,
-            &location_suffix,
-            &other_train_location_suffix,
-            &stp_modification_type,
-            is_stp,
-            day_diff,
-            for_passengers,
-        );
-
-        for ref mut train_location in train.route.iter_mut() {
-            if train_location.id != location || train_location.id_suffix != *location_suffix {
-                continue;
-            }
-            amend_single_vec_assocs(
-                &mut train_location.divides_to_form,
-                other_train_id,
-                begin,
-                end,
-                days_of_week,
-                other_train_location_suffix,
-                stp_modification_type,
-                is_stp,
-                day_diff,
-                for_passengers,
-                false,
-            );
-            amend_single_vec_assocs(
-                &mut train_location.joins_to,
-                other_train_id,
-                begin,
-                end,
-                days_of_week,
-                other_train_location_suffix,
-                stp_modification_type,
-                is_stp,
-                day_diff,
-                for_passengers,
-                false,
-            );
-            if let Some(ref mut assoc) = &mut train_location.becomes {
-                if *stp_modification_type == ModificationType::Insert
-                    && is_matching_assoc_for_modify_insertion(
-                        assoc,
-                        other_train_id,
-                        begin,
-                        other_train_location_suffix,
-                        is_stp,
-                        false,
-                    )
-                {
-                    amend_individual_assoc(
-                        assoc,
-                        begin,
-                        end,
-                        days_of_week,
-                        day_diff,
-                        for_passengers,
-                        false,
-                    );
-                }
-                amend_single_assoc_replacements_cancellations(
-                    assoc,
-                    other_train_id,
-                    begin,
-                    end,
-                    days_of_week,
-                    other_train_location_suffix,
-                    stp_modification_type,
-                    day_diff,
-                    for_passengers,
-                    false,
-                );
-            }
-        }
-    }
-}
-
-fn trains_amend_rev_assoc(
-    trains: &mut Vec<Train>,
-    other_train_id: &str,
-    begin: &DateTime<Tz>,
-    end: &DateTime<Tz>,
-    days_of_week: &DaysOfWeek,
-    location: &str,
-    location_suffix: &Option<String>,
-    other_train_location_suffix: &Option<String>,
-    stp_modification_type: &ModificationType,
-    is_stp: bool,
-    day_diff: Option<i8>,
-    for_passengers: Option<bool>,
-) {
-    for ref mut train in trains.iter_mut() {
-        // recurse on replacements
-        trains_amend_rev_assoc(
-            &mut train.replacements,
-            &other_train_id,
-            &begin,
-            &end,
-            &days_of_week,
-            &location,
-            &location_suffix,
-            &other_train_location_suffix,
-            &stp_modification_type,
-            is_stp,
-            day_diff,
-            for_passengers,
-        );
-
-        for ref mut train_location in train.route.iter_mut() {
-            if train_location.id != location || train_location.id_suffix != *location_suffix {
-                continue;
-            }
-            amend_single_vec_assocs(
-                &mut train_location.divides_from,
-                other_train_id,
-                begin,
-                end,
-                days_of_week,
-                other_train_location_suffix,
-                stp_modification_type,
-                is_stp,
-                day_diff,
-                for_passengers,
-                true,
-            );
-            amend_single_vec_assocs(
-                &mut train_location.is_joined_to_by,
-                other_train_id,
-                begin,
-                end,
-                days_of_week,
-                other_train_location_suffix,
-                stp_modification_type,
-                is_stp,
-                day_diff,
-                for_passengers,
-                true,
-            );
-            if let Some(ref mut assoc) = &mut train_location.forms_from {
-                if *stp_modification_type == ModificationType::Insert
-                    && is_matching_assoc_for_modify_insertion(
-                        assoc,
-                        other_train_id,
-                        begin,
-                        other_train_location_suffix,
-                        is_stp,
-                        true,
-                    )
-                {
-                    amend_individual_assoc(
-                        assoc,
-                        begin,
-                        end,
-                        days_of_week,
-                        day_diff,
-                        for_passengers,
-                        true,
-                    );
-                }
-                amend_single_assoc_replacements_cancellations(
-                    assoc,
-                    other_train_id,
-                    begin,
-                    end,
-                    days_of_week,
-                    other_train_location_suffix,
-                    stp_modification_type,
-                    day_diff,
-                    for_passengers,
-                    true,
-                );
-            }
-        }
-    }
-}
-
-fn trains_cancel_assoc(
-    trains: &mut Vec<Train>,
-    other_train_id: &str,
-    begin: &DateTime<Tz>,
-    end: &DateTime<Tz>,
-    days_of_week: &DaysOfWeek,
-    location: &str,
-    location_suffix: &Option<String>,
-    other_train_location_suffix: &Option<String>,
-) {
-    for ref mut train in trains.iter_mut() {
-        // recurse on replacements
-        trains_cancel_assoc(
-            &mut train.replacements,
-            &other_train_id,
-            &begin,
-            &end,
-            &days_of_week,
-            &location,
-            &location_suffix,
-            &other_train_location_suffix,
-        );
-
-        for ref mut train_location in train.route.iter_mut() {
-            if train_location.id == location && train_location.id_suffix == *location_suffix {
-                cancel_single_vec_assocs(
-                    &mut train_location.divides_to_form,
-                    other_train_id,
-                    begin,
-                    end,
-                    days_of_week,
-                    other_train_location_suffix,
-                    false,
-                );
-                cancel_single_vec_assocs(
-                    &mut train_location.joins_to,
-                    other_train_id,
-                    begin,
-                    end,
-                    days_of_week,
-                    other_train_location_suffix,
-                    false,
-                );
-                if let Some(assoc) = &mut train_location.becomes {
-                    cancel_single_assoc(
-                        assoc,
-                        other_train_id,
-                        begin,
-                        end,
-                        days_of_week,
-                        other_train_location_suffix,
-                        false,
-                    );
-                }
-            }
-        }
-    }
-}
-
-fn trains_cancel_rev_assoc(
-    trains: &mut Vec<Train>,
-    other_train_id: &str,
-    begin: &DateTime<Tz>,
-    end: &DateTime<Tz>,
-    days_of_week: &DaysOfWeek,
-    location: &str,
-    location_suffix: &Option<String>,
-    other_train_location_suffix: &Option<String>,
-) {
-    for ref mut train in trains.iter_mut() {
-        // recurse on replacements
-        trains_cancel_rev_assoc(
-            &mut train.replacements,
-            &other_train_id,
-            &begin,
-            &end,
-            &days_of_week,
-            &location,
-            &location_suffix,
-            &other_train_location_suffix,
-        );
-
-        for ref mut train_location in train.route.iter_mut() {
-            if train_location.id == location && train_location.id_suffix == *location_suffix {
-                cancel_single_vec_assocs(
-                    &mut train_location.divides_from,
-                    other_train_id,
-                    begin,
-                    end,
-                    days_of_week,
-                    other_train_location_suffix,
-                    true,
-                );
-                cancel_single_vec_assocs(
-                    &mut train_location.is_joined_to_by,
-                    other_train_id,
-                    begin,
-                    end,
-                    days_of_week,
-                    other_train_location_suffix,
-                    true,
-                );
-                if let Some(assoc) = &mut train_location.forms_from {
-                    cancel_single_assoc(
-                        assoc,
-                        other_train_id,
-                        begin,
-                        end,
-                        days_of_week,
-                        other_train_location_suffix,
-                        true,
-                    );
-                }
-            }
-        }
-    }
-}
-
-fn trains_replace_assoc(
-    trains: &mut Vec<Train>,
-    other_train_id: &str,
-    location: &str,
-    location_suffix: &Option<String>,
-    other_train_location_suffix: &Option<String>,
-    new_assoc: &AssociationNode,
-) {
-    for ref mut train in trains.iter_mut() {
-        // recurse on replacements
-        trains_replace_assoc(
-            &mut train.replacements,
-            &other_train_id,
-            &location,
-            &location_suffix,
-            &other_train_location_suffix,
-            &new_assoc,
-        );
-
-        for ref mut train_location in train.route.iter_mut() {
-            if train_location.id == location && train_location.id_suffix == *location_suffix {
-                replace_single_vec_assocs(
-                    &mut train_location.divides_to_form,
-                    other_train_id,
-                    other_train_location_suffix,
-                    new_assoc,
-                );
-                replace_single_vec_assocs(
-                    &mut train_location.joins_to,
-                    other_train_id,
-                    other_train_location_suffix,
-                    new_assoc,
-                );
-                if let Some(assoc) = &mut train_location.becomes {
-                    if other_train_id == assoc.other_train_id
-                        && *other_train_location_suffix == assoc.other_train_location_id_suffix
-                    {
-                        // check for no overlapping days at all
-                        if !check_date_applicability(
-                            &assoc.validity[0],
-                            new_assoc.validity[0].valid_begin,
-                            new_assoc.validity[0].valid_end,
-                            &new_assoc.validity[0].days_of_week,
-                        ) {
-                            continue;
-                        }
-                        assoc.replacements.push(new_assoc.clone());
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn trains_replace_rev_assoc(
-    trains: &mut Vec<Train>,
-    other_train_id: &str,
-    location: &str,
-    location_suffix: &Option<String>,
-    other_train_location_suffix: &Option<String>,
-    new_assoc: &AssociationNode,
-) {
-    for ref mut train in trains.iter_mut() {
-        // recurse on replacements
-        trains_replace_rev_assoc(
-            &mut train.replacements,
-            &other_train_id,
-            &location,
-            &location_suffix,
-            &other_train_location_suffix,
-            &new_assoc,
-        );
-
-        for ref mut train_location in train.route.iter_mut() {
-            if train_location.id == location && train_location.id_suffix == *location_suffix {
-                replace_single_vec_assocs(
-                    &mut train_location.divides_from,
-                    other_train_id,
-                    other_train_location_suffix,
-                    new_assoc,
-                );
-                replace_single_vec_assocs(
-                    &mut train_location.is_joined_to_by,
-                    other_train_id,
-                    other_train_location_suffix,
-                    new_assoc,
-                );
-                if let Some(assoc) = &mut train_location.forms_from {
-                    if other_train_id == assoc.other_train_id
-                        && *other_train_location_suffix == assoc.other_train_location_id_suffix
-                    {
-                        // check for no overlapping days at all
-                        if !check_date_applicability(
-                            &assoc.validity[0],
-                            new_assoc.validity[0].valid_begin,
-                            new_assoc.validity[0].valid_end,
-                            &new_assoc.validity[0].days_of_week,
-                        ) {
-                            continue;
-                        }
-                        assoc.replacements.push(new_assoc.clone());
-                    }
-                }
-            }
-        }
-    }
+    Ok(())
 }
 
 fn produce_cif_error_closure(number: u64, column: usize) -> Box<dyn Fn(CifErrorType) -> CifError> {
@@ -1256,7 +1228,7 @@ where
     return Ok((stp_modification_type, is_stp));
 }
 
-fn read_date<F, T>(date_slice: &str, error_logic: F) -> Result<DateTime<Tz>, T>
+fn read_date<F, T>(date_slice: &str, error_logic: F) -> Result<NaiveDateTime, T>
 where
     F: FnOnce(CifErrorType) -> T,
 {
@@ -1265,12 +1237,10 @@ where
         Ok(x) => x,
         Err(x) => return Err(error_logic(CifErrorType::ChronoParseError(x))),
     };
-    Ok(London
-        .from_local_datetime(&parsed_date.and_hms_opt(0, 0, 0).unwrap())
-        .unwrap())
+    Ok(parsed_date.and_hms_opt(0, 0, 0).unwrap())
 }
 
-fn read_backwards_date<F, T>(date_slice: &str, error_logic: F) -> Result<DateTime<Tz>, T>
+fn read_backwards_date<F, T>(date_slice: &str, error_logic: F) -> Result<NaiveDateTime, T>
 where
     F: FnOnce(CifErrorType) -> T,
 {
@@ -1279,12 +1249,10 @@ where
         Ok(x) => x,
         Err(x) => return Err(error_logic(CifErrorType::ChronoParseError(x))),
     };
-    Ok(London
-        .from_local_datetime(&parsed_date.and_hms_opt(0, 0, 0).unwrap())
-        .unwrap())
+    Ok(parsed_date.and_hms_opt(0, 0, 0).unwrap())
 }
 
-fn read_vstp_date<F, T>(date_slice: &str, error_logic: F) -> Result<DateTime<Tz>, T>
+fn read_vstp_date<F, T>(date_slice: &str, error_logic: F) -> Result<NaiveDateTime, T>
 where
     F: FnOnce(CifErrorType) -> T,
 {
@@ -1293,9 +1261,7 @@ where
         Ok(x) => x,
         Err(x) => return Err(error_logic(CifErrorType::ChronoParseError(x))),
     };
-    Ok(London
-        .from_local_datetime(&parsed_date.and_hms_opt(0, 0, 0).unwrap())
-        .unwrap())
+    Ok(parsed_date.and_hms_opt(0, 0, 0).unwrap())
 }
 
 fn read_optional_string(slice: &str) -> Option<String> {
@@ -1306,7 +1272,9 @@ fn read_optional_string(slice: &str) -> Option<String> {
     }
 }
 
-fn read_days_of_week<F, T>(slice: &str, error_logic: F) -> Result<DaysOfWeek, T>
+fn read_days_of_week<F, T>(
+    slice: &str, error_logic: F
+) -> Result<train_validity_period::DaysOfWeek, T>
 where
     F: FnOnce(CifErrorType) -> T,
 {
@@ -1318,7 +1286,7 @@ where
             slice.to_string(),
         )))
     } else {
-        Ok(DaysOfWeek {
+        Ok(train_validity_period::DaysOfWeek {
             monday: &slice[0..1] == "1",
             tuesday: &slice[1..2] == "1",
             wednesday: &slice[2..3] == "1",
@@ -1452,12 +1420,22 @@ where
 fn read_operating_characteristics<F, T>(
     slice: &str,
     error_logic: F,
-) -> Result<(OperatingCharacteristics, bool), T>
+) -> Result<(variable_train::OperatingCharacteristics, bool), T>
 where
     F: FnOnce(CifErrorType) -> T,
 {
-    let mut operating_characteristics = OperatingCharacteristics {
-        ..Default::default()
+    let mut operating_characteristics = variable_train::OperatingCharacteristics {
+        vacuum_braked: false,
+        one_hundred_mph: false,
+        driver_only_passenger: false,
+        br_mark_four_coaches: false,
+        guard_required: false,
+        one_hundred_and_ten_mph: false,
+        push_pull: false,
+        air_conditioned_with_pa: false,
+        steam_heat: false,
+        runs_to_locations_as_required: false,
+        sb1c_gauge: false,
     };
     let mut runs_as_required = false;
 
@@ -1526,6 +1504,7 @@ where
             "195" => Some("Class 195 'Civity' DMU".to_string()),
             "196" => Some("Class 196 'Civity' DMU".to_string()),
             "197" => Some("Class 197 'Civity' DMU".to_string()),
+            "231" => Some("Class 231 'FLIRT' DEMU".to_string()),
             "755" => Some("Class 755 'FLIRT' bi-mode running on diesel".to_string()),
             "777" => Some("Class 777/1 'METRO' bi-mode running on battery".to_string()),
             "800" => Some("Class 800 'Azuma' bi-mode running on diesel".to_string()),
@@ -1652,12 +1631,30 @@ where
     Ok(classes_to_bools(seating_class))
 }
 
-fn read_catering<F, T>(slice: &str, error_logic: F) -> Result<(Catering, bool), T>
+fn read_catering<F, T>(slice: &str, error_logic: F) -> Result<(variable_train::Catering, bool), T>
 where
     F: FnOnce(CifErrorType) -> T,
 {
-    let mut catering = Catering {
-        ..Default::default()
+    let mut catering = variable_train::Catering {
+        at_seat_meal: false,
+        bar: false,
+        bistro: false,
+        breakfast_in_car: false,
+        buffet: false,
+        coffee_shop: false,
+        self_service: false,
+        trolley: false,
+        vending_machine_food: false,
+        vending_machine_drink: false,
+        mini_bar: false,
+        restaurant: false,
+        first_class_restaurant: false,
+        first_class_meal: false,
+        other: false,
+        food_available: None,
+        hot_food_available: None,
+        drink_available: None,
+        snacks_available: None,
     };
     let mut wheelchair_reservations = false;
 
@@ -1687,12 +1684,12 @@ fn read_reservations<F, T>(
     standard_sleepers: bool,
     train_type: TrainType,
     error_logic: F,
-) -> Result<Reservations, T>
+) -> Result<variable_train::Reservations, T>
 where
     F: FnOnce(CifErrorType) -> T,
 {
     match slice.trim() {
-        "A" => Ok(Reservations {
+        "A" => Ok(variable_train::Reservations {
             seats: if first_seating || standard_seating {
                 ReservationField::Mandatory
             } else {
@@ -1716,7 +1713,7 @@ where
             wheelchairs: ReservationField::Mandatory,
             supplement_charged: None,
         }),
-        "E" => Ok(Reservations {
+        "E" => Ok(variable_train::Reservations {
             seats: if first_seating || standard_seating {
                 ReservationField::NotMandatory
             } else {
@@ -1744,7 +1741,7 @@ where
             },
             supplement_charged: None,
         }),
-        "R" => Ok(Reservations {
+        "R" => Ok(variable_train::Reservations {
             seats: if first_seating || standard_seating {
                 ReservationField::Recommended
             } else {
@@ -1768,7 +1765,7 @@ where
             wheelchairs: ReservationField::Recommended,
             supplement_charged: None,
         }),
-        "S" => Ok(Reservations {
+        "S" => Ok(variable_train::Reservations {
             seats: if first_seating || standard_seating {
                 ReservationField::Possible
             } else {
@@ -1792,7 +1789,7 @@ where
             wheelchairs: ReservationField::Possible,
             supplement_charged: None,
         }),
-        "" => Ok(Reservations {
+        "" => Ok(variable_train::Reservations {
             seats: if first_seating || standard_seating {
                 ReservationField::Impossible
             } else {
@@ -1851,13 +1848,16 @@ where
     Ok(brand)
 }
 
-fn amend_train(train: &mut Train, new_train: Train) {
-    train.validity = new_train.validity;
-    train.runs_as_required = new_train.runs_as_required;
-    train.performance_monitoring = new_train.performance_monitoring;
-    train.route = new_train.route;
-    train.variable_train = new_train.variable_train;
-    train.source = new_train.source;
+fn amend_train(
+    train_variant: &mut train_variant::ActiveModelEx,
+    new_train_variant: train_variant::ActiveModelEx
+) {
+    train_variant.validity = new_train_variant.validity;
+    train_variant.runs_as_required = new_train_variant.runs_as_required;
+    train_variant.performance_monitoring = new_train_variant.performance_monitoring;
+    train_variant.route = new_train_variant.route;
+    train_variant.variable_train = new_train_variant.variable_train;
+    train_variant.source = new_train_variant.source;
 }
 
 fn read_mandatory_wtt_time<F, T>(slice: &str, error_logic: F) -> Result<NaiveTime, T>
@@ -1950,12 +1950,49 @@ where
     Ok(eng_minutes * 60 + eng_seconds)
 }
 
-fn read_activities<F, T>(slice: &str, error_logic: F) -> Result<Activities, T>
+fn read_activities<F, T>(slice: &str, error_logic: F) -> Result<train_location::Activities, T>
 where
     F: FnOnce(CifErrorType) -> T,
 {
-    let mut activities = Activities {
-        ..Default::default()
+    let mut activities = train_location::Activities {
+        detach: false,
+        attach: false,
+        other_trains_pass: false,
+        attach_or_detach_assisting_loco: false,
+        x_on_arrival: false,
+        banking_loco: false,
+        crew_change: false,
+        set_down_only: false,
+        examination: false,
+        gbprtt: false,
+        prevent_column_merge: false,
+        prevent_third_column_merge: false,
+        passenger_count: false,
+        ticket_collection: false,
+        ticket_examination: false,
+        first_class_ticket_examination: false,
+        selective_ticket_examination: false,
+        change_loco: false,
+        unadvertised_stop: false,
+        operational_stop: false,
+        train_locomotive_on_rear: false,
+        propelling: false,
+        request_pick_up: false,
+        request_set_down: false,
+        reversing_move: false,
+        run_round: false,
+        staff_stop: false,
+        normal_passenger_stop: false,
+        train_begins: false,
+        train_finishes: false,
+        tops_reporting: false,
+        token_etc: false,
+        pick_up_only: false,
+        watering_stock: false,
+        cross_at_passing_point: false,
+        request_pick_up_by_telephone: false,
+        request_set_down_by_telephone: false,
+        times_approximate: false,
     };
 
     for activity in slice
@@ -2114,14 +2151,14 @@ where
     }
 }
 
-fn get_working_time(location: &TrainLocation) -> (NaiveTime, u8) {
+fn get_working_time(location: &train_location::ActiveModelEx) -> (NaiveTime, u8) {
     // no error checking needed as any issue here should be a panic; trains are
     // checked for validity as they are written
-    match location.working_dep {
-        Some(x) => (x, location.working_dep_day.unwrap()),
+    match location.working_dep.clone().unwrap() {
+        Some(x) => (x, location.working_dep_day.clone().unwrap().unwrap()),
         None => (
-            location.working_pass.unwrap(),
-            location.working_pass_day.unwrap(),
+            location.working_pass.clone().unwrap().unwrap(),
+            location.working_pass_day.clone().unwrap().unwrap(),
         ),
     }
 }
@@ -2151,13 +2188,110 @@ impl CifImporter {
         }
     }
 
+    async fn populate_train_variant_cache(
+        &mut self, namespace: &str, transaction: &DatabaseTransaction
+    ) -> Result<(), Error> {
+        self.cached_train_variant_ids.clear();
+        let mut trains = train::Entity::load()
+            .filter(train::COLUMN.namespace.eq(namespace))
+            .all(transaction)
+            .await?;
+
+        let ids: Vec<Vec<Option<String>>>
+            = trains
+            .iter()
+            .map(|x| Some(x.id.clone()))
+            .collect::<Vec<Option<String>>>()
+            .chunks(10000)
+            .map(|x| x.to_vec())
+            .collect();
+
+        {
+            let mut train_map: HashMap<String, &mut train::ModelEx>
+                = trains.iter_mut().map(|x| (x.id.clone(), x)).collect();
+            for chunk in &ids {
+                let chunk_variants = train_variant::Entity::load()
+                    .filter(train_variant::COLUMN.train_id.is_in(chunk.to_vec()))
+                    .all(transaction)
+                    .await?;
+
+                for train_variant in chunk_variants.into_iter() {
+                    let train: &mut train::ModelEx
+                        = *train_map.get_mut(train_variant.train_id.as_ref().unwrap()).unwrap();
+                    let variants: Option<Vec<train_variant::ModelEx>>
+                        = train.train_variants.clone().into();
+                    let mut variants = variants.unwrap_or_default();
+                    variants.push(train_variant);
+                    train.train_variants = HasMany::Loaded(variants);
+                }
+            }
+        }
+
+        self.cached_train_variant_ids = trains
+            .iter()
+            .fold::<HashMap<String, HashSet<i64>>, _>(HashMap::new(), |mut map, item| {
+                map.entry(item.id.clone())
+                    .or_default()
+                    .extend(item.train_variants.iter().map(|x| x.id));
+                map
+            });
+
+        let root_train_variants: Vec<train_variant::ModelEx>
+            = trains.into_iter().map(|x| x.train_variants).flatten().collect();
+
+        let mut train_id_by_train_variant_id: HashMap<i64, String> = root_train_variants
+            .iter()
+            .map(|x| (x.id, x.train_id.clone().unwrap()))
+            .collect();
+
+        let mut prev_train_variants = root_train_variants;
+        loop {
+            let ids: Vec<Vec<Option<i64>>>
+                = prev_train_variants
+                .iter()
+                .map(|x| Some(x.id))
+                .collect::<Vec<Option<i64>>>()
+                .chunks(10000)
+                .map(|x| x.to_vec())
+                .collect();
+            prev_train_variants = vec![];
+            for chunk in &ids {
+                prev_train_variants.append(&mut train_variant::Entity::load()
+                    .filter(train_variant::COLUMN.parent_train_variant_id.is_in(chunk.to_vec()))
+                    .all(transaction)
+                    .await?);
+            }
+            if prev_train_variants.len() > 0 {
+                for train_variant in &prev_train_variants {
+                    let train_id
+                        = train_id_by_train_variant_id
+                        [&train_variant.parent_train_variant_id.unwrap()].clone();
+                    train_id_by_train_variant_id.insert(train_variant.id, train_id.clone());
+                    self.cached_train_variant_ids
+                        .entry(train_id.clone()).or_default().insert(train_variant.id);
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn get_train_variant_ids(
+        &self,
+        train_id: &str,
+    ) -> HashSet<i64> {
+        self.cached_train_variant_ids.get(train_id).unwrap_or(&HashSet::new()).clone()
+    }
+
     fn delete_unwritten_assocs(
         &mut self,
         main_train_id: &str,
         location: &str,
         location_suffix: &Option<String>,
         other_train_id: &str,
-        begin: &DateTime<Tz>,
+        begin: &NaiveDateTime,
         other_train_location_suffix: &Option<String>,
         stp_modification_type: &ModificationType,
         is_stp: bool,
@@ -2174,26 +2308,78 @@ impl CifImporter {
         };
 
         if *stp_modification_type == ModificationType::Insert {
-            old_assoc.retain(|(assoc, _category)| {
-                !is_matching_assoc_for_modify_insertion(
-                    assoc,
-                    other_train_id,
-                    &begin,
-                    &other_train_location_suffix,
-                    is_stp,
-                    use_rev,
-                )
-            });
+            old_assoc.retain(|assoc|
+                assoc.other_train_id == ActiveValue::Set(other_train_id.to_string())
+                && assoc.validity[0].valid_begin
+                    == ActiveValue::Set(
+                        if use_rev { rev_date(*begin, assoc.day_diff.clone().unwrap()) }
+                        else { *begin }
+                    )
+                && assoc.other_train_location_id_suffix
+                    == ActiveValue::Set(other_train_location_suffix.clone())
+                && assoc.source
+                    == ActiveValue::Set(Some(
+                        if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }
+                    ))
+                && ((
+                    !use_rev && matches!(
+                        assoc.association_type,
+                        ActiveValue::Set(AssociationType::MainDividesToFormOther)
+                        | ActiveValue::Set(AssociationType::MainJoinsToOther)
+                        | ActiveValue::Set(AssociationType::MainBecomesOther)
+                    )
+                ) || (
+                    use_rev && matches!(
+                        assoc.association_type,
+                        ActiveValue::Set(AssociationType::MainDividesFromOther)
+                        | ActiveValue::Set(AssociationType::MainIsJoinedToByOther)
+                        | ActiveValue::Set(AssociationType::MainFormsFromOther)
+                    )
+                ))
+            );
         } else {
-            for (ref mut assoc, ref _category) in old_assoc.iter_mut() {
-                delete_single_assoc_replacements_cancellations(
-                    assoc,
-                    other_train_id,
-                    &begin,
-                    &other_train_location_suffix,
-                    &stp_modification_type,
-                    use_rev,
-                );
+            for ref mut assoc in old_assoc.iter_mut() {
+                if assoc.other_train_id != ActiveValue::Set(other_train_id.to_string())
+                    || assoc.other_train_location_id_suffix != ActiveValue::Set(
+                        other_train_location_suffix.clone()
+                    )
+                    || ((
+                        !use_rev && !matches!(
+                            assoc.association_type,
+                            ActiveValue::Set(AssociationType::MainDividesToFormOther)
+                            | ActiveValue::Set(AssociationType::MainJoinsToOther)
+                            | ActiveValue::Set(AssociationType::MainBecomesOther)
+                        )
+                    ) || (
+                        use_rev && !matches!(
+                            assoc.association_type,
+                            ActiveValue::Set(AssociationType::MainDividesFromOther)
+                            | ActiveValue::Set(AssociationType::MainIsJoinedToByOther)
+                            | ActiveValue::Set(AssociationType::MainFormsFromOther)
+                        )
+                    ))
+                {
+                    continue;
+                }
+                if *stp_modification_type == ModificationType::Amend {
+                    assoc.replacements.as_mut_vec().retain(|assoc|
+                        assoc.validity.as_slice()[0].valid_begin
+                            != if use_rev {
+                                ActiveValue::Set(rev_date(*begin, assoc.day_diff.clone().unwrap()))
+                            } else {
+                                ActiveValue::Set(*begin)
+                            }
+                    );
+                } else if *stp_modification_type == ModificationType::Delete {
+                    assoc.cancellations.as_mut_vec().retain(|cancellation| {
+                        cancellation.validity.as_slice()[0].valid_begin
+                            != if use_rev {
+                                ActiveValue::Set(rev_date(*begin, assoc.day_diff.clone().unwrap()))
+                            } else {
+                                ActiveValue::Set(*begin)
+                            }
+                    });
+                }
             }
         }
 
@@ -2213,9 +2399,9 @@ impl CifImporter {
         location: &str,
         location_suffix: &Option<String>,
         other_train_id: &str,
-        begin: &DateTime<Tz>,
-        end: &DateTime<Tz>,
-        days_of_week: &DaysOfWeek,
+        begin: &NaiveDateTime,
+        end: &NaiveDateTime,
+        days_of_week: &train_validity_period::DaysOfWeek,
         other_train_location_suffix: &Option<String>,
         use_rev: bool,
     ) {
@@ -2229,16 +2415,54 @@ impl CifImporter {
             Some(x) => x,
         };
 
-        for (ref mut assoc, ref _category) in old_assoc.iter_mut() {
-            cancel_single_assoc(
-                assoc,
-                other_train_id,
-                begin,
-                end,
-                days_of_week,
-                other_train_location_suffix,
-                use_rev,
-            );
+        for ref mut assoc in old_assoc.iter_mut() {
+            if assoc.other_train_id != ActiveValue::Set(other_train_id.to_string())
+                || ((
+                    !use_rev && !matches!(
+                        assoc.association_type,
+                        ActiveValue::Set(AssociationType::MainDividesToFormOther)
+                        | ActiveValue::Set(AssociationType::MainJoinsToOther)
+                        | ActiveValue::Set(AssociationType::MainBecomesOther)
+                    )
+                ) || (
+                    use_rev && !matches!(
+                        assoc.association_type,
+                        ActiveValue::Set(AssociationType::MainDividesFromOther)
+                        | ActiveValue::Set(AssociationType::MainIsJoinedToByOther)
+                        | ActiveValue::Set(AssociationType::MainFormsFromOther)
+                    )
+                )) || assoc.other_train_location_id_suffix
+                    != ActiveValue::Set(other_train_location_suffix.clone()) {
+                continue;
+            };
+            let (begin, end, days_of_week) = if use_rev {
+                (
+                    rev_date(*begin, assoc.day_diff.clone().unwrap()),
+                    rev_date(*end, assoc.day_diff.clone().unwrap()),
+                    rev_days(&days_of_week, assoc.day_diff.clone().unwrap()),
+                )
+            } else {
+                (begin.clone(), end.clone(), days_of_week.clone())
+            };
+            if !check_date_applicability(&assoc.validity[0], begin, end, &days_of_week) {
+                continue;
+            }
+            let mut validity = train_validity_period::ActiveModelEx {
+                valid_begin: ActiveValue::Set(begin),
+                valid_end: ActiveValue::Set(end),
+                timezone: ActiveValue::Set(London.name().to_string()),
+                ..Default::default()
+            };
+            validity.populate_days_of_week(&days_of_week);
+            let new_cancel = association_cancellation::ActiveModelEx {
+                validity: ActiveHasMany::Append(vec![validity]),
+                source: ActiveValue::Set(Some(TrainSource::ShortTerm)),
+                ..Default::default()
+            };
+            assoc
+                .cancellations
+                .as_mut_vec()
+                .push(new_cancel);
         }
 
         self.unwritten_assocs.insert(
@@ -2257,15 +2481,15 @@ impl CifImporter {
         location: &str,
         location_suffix: &Option<String>,
         other_train_id: &str,
-        begin: &DateTime<Tz>,
-        end: &DateTime<Tz>,
-        days_of_week: &DaysOfWeek,
+        begin: &NaiveDateTime,
+        end: &NaiveDateTime,
+        days_of_week: &train_validity_period::DaysOfWeek,
         other_train_location_suffix: &Option<String>,
         stp_modification_type: &ModificationType,
         is_stp: bool,
         day_diff: Option<i8>,
         for_passengers: Option<bool>,
-        category: Option<AssociationCategory>,
+        category: Option<AssociationType>,
         use_rev: bool,
     ) {
         let old_assoc = self.unwritten_assocs.remove(&(
@@ -2278,43 +2502,86 @@ impl CifImporter {
             Some(x) => x,
         };
 
-        for (ref mut assoc, ref mut old_category) in old_assoc.iter_mut() {
-            if *stp_modification_type == ModificationType::Insert {
-                if is_matching_assoc_for_modify_insertion(
+        for ref mut assoc in old_assoc.iter_mut() {
+            if ActiveValue::Set(other_train_id.to_string()) != assoc.other_train_id
+                || ActiveValue::Set(other_train_location_suffix.clone())
+                    != assoc.other_train_location_id_suffix {
+                continue;
+            }
+            if *stp_modification_type == ModificationType::Insert
+                && assoc.source
+                    == ActiveValue::Set(Some(
+                        if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }
+                    ))
+                && assoc.validity[0].valid_begin == ActiveValue::Set(
+                    if use_rev { rev_date(*begin, assoc.day_diff.clone().unwrap()) } else { *begin }
+                )
+                && assoc.main_train_location_id.clone().unwrap().is_some()
+            {
+                amend_assoc(
                     assoc,
-                    other_train_id,
-                    begin,
-                    other_train_location_suffix,
-                    is_stp,
-                    use_rev,
-                ) {
-                    amend_individual_assoc(
-                        assoc,
-                        begin,
-                        end,
-                        days_of_week,
-                        day_diff,
-                        for_passengers,
-                        use_rev,
-                    );
-                    match category {
-                        Some(x) => *old_category = x,
-                        None => (),
-                    }
-                }
-            } else {
-                amend_single_assoc_replacements_cancellations(
-                    assoc,
-                    other_train_id,
                     begin,
                     end,
                     days_of_week,
-                    other_train_location_suffix,
-                    stp_modification_type,
                     day_diff,
                     for_passengers,
+                    category,
                     use_rev,
                 );
+            }
+            else if *stp_modification_type == ModificationType::Amend
+                && assoc.source
+                    == ActiveValue::Set(Some(
+                        if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }
+                    ))
+                && assoc.validity[0].valid_begin == ActiveValue::Set(
+                    if use_rev { rev_date(*begin, assoc.day_diff.clone().unwrap()) } else { *begin }
+                )
+                && assoc.main_train_location_id.clone().unwrap().is_none()
+            {
+                amend_assoc(
+                    assoc,
+                    begin,
+                    end,
+                    days_of_week,
+                    day_diff,
+                    for_passengers,
+                    category,
+                    use_rev,
+                );
+            }
+            else if *stp_modification_type == ModificationType::Delete
+                && assoc.source
+                    == ActiveValue::Set(Some(
+                        if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }
+                    ))
+            {
+                for ref mut cancellation in assoc.cancellations.as_mut_vec().iter_mut() {
+                    if cancellation.validity[0].valid_begin
+                        == ActiveValue::Set(
+                            if use_rev { rev_date(*begin, assoc.day_diff.clone().unwrap()) }
+                            else { *begin }
+                        ) {
+                        let mut validity = train_validity_period::ActiveModelEx {
+                            valid_begin: ActiveValue::Set(
+                                if use_rev { rev_date(*begin, assoc.day_diff.clone().unwrap()) }
+                                else { *begin }
+                            ),
+                            valid_end: ActiveValue::Set(
+                                if use_rev { rev_date(*end, assoc.day_diff.clone().unwrap()) }
+                                else { *end }
+                            ),
+                            timezone: ActiveValue::Set(London.name().to_string()),
+                            ..Default::default()
+                        };
+                        let days_of_week = if use_rev {
+                            rev_days(&days_of_week, assoc.day_diff.clone().unwrap())
+                        }
+                        else { days_of_week.clone() };
+                        validity.populate_days_of_week(&days_of_week);
+                        cancellation.validity = ActiveHasMany::Append(vec![validity]);
+                    }
+                }
             }
         }
 
@@ -2335,7 +2602,7 @@ impl CifImporter {
         location_suffix: &Option<String>,
         other_train_id: &str,
         other_train_location_suffix: &Option<String>,
-        new_assoc: &AssociationNode,
+        new_assoc: &association_node::ActiveModelEx,
     ) {
         let old_assoc = self.unwritten_assocs.remove(&(
             main_train_id.to_string(),
@@ -2347,16 +2614,19 @@ impl CifImporter {
             Some(x) => x,
         };
 
-        for (ref mut assoc, ref _category) in old_assoc.iter_mut() {
-            if other_train_id == assoc.other_train_id
-                && *other_train_location_suffix == assoc.other_train_location_id_suffix
+        for ref mut assoc in old_assoc.iter_mut() {
+            if ActiveValue::Set(other_train_id.to_string()) == assoc.other_train_id
+                && ActiveValue::Set(other_train_location_suffix.clone())
+                    == assoc.other_train_location_id_suffix
             {
                 // check for no overlapping days at all
                 if !check_date_applicability(
                     &assoc.validity[0],
-                    new_assoc.validity[0].valid_begin,
-                    new_assoc.validity[0].valid_end,
-                    &new_assoc.validity[0].days_of_week,
+                    new_assoc.validity[0].valid_begin.clone().unwrap(),
+                    new_assoc.validity[0].valid_end.clone().unwrap(),
+                    &train_validity_period::DaysOfWeek::get_from_active_model(
+                        &new_assoc.validity[0]
+                    )
                 ) {
                     continue;
                 }
@@ -2376,12 +2646,13 @@ impl CifImporter {
 
     fn get_last_train<'a>(
         &'a mut self,
-        schedule: &'a mut Schedule,
         number: u64,
         record_type: &str,
-    ) -> Result<&'a mut Train, CifError> {
-        let (main_train_id, begin, stp_modification_type, is_stp) = match &self.last_train {
-            Some(x) => x,
+    ) -> Result<&'a mut train_variant::ActiveModelEx, Error> {
+        Ok(match &mut self.last_train {
+            Some(LastTrain::DatabaseInsert(x)) => x,
+            Some(LastTrain::DatabaseSave(x)) => x,
+            Some(LastTrain::Orphaned(key)) => self.orphaned_overlay_trains.get_mut(key).unwrap(),
             None => {
                 return Err(CifError {
                     error_type: CifErrorType::UnexpectedRecordType(
@@ -2390,51 +2661,8 @@ impl CifImporter {
                     ),
                     line: number,
                     column: 0,
-                })
+                }.into())
             }
-        };
-
-        let trains = match (
-            schedule.trains.get_mut(main_train_id),
-            &stp_modification_type,
-        ) {
-            (Some(x), _) => x,
-            (None, ModificationType::Amend) => match self
-                .orphaned_overlay_trains
-                .get_mut(&(main_train_id.clone(), begin.clone()))
-            {
-                Some(x) => return Ok(x),
-                None => panic!("Unable to find last-written train, even in orphaned overlays"),
-            },
-            _ => panic!("Unable to find last-written train"),
-        };
-
-        let train = match (&stp_modification_type, &is_stp) {
-            (ModificationType::Insert, false) => trains.iter_mut().find(|train| {
-                train.source.unwrap() == TrainSource::LongTerm
-                    && train.validity[0].valid_begin == *begin
-            }),
-            (ModificationType::Insert, true) => trains.iter_mut().find(|train| {
-                train.source.unwrap() == TrainSource::ShortTerm
-                    && train.validity[0].valid_begin == *begin
-            }),
-            (ModificationType::Amend, _) => find_replacement_train(trains, begin),
-            (ModificationType::Delete, _) => panic!("Unexpected train modification type"),
-        };
-
-        Ok(match (train, &stp_modification_type) {
-            (Some(x), _) => x,
-            (None, ModificationType::Amend) => match self
-                .orphaned_overlay_trains
-                .get_mut(&(main_train_id.clone(), begin.clone()))
-            {
-                Some(x) => x,
-                None => panic!(
-                    "Unable to find last-written train, even in orphaned overlays; line {}",
-                    number
-                ),
-            },
-            _ => panic!("Unable to find last-written train"),
         })
     }
 
@@ -2464,12 +2692,13 @@ impl CifImporter {
         })
     }
 
-    fn read_association(
+    async fn read_association(
         &mut self,
         line: &str,
-        mut schedule: Schedule,
+        namespace: &str,
         number: u64,
-    ) -> Result<Schedule, CifError> {
+        transaction: &DatabaseTransaction,
+    ) -> Result<(), Error> {
         let modification_type =
             read_modification_type(&line[2..3], produce_cif_error_closure(number, 2))?;
         let (stp_modification_type, is_stp) =
@@ -2488,33 +2717,29 @@ impl CifImporter {
         if modification_type == ModificationType::Delete {
             // first find any committed associations and delete
             trains_delete_assoc(
-                schedule
-                    .trains
-                    .get_mut(main_train_id)
-                    .as_mut()
-                    .unwrap_or(&mut &mut vec![]),
+                &self.get_train_variant_ids(main_train_id),
                 &other_train_id,
+                namespace,
                 &begin,
                 &location,
                 &location_suffix,
                 &other_train_location_suffix,
                 &stp_modification_type,
                 is_stp,
-            );
+                transaction,
+            ).await?;
             trains_delete_rev_assoc(
-                schedule
-                    .trains
-                    .get_mut(other_train_id)
-                    .as_mut()
-                    .unwrap_or(&mut &mut vec![]),
+                &self.get_train_variant_ids(other_train_id),
                 &main_train_id,
+                namespace,
                 &begin,
                 &location,
                 &other_train_location_suffix,
                 &location_suffix,
                 &stp_modification_type,
                 is_stp,
-            );
+                transaction,
+            ).await?;
 
             // now delete from unwritten associations
             self.delete_unwritten_assocs(
@@ -2540,7 +2765,7 @@ impl CifImporter {
                 true,
             );
 
-            return Ok(schedule);
+            return Ok(());
         }
 
         let end = read_date(&line[21..27], produce_cif_error_closure(number, 21))?;
@@ -2553,33 +2778,29 @@ impl CifImporter {
         {
             // cancel written ones
             trains_cancel_assoc(
-                schedule
-                    .trains
-                    .get_mut(main_train_id)
-                    .as_mut()
-                    .unwrap_or(&mut &mut vec![]),
+                &self.get_train_variant_ids(main_train_id),
                 &other_train_id,
+                namespace,
                 &begin,
                 &end,
                 &days_of_week,
                 &location,
                 &location_suffix,
                 &other_train_location_suffix,
-            );
+                transaction,
+            ).await?;
             trains_cancel_rev_assoc(
-                schedule
-                    .trains
-                    .get_mut(other_train_id)
-                    .as_mut()
-                    .unwrap_or(&mut &mut vec![]),
+                &self.get_train_variant_ids(other_train_id),
                 &main_train_id,
+                namespace,
                 &begin,
                 &end,
                 &days_of_week,
                 &location,
                 &other_train_location_suffix,
                 &location_suffix,
-            );
+                transaction,
+            ).await?;
 
             // now cancel from unwritten associations
             self.cancel_unwritten_assocs(
@@ -2605,7 +2826,7 @@ impl CifImporter {
                 true,
             );
 
-            return Ok(schedule);
+            return Ok(());
         }
 
         let day_diff = match &line[36..37] {
@@ -2618,7 +2839,7 @@ impl CifImporter {
                     error_type: CifErrorType::InvalidAssociationDateIndicator(x.to_string()),
                     line: number,
                     column: 36,
-                })
+                }.into())
             }
         };
         let for_passengers = match &line[47..48] {
@@ -2630,28 +2851,29 @@ impl CifImporter {
                     error_type: CifErrorType::InvalidAssociationType(x.to_string()),
                     line: number,
                     column: 47,
-                })
+                }.into())
             }
         };
 
         let category = match &line[34..36] {
-            "JJ" => Some(AssociationCategory::Join),
-            "VV" => Some(AssociationCategory::Divide),
-            "NP" => Some(AssociationCategory::Next),
+            "JJ" => Some(AssociationType::MainJoinsToOther),
+            "VV" => Some(AssociationType::MainDividesFromOther),
+            "NP" => Some(AssociationType::MainBecomesOther),
             "  " => None,
             x => {
                 return Err(CifError {
                     error_type: CifErrorType::InvalidAssociationCategory(x.to_string()),
                     line: number,
                     column: 34,
-                })
+                }.into())
             }
         };
 
         let rev_category = match category {
-            Some(AssociationCategory::Join) => Some(AssociationCategory::IsJoinedToBy),
-            Some(AssociationCategory::Divide) => Some(AssociationCategory::DividesFrom),
-            Some(AssociationCategory::Next) => Some(AssociationCategory::FormsFrom),
+            Some(AssociationType::MainJoinsToOther) => Some(AssociationType::MainIsJoinedToByOther),
+            Some(AssociationType::MainDividesFromOther)
+                => Some(AssociationType::MainDividesFromOther),
+            Some(AssociationType::MainBecomesOther) => Some(AssociationType::MainFormsFromOther),
             None => None,
             _ => panic!("Invalid association category"),
         };
@@ -2659,12 +2881,9 @@ impl CifImporter {
         if modification_type == ModificationType::Amend {
             // first find any committed associations and modify
             trains_amend_assoc(
-                schedule
-                    .trains
-                    .get_mut(main_train_id)
-                    .as_mut()
-                    .unwrap_or(&mut &mut vec![]),
+                &self.get_train_variant_ids(main_train_id),
                 &other_train_id,
+                namespace,
                 &begin,
                 &end,
                 &days_of_week,
@@ -2675,14 +2894,13 @@ impl CifImporter {
                 is_stp,
                 day_diff,
                 for_passengers,
-            );
+                category,
+                transaction,
+            ).await?;
             trains_amend_rev_assoc(
-                schedule
-                    .trains
-                    .get_mut(other_train_id)
-                    .as_mut()
-                    .unwrap_or(&mut &mut vec![]),
+                &self.get_train_variant_ids(other_train_id),
                 &main_train_id,
+                namespace,
                 &begin,
                 &end,
                 &days_of_week,
@@ -2693,7 +2911,9 @@ impl CifImporter {
                 is_stp,
                 day_diff,
                 for_passengers,
-            );
+                rev_category,
+                transaction,
+            ).await?;
 
             // now amend unwritten associations
             self.amend_unwritten_assocs(
@@ -2729,7 +2949,7 @@ impl CifImporter {
                 true,
             );
 
-            return Ok(schedule);
+            return Ok(());
         }
 
         let day_diff = match day_diff {
@@ -2739,7 +2959,7 @@ impl CifImporter {
                     error_type: CifErrorType::InvalidAssociationDateIndicator(" ".to_string()),
                     line: number,
                     column: 36,
-                })
+                }.into())
             }
         };
 
@@ -2750,7 +2970,7 @@ impl CifImporter {
                     error_type: CifErrorType::InvalidAssociationDateIndicator(" ".to_string()),
                     line: number,
                     column: 47,
-                })
+                }.into())
             }
         };
 
@@ -2761,52 +2981,64 @@ impl CifImporter {
                     error_type: CifErrorType::InvalidAssociationDateIndicator("  ".to_string()),
                     line: number,
                     column: 34,
-                })
+                }.into())
             }
         };
         let rev_category = rev_category.unwrap();
 
-        let rev_begin = rev_date(&begin, day_diff);
-        let rev_end = rev_date(&end, day_diff);
+        let rev_begin = rev_date(begin, day_diff);
+        let rev_end = rev_date(end, day_diff);
         let rev_days_of_week = rev_days(&days_of_week, day_diff);
 
         // all of the below will use AssociationNodes, so construct them here
-        let new_assoc = AssociationNode {
-            other_train_id: other_train_id.to_string(),
-            other_train_location_id_suffix: other_train_location_suffix.clone(),
-            validity: vec![TrainValidityPeriod {
-                valid_begin: begin,
-                valid_end: end,
-                days_of_week,
-            }],
-            cancellations: vec![],
-            replacements: vec![],
-            day_diff,
-            for_passengers,
-            source: Some(if is_stp {
+        let mut validity = train_validity_period::ActiveModelEx {
+            valid_begin: ActiveValue::Set(begin),
+            valid_end: ActiveValue::Set(end),
+            timezone: ActiveValue::Set(London.name().to_string()),
+            ..Default::default()
+        };
+        validity.populate_days_of_week(&days_of_week);
+        let new_assoc = association_node::ActiveModelEx {
+            other_train_id: ActiveValue::Set(other_train_id.to_string()),
+            namespace: ActiveValue::Set(namespace.to_string()),
+            other_train_location_id_suffix: ActiveValue::Set(other_train_location_suffix.clone()),
+            validity: ActiveHasMany::Append(vec![validity]),
+            cancellations: ActiveHasMany::Append(vec![]),
+            replacements: ActiveHasMany::Append(vec![]),
+            day_diff: ActiveValue::Set(day_diff),
+            for_passengers: ActiveValue::Set(for_passengers),
+            source: ActiveValue::Set(Some(if is_stp {
                 TrainSource::ShortTerm
             } else {
                 TrainSource::LongTerm
-            }),
+            })),
+            association_type: ActiveValue::Set(category),
+            ..Default::default()
         };
 
-        let new_rev_assoc = AssociationNode {
-            other_train_id: main_train_id.to_string(),
-            other_train_location_id_suffix: location_suffix.clone(),
-            validity: vec![TrainValidityPeriod {
-                valid_begin: rev_begin,
-                valid_end: rev_end,
-                days_of_week: rev_days_of_week,
-            }],
-            cancellations: vec![],
-            replacements: vec![],
-            day_diff: -day_diff,
-            for_passengers,
-            source: Some(if is_stp {
+        let mut validity = train_validity_period::ActiveModelEx {
+            valid_begin: ActiveValue::Set(rev_begin),
+            valid_end: ActiveValue::Set(rev_end),
+            timezone: ActiveValue::Set(London.name().to_string()),
+            ..Default::default()
+        };
+        validity.populate_days_of_week(&rev_days_of_week);
+        let new_rev_assoc = association_node::ActiveModelEx {
+            other_train_id: ActiveValue::Set(main_train_id.to_string()),
+            namespace: ActiveValue::Set(namespace.to_string()),
+            other_train_location_id_suffix: ActiveValue::Set(location_suffix.clone()),
+            validity: ActiveHasMany::Append(vec![validity]),
+            cancellations: ActiveHasMany::Append(vec![]),
+            replacements: ActiveHasMany::Append(vec![]),
+            day_diff: ActiveValue::Set(-day_diff),
+            for_passengers: ActiveValue::Set(for_passengers),
+            source: ActiveValue::Set(Some(if is_stp {
                 TrainSource::ShortTerm
             } else {
                 TrainSource::LongTerm
-            }),
+            })),
+            association_type: ActiveValue::Set(rev_category),
+            ..Default::default()
         };
 
         if modification_type == ModificationType::Insert
@@ -2820,7 +3052,7 @@ impl CifImporter {
                     location_suffix,
                 ))
                 .or_insert(vec![])
-                .push((new_assoc, category));
+                .push(new_assoc);
             self.unwritten_assocs
                 .entry((
                     other_train_id.to_string(),
@@ -2828,37 +3060,33 @@ impl CifImporter {
                     other_train_location_suffix,
                 ))
                 .or_insert(vec![])
-                .push((new_rev_assoc, rev_category));
+                .push(new_rev_assoc);
 
-            return Ok(schedule);
+            return Ok(());
         }
 
         if stp_modification_type == ModificationType::Amend {
             // first find any committed associations and modify
             trains_replace_assoc(
-                schedule
-                    .trains
-                    .get_mut(main_train_id)
-                    .as_mut()
-                    .unwrap_or(&mut &mut vec![]),
+                &self.get_train_variant_ids(main_train_id),
                 &other_train_id,
+                namespace,
                 &location,
                 &location_suffix,
                 &other_train_location_suffix,
                 &new_assoc,
-            );
-            trains_replace_rev_assoc(
-                schedule
-                    .trains
-                    .get_mut(other_train_id)
-                    .as_mut()
-                    .unwrap_or(&mut &mut vec![]),
+                transaction,
+            ).await?;
+            trains_replace_assoc(
+                &self.get_train_variant_ids(other_train_id),
                 &main_train_id,
+                namespace,
                 &location,
                 &other_train_location_suffix,
                 &location_suffix,
                 &new_rev_assoc,
-            );
+                transaction,
+            ).await?;
 
             self.replace_unwritten_assocs(
                 &main_train_id,
@@ -2877,18 +3105,19 @@ impl CifImporter {
                 &new_rev_assoc,
             );
 
-            return Ok(schedule);
+            return Ok(());
         }
 
-        Ok(schedule)
+        Ok(())
     }
 
-    fn read_basic_schedule(
+    async fn read_basic_schedule(
         &mut self,
         line: &str,
-        mut schedule: Schedule,
+        namespace: &str,
         number: u64,
-    ) -> Result<Schedule, CifError> {
+        transaction: &DatabaseTransaction,
+    ) -> Result<(usize, usize, usize), Error> {
         let modification_type =
             read_modification_type(&line[2..3], produce_cif_error_closure(number, 2))?;
         let (stp_modification_type, is_stp) =
@@ -2901,48 +3130,68 @@ impl CifImporter {
         //
         // Note these are NOT the same as STP cancels and indeed handled completely differently
         if modification_type == ModificationType::Delete {
-            let old_trains = schedule.trains.remove(main_train_id);
-            let mut old_trains = match old_trains {
-                None => return Ok(schedule),
-                Some(x) => x,
+            let train_variants = get_all_train_variants_for_delete(
+                &self.get_train_variant_ids(main_train_id),
+                transaction
+            ).await?;
+            match stp_modification_type {
+                ModificationType::Insert => {
+                    let train_variant_ids_to_delete: HashSet<i64> = train_variants
+                        .into_iter()
+                        .filter(|train_variant|
+                            train_variant.train_id.is_some()
+                            && train_variant.validity[0].valid_begin == begin
+                            && train_variant.source.unwrap() ==
+                                if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }
+                        )
+                        .map(|x| x.id)
+                        .collect();
+                    train_variant::Entity::delete_many()
+                        .filter(train_variant::COLUMN.id.is_in(train_variant_ids_to_delete.clone()))
+                        .exec(transaction)
+                        .await?;
+                    let cached_variant_ids
+                        = self
+                        .cached_train_variant_ids
+                        .entry(main_train_id.to_string())
+                        .or_default();
+                    *cached_variant_ids = &*cached_variant_ids - &train_variant_ids_to_delete;
+                },
+                ModificationType::Amend => {
+                    let train_variant_ids_to_delete: HashSet<i64> = train_variants
+                        .into_iter()
+                        .filter(|train_variant|
+                            train_variant.train_id.is_none()
+                            && train_variant.validity[0].valid_begin == begin
+                        )
+                        .map(|x| x.id)
+                        .collect();
+                    train_variant::Entity::delete_many()
+                        .filter(train_variant::COLUMN.id.is_in(train_variant_ids_to_delete.clone()))
+                        .exec(transaction)
+                        .await?;
+                    let cached_variant_ids
+                        = self
+                        .cached_train_variant_ids
+                        .entry(main_train_id.to_string())
+                        .or_default();
+                    *cached_variant_ids = &*cached_variant_ids - &train_variant_ids_to_delete;
+                },
+                ModificationType::Delete => {
+                    let cancellation_ids_to_delete: Vec<i64> = train_variants
+                        .into_iter()
+                        .flat_map(|train_variant|
+                            train_variant.cancellations.clone().into_iter().filter(|cancellation|
+                                cancellation.validity[0].valid_begin == begin
+                            ).collect::<Vec<train_cancellation::ModelEx>>()).map(|x| x.id)
+                        .collect();
+                    train_cancellation::Entity::delete_many()
+                        .filter(train_cancellation::COLUMN.id.is_in(cancellation_ids_to_delete))
+                        .exec(transaction)
+                        .await?;
+                },
             };
-
-            if stp_modification_type == ModificationType::Insert {
-                // first we delete main trains
-                old_trains.retain(|train| {
-                    match is_stp {
-                        false => {
-                            train.source.unwrap() != TrainSource::LongTerm
-                                || train.validity[0].valid_begin != begin
-                        } // delete the entire train for deleted inserts
-                        true => {
-                            train.source.unwrap() != TrainSource::ShortTerm
-                                || train.validity[0].valid_begin != begin
-                        }
-                    }
-                });
-            } else {
-                // now we clean up modifications/cancellations
-                for ref mut train in old_trains.iter_mut() {
-                    match stp_modification_type {
-                        ModificationType::Insert => {
-                            panic!("Insert found where Amend or Cancel expected")
-                        }
-                        ModificationType::Amend => train
-                            .replacements
-                            .retain(|replacement| replacement.validity[0].valid_begin != begin),
-                        ModificationType::Delete => train
-                            .cancellations
-                            .retain(|(cancellation, _source)| cancellation.valid_begin != begin),
-                    }
-                }
-            }
-
-            schedule
-                .trains
-                .insert(main_train_id.to_string(), old_trains);
-
-            return Ok(schedule);
+            return Ok((0, 0, 0));
         }
 
         let end = read_date(&line[15..21], produce_cif_error_closure(number, 15))?;
@@ -2953,61 +3202,64 @@ impl CifImporter {
         if stp_modification_type == ModificationType::Delete
             && modification_type == ModificationType::Insert
         {
-            let old_trains = schedule.trains.remove(main_train_id);
-            let mut old_trains = match old_trains {
-                None => return Ok(schedule),
-                Some(x) => x,
-            };
-
-            // we cancel main trains
-            for train in old_trains.iter_mut() {
-                if !check_date_applicability(&train.validity[0], begin, end, &days_of_week) {
+            let train_variants = get_all_train_variants_for_cancel(
+                &self.get_train_variant_ids(main_train_id),
+                transaction
+            ).await?;
+            for train_variant in &train_variants {
+                if !check_date_applicability(
+                    &train_variant.validity[0].clone().into(), begin, end, &days_of_week
+                ) {
                     continue;
                 }
-                let new_cancel = TrainValidityPeriod {
-                    valid_begin: begin.clone(),
-                    valid_end: end.clone(),
-                    days_of_week: days_of_week,
+                let mut validity = train_validity_period::ActiveModelEx {
+                    valid_begin: ActiveValue::Set(begin),
+                    valid_end: ActiveValue::Set(end),
+                    timezone: ActiveValue::Set(London.name().to_string()),
+                    ..Default::default()
                 };
-                train
+                validity.populate_days_of_week(&days_of_week);
+                let new_cancel = train_cancellation::ActiveModelEx {
+                    validity: ActiveHasMany::Append(vec![validity]),
+                    source: ActiveValue::Set(Some(TrainSource::ShortTerm)),
+                    ..Default::default()
+                };
+                let mut train_variant: train_variant::ActiveModelEx = train_variant.clone().into();
+                train_variant
                     .cancellations
-                    .push((new_cancel, TrainSource::ShortTerm))
+                    .push(new_cancel);
+                train_variant.save(transaction).await?;
             }
 
-            schedule
-                .trains
-                .insert(main_train_id.to_string(), old_trains);
-
-            return Ok(schedule);
+            return Ok((0, 0, 0));
         }
 
         if modification_type == ModificationType::Amend
             && stp_modification_type == ModificationType::Delete
         {
-            let old_trains = schedule.trains.remove(main_train_id);
-            let mut old_trains = match old_trains {
-                None => return Ok(schedule),
-                Some(x) => x,
-            };
-
-            // now we clean up modifications/cancellations
-            for ref mut train in old_trains.iter_mut() {
-                for (cancellation, _source) in train.cancellations.iter_mut() {
-                    if cancellation.valid_begin == begin {
-                        *cancellation = TrainValidityPeriod {
-                            valid_begin: begin,
-                            valid_end: end,
-                            days_of_week: days_of_week.clone(),
+            let train_variants = get_all_train_variants_for_amend_cancel(
+                &self.get_train_variant_ids(main_train_id),
+                transaction
+            ).await?;
+            for train_variant in &train_variants {
+                for cancellation in train_variant.cancellations.iter() {
+                    if cancellation.validity[0].valid_begin == begin {
+                        let mut validity = train_validity_period::ActiveModelEx {
+                            valid_begin: ActiveValue::Set(begin),
+                            valid_end: ActiveValue::Set(end),
+                            timezone: ActiveValue::Set(London.name().to_string()),
+                            ..Default::default()
                         };
+                        validity.populate_days_of_week(&days_of_week);
+
+                        let mut cancellation: train_cancellation::ActiveModelEx
+                            = cancellation.clone().into();
+                        cancellation.validity = ActiveHasMany::Replace(vec![validity]);
+                        cancellation.save(transaction).await?;
                     }
                 }
             }
-
-            schedule
-                .trains
-                .insert(main_train_id.to_string(), old_trains);
-
-            return Ok(schedule);
+            return Ok((0, 0, 0));
         }
 
         let train_status = read_train_status(&line[29..30], produce_cif_error_closure(number, 29))?;
@@ -3034,7 +3286,7 @@ impl CifImporter {
                             )),
                             line: number,
                             column: 29,
-                        })
+                        }.into())
                     }
                 },
             };
@@ -3059,7 +3311,10 @@ impl CifImporter {
             operating_characteristics.br_mark_four_coaches,
             produce_cif_error_closure(number, 50),
         )?;
-        let timing_load_id = &line[50..57];
+        let timing_load_id =
+            line[50..57].to_string()
+            + if operating_characteristics.br_mark_four_coaches { "1" }
+            else { "0" };
 
         let (first_seating, standard_seating) = read_seating_class(
             &line[66..67],
@@ -3085,250 +3340,286 @@ impl CifImporter {
 
         let brand = read_brand(&line[74..78], produce_cif_error_closure(number, 74))?;
 
-        // all of the below will use this so construct it now
-        let new_train = Train {
-            id: main_train_id.to_string(),
-            validity: vec![TrainValidityPeriod {
-                valid_begin: begin,
-                valid_end: end,
-                days_of_week,
-            }],
-            cancellations: vec![],
-            replacements: vec![],
-            variable_train: VariableTrain {
-                train_type,
-                public_id: Some(public_id.to_string()),
-                headcode,
-                power_type: power_type,
-                timing_allocation: match timing_load_str {
-                    None => None,
-                    Some(x) => Some(TrainAllocation {
-                        id: timing_load_id.to_string(),
-                        description: x,
-                        vehicles: None,
-                    }),
-                },
-                actual_allocation: None,
-                timing_speed_m_per_s: speed_m_per_s,
-                operating_characteristics: Some(operating_characteristics),
-                accommodation: Some(
-                    AccommodationTypesByClass {
-                        unknown: None,
-                        first_premium: None,
-                        first: Some(
-                            AccommodationTypes {
-                                standing: None,
-                                seating: Some(first_seating),
-                                reclining_seating: None,
-                                special_seating: None,
-                                sleeper: Some(first_sleepers),
-                                single_sleeper: None,
-                                double_sleeper: None,
-                                special_sleeper: None,
-                                couchette: None,
-                                single_couchette: None,
-                                double_couchette: None,
-                                baby: None,
-                                family: None,
-                                recreation: None,
-                                panoramic: None,
-                                pullman: None,
-                                pushchair: None,
-                                wheelchair: None,
-                                has_female_only: None,
-                                has_male_only: None,
-                                has_same_sex_only: None,
-                            },
-                        ),
-                        second_premium: None,
-                        second: Some(
-                            AccommodationTypes {
-                                standing: None,
-                                seating: Some(standard_seating),
-                                reclining_seating: None,
-                                special_seating: None,
-                                sleeper: Some(standard_sleepers),
-                                single_sleeper: None,
-                                double_sleeper: None,
-                                special_sleeper: None,
-                                couchette: None,
-                                single_couchette: None,
-                                double_couchette: None,
-                                baby: None,
-                                family: None,
-                                recreation: None,
-                                panoramic: None,
-                                pullman: None,
-                                pushchair: None,
-                                wheelchair: None,
-                                has_female_only: None,
-                                has_male_only: None,
-                                has_same_sex_only: None,
-                            },
-                        ),
-                        third: None,
-                        unclassified: None,
+        // From this point on we will need to ensure that the line and allocation are in the
+        // database, so fill them in here
+        let mut allocations_written = 0;
+        match &timing_load_str {
+            Some(timing_load_str) => {
+                if !self.cached_allocation_ids.contains(&timing_load_id) {
+                    let timing_load = train_allocation::Entity::load()
+                        .filter(train_allocation::COLUMN.id.eq(&timing_load_id))
+                        .filter(train_allocation::COLUMN.namespace.eq(namespace))
+                        .one(transaction)
+                        .await?;
+                    if timing_load.is_none() {
+                        let timing_load = train_allocation::ActiveModelEx {
+                            id: ActiveValue::Set(timing_load_id.clone()),
+                            namespace: ActiveValue::Set(namespace.to_string()),
+                            description: ActiveValue::Set(timing_load_str.clone()),
+                            vehicles: ActiveHasMany::Append(vec![]),
+                            ..Default::default()
+                        };
+
+                        timing_load.insert(transaction).await?;
+
+                        allocations_written += 1;
                     }
-                ),
-                reservations,
-                catering: Some(catering),
-                brand,
-                name: None,
-                line: Some(Line {
-                    id: service_group.to_string(),
-                    public_id: None,
-                    name: None,
-                    number: None,
-                    description: None,
-                    url: None,
-                    background_colour: None,
-                    foreground_colour: None,
-                }),
-                uic_code: None,
-                operator: None,
-                wheelchair_accessible: None,
-                toilets: None,
-                luggage: None,
-                families: None,
-                passenger_communications: None,
-                assistance: None,
-                passenger_information: None,
-            },
-            source: Some(if is_stp {
+                    self.cached_allocation_ids.insert(timing_load_id.clone());
+                }
+            }
+            None => (),
+        };
+
+        let mut lines_written = 0;
+        if !self.cached_line_ids.contains(service_group) {
+            let line = line::Entity::load()
+                .filter(line::COLUMN.id.eq(service_group))
+                .filter(line::COLUMN.namespace.eq(namespace))
+                .one(transaction)
+                .await?;
+            if line.is_none() {
+                let line = line::ActiveModelEx {
+                    id: ActiveValue::Set(service_group.to_string()),
+                    namespace: ActiveValue::Set(namespace.to_string()),
+                    public_id: ActiveValue::Set(None),
+                    name: ActiveValue::Set(None),
+                    description: ActiveValue::Set(None),
+                    url: ActiveValue::Set(None),
+                    background_colour: ActiveValue::Set(None),
+                    foreground_colour: ActiveValue::Set(None),
+                    ..Default::default()
+                };
+
+                line.insert(transaction).await?;
+
+                lines_written += 1;
+            }
+            self.cached_line_ids.insert(service_group.to_string());
+        }
+
+        // all of the below will use this so construct it now
+        let mut validity = train_validity_period::ActiveModelEx {
+            valid_begin: ActiveValue::Set(begin),
+            valid_end: ActiveValue::Set(end),
+            timezone: ActiveValue::Set(London.name().to_string()),
+            ..Default::default()
+        };
+        validity.populate_days_of_week(&days_of_week);
+        let mut variable_train = variable_train::ActiveModelEx {
+            namespace: ActiveValue::Set(namespace.to_string()),
+            train_type: ActiveValue::Set(train_type),
+            public_id: ActiveValue::Set(Some(public_id.to_string())),
+            headcode: ActiveValue::Set(headcode),
+            power_type: ActiveValue::Set(power_type),
+            timing_allocation_id: ActiveValue::Set(match timing_load_str {
+                None => None,
+                Some(_) => Some(timing_load_id),
+            }),
+            actual_allocation_id: ActiveValue::Set(None),
+            timing_speed_m_per_s: ActiveValue::Set(speed_m_per_s),
+            accommodation: ActiveHasMany::Append(vec![
+                accommodation_types::ActiveModelEx {
+                    class: ActiveValue::Set(AccommodationClass::First),
+                    standing: ActiveValue::Set(None),
+                    seating: ActiveValue::Set(Some(first_seating)),
+                    reclining_seating: ActiveValue::Set(None),
+                    special_seating: ActiveValue::Set(None),
+                    sleeper: ActiveValue::Set(Some(first_sleepers)),
+                    single_sleeper: ActiveValue::Set(None),
+                    double_sleeper: ActiveValue::Set(None),
+                    special_sleeper: ActiveValue::Set(None),
+                    couchette: ActiveValue::Set(None),
+                    single_couchette: ActiveValue::Set(None),
+                    double_couchette: ActiveValue::Set(None),
+                    baby: ActiveValue::Set(None),
+                    family: ActiveValue::Set(None),
+                    recreation: ActiveValue::Set(None),
+                    panoramic: ActiveValue::Set(None),
+                    pullman: ActiveValue::Set(None),
+                    pushchair: ActiveValue::Set(None),
+                    wheelchair: ActiveValue::Set(None),
+                    has_female_only: ActiveValue::Set(None),
+                    has_male_only: ActiveValue::Set(None),
+                    has_same_sex_only: ActiveValue::Set(None),
+                    ..Default::default()
+                },
+                accommodation_types::ActiveModelEx {
+                    class: ActiveValue::Set(AccommodationClass::Second),
+                    standing: ActiveValue::Set(None),
+                    seating: ActiveValue::Set(Some(standard_seating)),
+                    reclining_seating: ActiveValue::Set(None),
+                    special_seating: ActiveValue::Set(None),
+                    sleeper: ActiveValue::Set(Some(standard_sleepers)),
+                    single_sleeper: ActiveValue::Set(None),
+                    double_sleeper: ActiveValue::Set(None),
+                    special_sleeper: ActiveValue::Set(None),
+                    couchette: ActiveValue::Set(None),
+                    single_couchette: ActiveValue::Set(None),
+                    double_couchette: ActiveValue::Set(None),
+                    baby: ActiveValue::Set(None),
+                    family: ActiveValue::Set(None),
+                    recreation: ActiveValue::Set(None),
+                    panoramic: ActiveValue::Set(None),
+                    pullman: ActiveValue::Set(None),
+                    pushchair: ActiveValue::Set(None),
+                    wheelchair: ActiveValue::Set(None),
+                    has_female_only: ActiveValue::Set(None),
+                    has_male_only: ActiveValue::Set(None),
+                    has_same_sex_only: ActiveValue::Set(None),
+                    ..Default::default()
+                },
+            ]),
+            brand: ActiveValue::Set(brand),
+            name: ActiveValue::Set(None),
+            line_id: ActiveValue::Set(Some(service_group.to_string())),
+            uic_code: ActiveValue::Set(None),
+            operator_id: ActiveValue::Set(None),
+            wheelchair_accessible: ActiveValue::Set(None),
+            has_toilets: ActiveValue::Set(false),
+            has_luggage: ActiveValue::Set(false),
+            has_families: ActiveValue::Set(false),
+            has_passenger_communications: ActiveValue::Set(false),
+            has_assistance: ActiveValue::Set(false),
+            has_passenger_information: ActiveValue::Set(false),
+            ..Default::default()
+        };
+        variable_train.populate_reservations(&reservations);
+        variable_train.populate_catering(&catering);
+        variable_train.populate_operating_characteristics(&operating_characteristics);
+        let mut new_train_variant = train_variant::ActiveModelEx {
+            // TODO do we need to set ID?
+            namespace: ActiveValue::Set(namespace.to_string()),
+            validity: ActiveHasMany::Append(vec![validity]),
+            cancellations: ActiveHasMany::Append(vec![]),
+            replacements: ActiveHasMany::Append(vec![]),
+            variable_train: ActiveHasOne::Set(Some(Box::new(variable_train))),
+            source: ActiveValue::Set(Some(if is_stp {
                 TrainSource::ShortTerm
             } else {
                 TrainSource::LongTerm
-            }),
-            runs_as_required,
-            performance_monitoring: None,
-            route: vec![],
+            })),
+            runs_as_required: ActiveValue::Set(runs_as_required),
+            performance_monitoring: ActiveValue::Set(None),
+            route: ActiveHasMany::Append(vec![]),
+            ..Default::default()
         };
 
-        schedule
-            .trains_indexed_by_public_id
-            .entry(public_id.to_string())
-            .or_insert(HashSet::new())
-            .insert(main_train_id.to_string());
-
         if modification_type == ModificationType::Amend {
-            // we can write a (partial) train now, and continue updating it later.
-            self.last_train = Some((
-                main_train_id.to_string(),
-                begin,
-                stp_modification_type,
-                is_stp,
-            ));
-
-            let old_trains = schedule.trains.remove(main_train_id);
-            let mut old_trains = match old_trains {
-                None => return Ok(schedule),
-                Some(x) => x,
-            };
-
-            // first we amend main trains
-            if stp_modification_type == ModificationType::Insert {
-                for ref mut train in old_trains.iter_mut() {
-                    if match is_stp {
-                        false => {
-                            train.source.unwrap() == TrainSource::LongTerm
-                                && train.validity[0].valid_begin == begin
-                        }
-                        true => {
-                            train.source.unwrap() == TrainSource::ShortTerm
-                                && train.validity[0].valid_begin == begin
-                        }
-                    } {
-                        amend_train(train, new_train.clone());
-                    }
+            // We are finding an existing train and completely replacing it in the DB
+            let train_variants = get_all_train_variants_for_amend(
+                &self.get_train_variant_ids(main_train_id),
+                transaction
+            ).await?;
+            // This is a rare case of actually needing to use `Replace` despite the performance cost
+            // as we need to delete the previous contents
+            new_train_variant.route = ActiveHasMany::Replace(vec![]);
+            new_train_variant.validity
+                = ActiveHasMany::Replace(new_train_variant.validity.into_vec());
+            for train_variant in &train_variants {
+                if stp_modification_type == ModificationType::Insert
+                    && train_variant.source == Some(
+                        if is_stp { TrainSource::ShortTerm } else { TrainSource::LongTerm }
+                    )
+                    && train_variant.validity[0].valid_begin == begin
+                    && train_variant.train_id.is_some()
+                {
+                    let mut train_variant: train_variant::ActiveModelEx
+                        = train_variant.clone().into();
+                    amend_train(&mut train_variant, new_train_variant.clone());
+                    self.last_train = Some(LastTrain::DatabaseSave(train_variant));
+                    self.last_train_id = Some(main_train_id.to_string());
                 }
-            } else {
-                // now we clean up modifications; cancellations handled earlier
-                for ref mut train in old_trains.iter_mut() {
-                    for replacement in train.replacements.iter_mut() {
-                        if replacement.validity[0].valid_begin == begin {
-                            amend_train(replacement, new_train.clone());
-                        }
-                    }
+                else if stp_modification_type == ModificationType::Amend
+                    && train_variant.validity[0].valid_begin == begin
+                    && train_variant.train_id.is_none()
+                {
+                    let mut train_variant: train_variant::ActiveModelEx
+                        = train_variant.clone().into();
+                    amend_train(&mut train_variant, new_train_variant.clone());
+                    self.last_train = Some(LastTrain::DatabaseSave(train_variant));
+                    self.last_train_id = Some(main_train_id.to_string());
                 }
             }
-
-            schedule
-                .trains
-                .insert(main_train_id.to_string(), old_trains);
-
-            return Ok(schedule);
+            return Ok((0, lines_written, allocations_written));
         }
 
         if modification_type == ModificationType::Insert
             && stp_modification_type == ModificationType::Insert
         {
             // we can write a (partial) train now, and continue updating it later.
-            self.last_train = Some((
-                main_train_id.to_string(),
-                begin,
-                stp_modification_type,
-                is_stp,
-            ));
+            if !self.cached_train_variant_ids.contains_key(main_train_id) {
+                // If there's no cached key, that means there is also no parent train, so construct
+                // it now.
+                let train = train::ActiveModelEx {
+                    id: ActiveValue::Set(main_train_id.to_string()),
+                    namespace: ActiveValue::Set(namespace.to_string()),
+                    ..Default::default()
+                };
 
-            schedule
-                .trains
-                .entry(main_train_id.to_string())
-                .or_insert(vec![])
-                .push(new_train);
+                new_train_variant.train = ActiveBelongsTo::Set(Some(Box::new(train)));
+                self.last_train = Some(LastTrain::DatabaseInsert(new_train_variant));
+                self.last_train_id = Some(main_train_id.to_string());
 
-            return Ok(schedule);
+                return Ok((1, lines_written, allocations_written));
+            }
+
+            new_train_variant.train_id = ActiveValue::Set(Some(main_train_id.to_string()));
+            self.last_train = Some(LastTrain::DatabaseInsert(new_train_variant));
+            self.last_train_id = Some(main_train_id.to_string());
+
+            // A train variant is not a train, to be pedantic
+            return Ok((0, lines_written, allocations_written));
         }
 
         if stp_modification_type == ModificationType::Amend {
             // we can write a (partial) train now, and continue updating it later.
-            self.last_train = Some((
-                main_train_id.to_string(),
-                begin,
-                stp_modification_type,
-                is_stp,
-            ));
+            let train_variants = get_all_train_variants_for_replace(
+                &self.get_train_variant_ids(main_train_id),
+                transaction
+            ).await?;
 
-            let old_trains = schedule.trains.remove(main_train_id);
-            let mut old_trains = match old_trains {
-                None => {
-                    self.orphaned_overlay_trains
-                        .insert((main_train_id.to_string(), begin), new_train);
-                    return Ok(schedule);
-                }
-                Some(x) => x,
-            };
-
-            // we replace main trains
             let mut replaced = false;
-            for train in old_trains.iter_mut() {
-                if !check_date_applicability(&train.validity[0], begin, end, &days_of_week) {
+            for train_variant in &train_variants {
+                // We replace main trains
+                if train_variant.train_id.is_none() {
                     continue;
                 }
+                if !check_date_applicability(
+                    &train_variant.validity[0].clone().into(), begin, end, &days_of_week
+                ) {
+                    continue;
+                }
+                let mut new_train_variant = new_train_variant.clone();
+                new_train_variant.parent_train_variant_id
+                    = ActiveValue::Set(Some(train_variant.id));
+
                 replaced = true;
-                train.replacements.push(new_train.clone())
+
+                self.last_train = Some(LastTrain::DatabaseInsert(new_train_variant));
+                self.last_train_id = Some(main_train_id.to_string());
             }
 
             if !replaced {
                 self.orphaned_overlay_trains
-                    .insert((main_train_id.to_string(), begin), new_train);
+                    .insert((main_train_id.to_string(), begin), new_train_variant);
+                self.last_train = Some(LastTrain::Orphaned((main_train_id.to_string(), begin)));
+                self.last_train_id = Some(main_train_id.to_string());
             }
 
-            schedule
-                .trains
-                .insert(main_train_id.to_string(), old_trains);
-
-            return Ok(schedule);
+            // A train variant is not a train, to be pedantic
+            return Ok((0, lines_written, allocations_written));
         }
 
-        Ok(schedule)
+        panic!("Unreachable");
     }
 
-    fn read_extended_schedule(
+    async fn read_extended_schedule(
         &mut self,
         line: &str,
-        mut schedule: Schedule,
+        namespace: &str,
         number: u64,
-    ) -> Result<Schedule, CifError> {
+        transaction: &DatabaseTransaction
+    ) -> Result<usize, Error> {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
@@ -3342,25 +3633,47 @@ impl CifImporter {
         let performance_monitoring =
             read_ats_code(&line[13..14], produce_cif_error_closure(number, 13))?;
 
-        let train = self.get_last_train(&mut schedule, number, "BX")?;
+        let mut operators_written = 0;
+        if !self.cached_operator_ids.contains(atoc_code) {
+            let operator = train_operator::Entity::load()
+                .filter(train_operator::COLUMN.id.eq(atoc_code))
+                .filter(train_operator::COLUMN.namespace.eq(namespace))
+                .one(transaction)
+                .await?;
+            if operator.is_none() {
+                let operator = train_operator::ActiveModelEx {
+                    id: ActiveValue::Set(atoc_code.to_string()),
+                    namespace: ActiveValue::Set(namespace.to_string()),
+                    public_id: ActiveValue::Set(None),
+                    description: ActiveValue::Set(train_operator_desc),
+                    ..Default::default()
+                };
 
-        train.variable_train.uic_code = uic_code;
-        train.variable_train.operator = Some(TrainOperator {
-            id: atoc_code.to_string(),
-            public_id: None,
-            description: train_operator_desc,
-        });
-        train.performance_monitoring = Some(performance_monitoring);
+                operator.insert(transaction).await?;
 
-        Ok(schedule)
+                operators_written += 1;
+            }
+        }
+
+        self.cached_operator_ids.insert(atoc_code.to_string());
+
+        let last_train = self.get_last_train(number, "BX")?;
+
+        last_train.variable_train.as_mut().unwrap().uic_code = ActiveValue::Set(uic_code);
+        last_train.variable_train.as_mut().unwrap().operator_id
+            = ActiveValue::Set(Some(atoc_code.to_string()));
+        last_train.performance_monitoring = ActiveValue::Set(Some(performance_monitoring));
+
+        Ok(operators_written)
     }
 
-    fn read_location_origin(
+    async fn read_location_origin(
         &mut self,
         line: &str,
-        mut schedule: Schedule,
+        namespace: &str,
         number: u64,
-    ) -> Result<Schedule, CifError> {
+        _transaction: &DatabaseTransaction
+    ) -> Result<(), Error> {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
@@ -3381,41 +3694,38 @@ impl CifImporter {
 
         let perf_allowance = read_allowance(&line[41..43], produce_cif_error_closure(number, 41))?;
 
-        let new_location = TrainLocation {
-            timing_tz: None,
-            id: location_id.to_string(),
-            id_suffix: location_suffix,
-            working_arr: None,
-            working_arr_day: None,
-            working_dep: Some(wtt_dep),
-            working_dep_day: Some(0),
-            working_pass: None,
-            working_pass_day: None,
-            public_arr: None,
-            public_arr_day: None,
-            public_dep: pub_dep,
-            public_dep_day: Some(0),
-            platform,
-            platform_zone: None,
-            line: line_code,
-            path: None,
-            engineering_allowance_s: Some(eng_allowance),
-            pathing_allowance_s: Some(path_allowance),
-            performance_allowance_s: Some(perf_allowance),
-            activities,
-            change_en_route: None,
-            divides_to_form: vec![],
-            joins_to: vec![],
-            becomes: None,
-            divides_from: vec![],
-            is_joined_to_by: vec![],
-            forms_from: None,
+        let mut new_location = train_location::ActiveModelEx {
+            index: ActiveValue::Set(0),
+            timing_tz: ActiveValue::Set(None),
+            location_id: ActiveValue::Set(location_id.to_string()),
+            namespace: ActiveValue::Set(namespace.to_string()),
+            id_suffix: ActiveValue::Set(location_suffix),
+            working_arr: ActiveValue::Set(None),
+            working_arr_day: ActiveValue::Set(None),
+            working_dep: ActiveValue::Set(Some(wtt_dep)),
+            working_dep_day: ActiveValue::Set(Some(0)),
+            working_pass: ActiveValue::Set(None),
+            working_pass_day: ActiveValue::Set(None),
+            public_arr: ActiveValue::Set(None),
+            public_arr_day: ActiveValue::Set(None),
+            public_dep: ActiveValue::Set(pub_dep),
+            public_dep_day: ActiveValue::Set(Some(0)),
+            platform: ActiveValue::Set(platform),
+            platform_zone: ActiveValue::Set(None),
+            line: ActiveValue::Set(line_code),
+            path: ActiveValue::Set(None),
+            engineering_allowance_s: ActiveValue::Set(Some(eng_allowance)),
+            pathing_allowance_s: ActiveValue::Set(Some(path_allowance)),
+            performance_allowance_s: ActiveValue::Set(Some(perf_allowance)),
+            association_nodes: ActiveHasMany::Append(vec![]),
+            ..Default::default()
         };
+        new_location.populate_activities(&activities);
 
         {
-            let train = self.get_last_train(&mut schedule, number, "LI")?;
+            let last_train = self.get_last_train(number, "LI")?;
 
-            if !train.route.is_empty() {
+            if !last_train.route.as_mut_vec().is_empty() {
                 return Err(CifError {
                     error_type: CifErrorType::UnexpectedRecordType(
                         "LO".to_string(),
@@ -3423,26 +3733,22 @@ impl CifImporter {
                     ),
                     line: number,
                     column: 0,
-                });
+                }.into());
             }
 
-            train.route.push(new_location);
+            last_train.route.as_mut_vec().push(new_location);
         }
-        schedule
-            .trains_indexed_by_location
-            .entry(location_id.to_string())
-            .or_insert(HashSet::new())
-            .insert(self.last_train.as_ref().unwrap().0.clone());
 
-        Ok(schedule)
+        Ok(())
     }
 
-    fn read_location_intermediate(
+    async fn read_location_intermediate(
         &mut self,
         line: &str,
-        mut schedule: Schedule,
+        namespace: &str,
         number: u64,
-    ) -> Result<Schedule, CifError> {
+        _transaction: &DatabaseTransaction
+    ) -> Result<(), Error> {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
@@ -3464,7 +3770,7 @@ impl CifImporter {
                     error_type: CifErrorType::InvalidWttTimesCombo,
                     line: number,
                     column: 10,
-                })
+                }.into())
             }
         };
 
@@ -3481,14 +3787,18 @@ impl CifImporter {
         let path_allowance = read_allowance(&line[56..58], produce_cif_error_closure(number, 56))?;
         let perf_allowance = read_allowance(&line[58..60], produce_cif_error_closure(number, 58))?;
 
-        let change_en_route = self.change_en_route.take();
+        // For efficiency extract into ActiveHasOne::NotSet if it's None to avoid an extra load
+        let change_en_route = match self.change_en_route.take() {
+            Some(x) => ActiveHasOne::Set(Some(x)),
+            None => ActiveHasOne::NotSet,
+        };
 
         self.cr_location = None;
 
         {
-            let train = self.get_last_train(&mut schedule, number, "LI")?;
+            let last_train = self.get_last_train(number, "LI")?;
 
-            if train.route.is_empty() {
+            if last_train.route.as_mut_vec().is_empty() {
                 return Err(CifError {
                     error_type: CifErrorType::UnexpectedRecordType(
                         "LI".to_string(),
@@ -3496,10 +3806,11 @@ impl CifImporter {
                     ),
                     line: number,
                     column: 0,
-                });
+                }.into());
             }
 
-            let (last_wtt_time, last_wtt_day) = get_working_time(train.route.last().unwrap());
+            let (last_wtt_time, last_wtt_day)
+                = get_working_time(last_train.route.as_mut_vec().last().unwrap());
 
             let wtt_arr_day = calculate_day(&wtt_arr, &last_wtt_time, last_wtt_day);
             let wtt_dep_day = calculate_day(&wtt_dep, &last_wtt_time, last_wtt_day);
@@ -3509,54 +3820,48 @@ impl CifImporter {
             let pub_arr_day = calculate_day(&pub_arr, &last_wtt_time, last_wtt_day);
             let pub_dep_day = calculate_day(&pub_dep, &last_wtt_time, last_wtt_day);
 
-            let new_location = TrainLocation {
-                timing_tz: None,
-                id: location_id.to_string(),
-                id_suffix: location_suffix,
-                working_arr: wtt_arr,
-                working_arr_day: wtt_arr_day,
-                working_dep: wtt_dep,
-                working_dep_day: wtt_dep_day,
-                working_pass: wtt_pass,
-                working_pass_day: wtt_pass_day,
-                public_arr: pub_arr,
-                public_arr_day: pub_arr_day,
-                public_dep: pub_dep,
-                public_dep_day: pub_dep_day,
-                platform,
-                platform_zone: None,
-                line: line_code,
-                path: path_code,
-                engineering_allowance_s: Some(eng_allowance),
-                pathing_allowance_s: Some(path_allowance),
-                performance_allowance_s: Some(perf_allowance),
-                activities,
+            let mut new_location = train_location::ActiveModelEx {
+                timing_tz: ActiveValue::Set(None),
+                location_id: ActiveValue::Set(location_id.to_string()),
+                namespace: ActiveValue::Set(namespace.to_string()),
+                id_suffix: ActiveValue::Set(location_suffix),
+                index: ActiveValue::Set(last_train.route.as_mut_vec().len().try_into().unwrap()),
+                working_arr: ActiveValue::Set(wtt_arr),
+                working_arr_day: ActiveValue::Set(wtt_arr_day),
+                working_dep: ActiveValue::Set(wtt_dep),
+                working_dep_day: ActiveValue::Set(wtt_dep_day),
+                working_pass: ActiveValue::Set(wtt_pass),
+                working_pass_day: ActiveValue::Set(wtt_pass_day),
+                public_arr: ActiveValue::Set(pub_arr),
+                public_arr_day: ActiveValue::Set(pub_arr_day),
+                public_dep: ActiveValue::Set(pub_dep),
+                public_dep_day: ActiveValue::Set(pub_dep_day),
+                platform: ActiveValue::Set(platform),
+                platform_zone: ActiveValue::Set(None),
+                line: ActiveValue::Set(line_code),
+                path: ActiveValue::Set(path_code),
+                engineering_allowance_s: ActiveValue::Set(Some(eng_allowance)),
+                pathing_allowance_s: ActiveValue::Set(Some(path_allowance)),
+                performance_allowance_s: ActiveValue::Set(Some(perf_allowance)),
                 change_en_route: change_en_route,
-                divides_to_form: vec![],
-                joins_to: vec![],
-                becomes: None,
-                divides_from: vec![],
-                is_joined_to_by: vec![],
-                forms_from: None,
+                association_nodes: ActiveHasMany::Append(vec![]),
+                ..Default::default()
             };
+            new_location.populate_activities(&activities);
 
-            train.route.push(new_location);
+            last_train.route.as_mut_vec().push(new_location);
         }
-        schedule
-            .trains_indexed_by_location
-            .entry(location_id.to_string())
-            .or_insert(HashSet::new())
-            .insert(self.last_train.as_ref().unwrap().0.clone());
 
-        Ok(schedule)
+        Ok(())
     }
 
-    fn read_location_terminating(
+    async fn read_location_terminating(
         &mut self,
         line: &str,
-        mut schedule: Schedule,
+        namespace: &str,
         number: u64,
-    ) -> Result<Schedule, CifError> {
+        transaction: &DatabaseTransaction
+    ) -> Result<(), Error> {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
@@ -3575,12 +3880,15 @@ impl CifImporter {
         let activities = read_activities(&line[25..37], produce_cif_error_closure(number, 25))?;
 
         self.cr_location = None;
-        let change_en_route = self.change_en_route.take();
+        let change_en_route = match self.change_en_route.take() {
+            Some(x) => ActiveHasOne::Set(Some(x)),
+            None => ActiveHasOne::NotSet,
+        };
 
         {
-            let train = self.get_last_train(&mut schedule, number, "LT")?;
+            let last_train = self.get_last_train(number, "LT")?;
 
-            if train.route.is_empty() {
+            if last_train.route.as_mut_vec().is_empty() {
                 return Err(CifError {
                     error_type: CifErrorType::UnexpectedRecordType(
                         "LT".to_string(),
@@ -3588,73 +3896,124 @@ impl CifImporter {
                     ),
                     line: number,
                     column: 0,
-                });
+                }.into());
             }
 
-            let (last_wtt_time, last_wtt_day) = get_working_time(train.route.last().unwrap());
+            let (last_wtt_time, last_wtt_day)
+                = get_working_time(last_train.route.as_mut_vec().last().unwrap());
 
             let wtt_arr_day = calculate_day(&Some(wtt_arr), &last_wtt_time, last_wtt_day).unwrap();
             let pub_arr_day = calculate_day(&pub_arr, &last_wtt_time, last_wtt_day);
 
-            let new_location = TrainLocation {
-                timing_tz: None,
-                id: location_id.to_string(),
-                id_suffix: location_suffix,
-                working_arr: Some(wtt_arr),
-                working_arr_day: Some(wtt_arr_day),
-                working_dep: None,
-                working_dep_day: None,
-                working_pass: None,
-                working_pass_day: None,
-                public_arr: pub_arr,
-                public_arr_day: pub_arr_day,
-                public_dep: None,
-                public_dep_day: None,
-                platform,
-                platform_zone: None,
-                line: None,
-                path: path_code,
-                engineering_allowance_s: None,
-                pathing_allowance_s: None,
-                performance_allowance_s: None,
-                activities,
-                change_en_route: change_en_route,
-                divides_to_form: vec![],
-                joins_to: vec![],
-                becomes: None,
-                divides_from: vec![],
-                is_joined_to_by: vec![],
-                forms_from: None,
+            let mut new_location = train_location::ActiveModelEx {
+                timing_tz: ActiveValue::Set(None),
+                location_id: ActiveValue::Set(location_id.to_string()),
+                namespace: ActiveValue::Set(namespace.to_string()),
+                index: ActiveValue::Set(last_train.route.as_mut_vec().len().try_into().unwrap()),
+                id_suffix: ActiveValue::Set(location_suffix),
+                working_arr: ActiveValue::Set(Some(wtt_arr)),
+                working_arr_day: ActiveValue::Set(Some(wtt_arr_day)),
+                working_dep: ActiveValue::Set(None),
+                working_dep_day: ActiveValue::Set(None),
+                working_pass: ActiveValue::Set(None),
+                working_pass_day: ActiveValue::Set(None),
+                public_arr: ActiveValue::Set(pub_arr),
+                public_arr_day: ActiveValue::Set(pub_arr_day),
+                public_dep: ActiveValue::Set(None),
+                public_dep_day: ActiveValue::Set(None),
+                platform: ActiveValue::Set(platform),
+                platform_zone: ActiveValue::Set(None),
+                line: ActiveValue::Set(None),
+                path: ActiveValue::Set(path_code),
+                engineering_allowance_s: ActiveValue::Set(None),
+                pathing_allowance_s: ActiveValue::Set(None),
+                performance_allowance_s: ActiveValue::Set(None),
+                change_en_route,
+                association_nodes: ActiveHasMany::Append(vec![]),
+                ..Default::default()
             };
+            new_location.populate_activities(&activities);
 
-            train.route.push(new_location);
+            last_train.route.as_mut_vec().push(new_location);
         }
-        schedule
-            .trains_indexed_by_location
-            .entry(location_id.to_string())
-            .or_insert(HashSet::new())
-            .insert(self.last_train.as_ref().unwrap().0.clone());
 
-        // we can now unset the last_train as this should be the last message received for any
-        // given train
+        // we can now persist and unset the last_train as this should be the last message received
+        // for any given train
+        match &self.last_train {
+            Some(LastTrain::DatabaseInsert(last_train)) => {
+                // We originally set up the train to have the right relationships so a simple insert
+                // should be possible here. However, there are also performance issues with SeaORM,
+                // especially since NR trains are likely to have more locations than most other
+                // providers due to being WTTs. So we extract out the locations to insert manually.
+                let mut last_train = last_train.clone();
+                let mut route = last_train.route.into_vec();
+                last_train.route = ActiveHasMany::NotSet;
+                let inserted = last_train.clone().insert(transaction).await?;
+                let mut changes_en_route: HashMap<i64, Option<variable_train::ActiveModelEx>>
+                    = HashMap::new();
+                for train_location in route.iter_mut() {
+                    train_location.train_variant_id = ActiveValue::Set(inserted.id);
+                    changes_en_route.insert(
+                        train_location.index.clone().unwrap(),
+                        train_location.change_en_route.clone().into_option(),
+                    );
+                    train_location.change_en_route = ActiveHasOne::NotSet;
+                }
+                let inserted_ids =
+                    train_location::Entity
+                    ::insert_many(
+                        route.into_iter().map(|x| Into::<train_location::ActiveModel>::into(x))
+                    )
+                    .exec_with_returning_keys(transaction)
+                    .await?;
+                for (index, mut change_en_route) in changes_en_route {
+                    // We could try to be fancy here, but these could be fairly complex models in
+                    // theory, and they're likely rare enough we can just push them manually
+                    match &mut change_en_route {
+                        Some(change_en_route) => {
+                            change_en_route.train_location_id
+                                = ActiveValue::Set(
+                                    Some(inserted_ids[usize::try_from(index).unwrap()])
+                                );
+                            change_en_route.clone().insert(transaction).await?;
+                        },
+                        None => (),
+                    };
+                }
+                self
+                    .cached_train_variant_ids
+                    .entry(self.last_train_id.clone().unwrap())
+                    .or_default()
+                    .insert(inserted.id);
+            },
+            Some(LastTrain::DatabaseSave(last_train)) => {
+                // These are rare (amends only), so don't waste time optimising (and this would also
+                // be rather tricky here). Also we don't need to add to the cache because we know
+                // the trains already exist.
+                last_train.clone().save(transaction).await?;
+            },
+            _ => (),
+        };
         self.last_train = None;
+        self.last_train_id = None;
 
-        Ok(schedule)
+        Ok(())
     }
 
-    fn read_change_en_route(
+    async fn read_change_en_route(
         &mut self,
         line: &str,
-        mut schedule: Schedule,
+        namespace: &str,
         number: u64,
-    ) -> Result<Schedule, CifError> {
+        transaction: &DatabaseTransaction,
+    ) -> Result<(usize, usize), Error> {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
-        let (train_type, operator) = {
-            let train = self.get_last_train(&mut schedule, number, "CR")?;
+        let (train_type, operator_id) = {
+            let last_train = self.get_last_train(number, "CR")?;
 
-            if train.route.is_empty() {
+            if last_train.route.as_mut_vec().is_empty() {
                 return Err(CifError {
                     error_type: CifErrorType::UnexpectedRecordType(
                         "CR".to_string(),
@@ -3662,16 +4021,21 @@ impl CifImporter {
                     ),
                     line: number,
                     column: 0,
-                });
+                }.into());
             }
 
             let train_type =
                 match read_train_type(&line[10..12], produce_cif_error_closure(number, 10))? {
                     Some(x) => x,
-                    None => train.variable_train.train_type, // should only really happen for ships
+                    // should only really happen for ships
+                    None =>
+                        last_train.variable_train.as_ref().unwrap().train_type.clone().unwrap(),
                 };
 
-            (train_type, train.variable_train.operator.clone())
+            (
+                train_type,
+                last_train.variable_train.as_ref().unwrap().operator_id.clone().unwrap(),
+            )
         };
 
         let location_id = &line[2..9].trim();
@@ -3700,7 +4064,10 @@ impl CifImporter {
             operating_characteristics.br_mark_four_coaches,
             produce_cif_error_closure(number, 30),
         )?;
-        let timing_load_id = &line[30..37];
+        let timing_load_id =
+            line[30..37].to_string()
+            + if operating_characteristics.br_mark_four_coaches { "1" }
+            else { "0" };
 
         let (first_seating, standard_seating) = read_seating_class(
             &line[46..47],
@@ -3728,171 +4095,217 @@ impl CifImporter {
 
         let uic_code = read_optional_string(&line[62..67]);
 
-        self.change_en_route = Some(VariableTrain {
-            train_type,
-            public_id: Some(public_id.to_string()),
-            headcode,
-            power_type: power_type,
-            timing_allocation: match timing_load_str {
-                None => None,
-                Some(x) => Some(TrainAllocation {
-                    id: timing_load_id.to_string(),
-                    description: x,
-                    vehicles: None,
-                }),
-            },
-            actual_allocation: None,
-            timing_speed_m_per_s: speed_m_per_s,
-            operating_characteristics: Some(operating_characteristics),
-            accommodation: Some(
-                AccommodationTypesByClass {
-                    unknown: None,
-                    first_premium: None,
-                    first: Some(
-                        AccommodationTypes {
-                            standing: None,
-                            seating: Some(first_seating),
-                            reclining_seating: None,
-                            special_seating: None,
-                            sleeper: Some(first_sleepers),
-                            single_sleeper: None,
-                            double_sleeper: None,
-                            special_sleeper: None,
-                            couchette: None,
-                            single_couchette: None,
-                            double_couchette: None,
-                            baby: None,
-                            family: None,
-                            recreation: None,
-                            panoramic: None,
-                            pullman: None,
-                            pushchair: None,
-                            wheelchair: None,
-                            has_female_only: None,
-                            has_male_only: None,
-                            has_same_sex_only: None,
-                        },
-                    ),
-                    second_premium: None,
-                    second: Some(
-                        AccommodationTypes {
-                            standing: None,
-                            seating: Some(standard_seating),
-                            reclining_seating: None,
-                            special_seating: None,
-                            sleeper: Some(standard_sleepers),
-                            single_sleeper: None,
-                            double_sleeper: None,
-                            special_sleeper: None,
-                            couchette: None,
-                            single_couchette: None,
-                            double_couchette: None,
-                            baby: None,
-                            family: None,
-                            recreation: None,
-                            panoramic: None,
-                            pullman: None,
-                            pushchair: None,
-                            wheelchair: None,
-                            has_female_only: None,
-                            has_male_only: None,
-                            has_same_sex_only: None,
-                        },
-                    ),
-                    third: None,
-                    unclassified: None,
-                }
-            ),
-            reservations: reservations,
-            catering: Some(catering),
-            brand: brand,
-            name: None,
-            line: Some(Line {
-                id: service_group.to_string(),
-                public_id: None,
-                name: None,
-                number: None,
-                description: None,
-                url: None,
-                background_colour: None,
-                foreground_colour: None,
-            }),
-            uic_code: uic_code,
-            operator,
-            wheelchair_accessible: None,
-            toilets: None,
-            luggage: None,
-            families: None,
-            passenger_communications: None,
-            assistance: None,
-            passenger_information: None,
-        });
+        // From this point on we will need to ensure that the line and allocation are in the
+        // database, so fill them in here
+        let mut allocations_written = 0;
+        match &timing_load_str {
+            Some(timing_load_str) => {
+                if !self.cached_allocation_ids.contains(&timing_load_id) {
+                    let timing_load = train_allocation::Entity::load()
+                        .filter(train_allocation::COLUMN.id.eq(&timing_load_id))
+                        .filter(train_allocation::COLUMN.namespace.eq(namespace))
+                        .one(transaction)
+                        .await?;
+                    if timing_load.is_none() {
+                        let timing_load = train_allocation::ActiveModelEx {
+                            id: ActiveValue::Set(timing_load_id.clone()),
+                            namespace: ActiveValue::Set(namespace.to_string()),
+                            description: ActiveValue::Set(timing_load_str.clone()),
+                            vehicles: ActiveHasMany::Append(vec![]),
+                            ..Default::default()
+                        };
 
-        Ok(schedule)
+                        timing_load.insert(transaction).await?;
+
+                        allocations_written += 1;
+                    }
+                    self.cached_allocation_ids.insert(timing_load_id.clone());
+                }
+            }
+            None => (),
+        };
+
+        let mut lines_written = 0;
+        if !self.cached_line_ids.contains(service_group) {
+            let line = line::Entity::load()
+                .filter(line::COLUMN.id.eq(service_group))
+                .filter(line::COLUMN.namespace.eq(namespace))
+                .one(transaction)
+                .await?;
+            if line.is_none() {
+                let line = line::ActiveModelEx {
+                    id: ActiveValue::Set(service_group.to_string()),
+                    namespace: ActiveValue::Set(namespace.to_string()),
+                    public_id: ActiveValue::Set(None),
+                    name: ActiveValue::Set(None),
+                    description: ActiveValue::Set(None),
+                    url: ActiveValue::Set(None),
+                    background_colour: ActiveValue::Set(None),
+                    foreground_colour: ActiveValue::Set(None),
+                    ..Default::default()
+                };
+
+                line.insert(transaction).await?;
+
+                lines_written += 1;
+            }
+            self.cached_line_ids.insert(service_group.to_string());
+        }
+
+        let mut change_en_route = variable_train::ActiveModelEx {
+            namespace: ActiveValue::Set(namespace.to_string()),
+            train_type: ActiveValue::Set(train_type),
+            public_id: ActiveValue::Set(Some(public_id.to_string())),
+            headcode: ActiveValue::Set(headcode),
+            power_type: ActiveValue::Set(power_type),
+            timing_allocation_id: ActiveValue::Set(match timing_load_str {
+                None => None,
+                Some(_) => Some(timing_load_id),
+            }),
+            actual_allocation_id: ActiveValue::Set(None),
+            timing_speed_m_per_s: ActiveValue::Set(speed_m_per_s),
+            accommodation: ActiveHasMany::Append(vec![
+                accommodation_types::ActiveModelEx {
+                    class: ActiveValue::Set(AccommodationClass::First),
+                    standing: ActiveValue::Set(None),
+                    seating: ActiveValue::Set(Some(first_seating)),
+                    reclining_seating: ActiveValue::Set(None),
+                    special_seating: ActiveValue::Set(None),
+                    sleeper: ActiveValue::Set(Some(first_sleepers)),
+                    single_sleeper: ActiveValue::Set(None),
+                    double_sleeper: ActiveValue::Set(None),
+                    special_sleeper: ActiveValue::Set(None),
+                    couchette: ActiveValue::Set(None),
+                    single_couchette: ActiveValue::Set(None),
+                    double_couchette: ActiveValue::Set(None),
+                    baby: ActiveValue::Set(None),
+                    family: ActiveValue::Set(None),
+                    recreation: ActiveValue::Set(None),
+                    panoramic: ActiveValue::Set(None),
+                    pullman: ActiveValue::Set(None),
+                    pushchair: ActiveValue::Set(None),
+                    wheelchair: ActiveValue::Set(None),
+                    has_female_only: ActiveValue::Set(None),
+                    has_male_only: ActiveValue::Set(None),
+                    has_same_sex_only: ActiveValue::Set(None),
+                    ..Default::default()
+                },
+                accommodation_types::ActiveModelEx {
+                    class: ActiveValue::Set(AccommodationClass::Second),
+                    standing: ActiveValue::Set(None),
+                    seating: ActiveValue::Set(Some(standard_seating)),
+                    reclining_seating: ActiveValue::Set(None),
+                    special_seating: ActiveValue::Set(None),
+                    sleeper: ActiveValue::Set(Some(standard_sleepers)),
+                    single_sleeper: ActiveValue::Set(None),
+                    double_sleeper: ActiveValue::Set(None),
+                    special_sleeper: ActiveValue::Set(None),
+                    couchette: ActiveValue::Set(None),
+                    single_couchette: ActiveValue::Set(None),
+                    double_couchette: ActiveValue::Set(None),
+                    baby: ActiveValue::Set(None),
+                    family: ActiveValue::Set(None),
+                    recreation: ActiveValue::Set(None),
+                    panoramic: ActiveValue::Set(None),
+                    pullman: ActiveValue::Set(None),
+                    pushchair: ActiveValue::Set(None),
+                    wheelchair: ActiveValue::Set(None),
+                    has_female_only: ActiveValue::Set(None),
+                    has_male_only: ActiveValue::Set(None),
+                    has_same_sex_only: ActiveValue::Set(None),
+                    ..Default::default()
+                },
+            ]),
+            brand: ActiveValue::Set(brand),
+            name: ActiveValue::Set(None),
+            line_id: ActiveValue::Set(Some(service_group.to_string())),
+            uic_code: ActiveValue::Set(uic_code),
+            operator_id: ActiveValue::Set(operator_id),
+            wheelchair_accessible: ActiveValue::Set(None),
+            has_toilets: ActiveValue::Set(false),
+            has_luggage: ActiveValue::Set(false),
+            has_families: ActiveValue::Set(false),
+            has_passenger_communications: ActiveValue::Set(false),
+            has_assistance: ActiveValue::Set(false),
+            has_passenger_information: ActiveValue::Set(false),
+            ..Default::default()
+        };
+        change_en_route.populate_reservations(&reservations);
+        change_en_route.populate_catering(&catering);
+        change_en_route.populate_operating_characteristics(&operating_characteristics);
+        self.change_en_route = Some(Box::new(change_en_route));
+
+        Ok((lines_written, allocations_written))
     }
 
-    fn read_tiploc(
+    async fn read_tiploc(
         &self,
         line: &str,
-        mut schedule: Schedule,
+        namespace: &str,
         number: u64,
         modification_type: ModificationType,
-    ) -> Result<Schedule, CifError> {
+        transaction: &DatabaseTransaction,
+    ) -> Result<usize, Error> {
         let tiploc = &line[2..9].trim();
         let name = &line[18..44].trim();
         let opt_crs = read_optional_string(&line[53..56]);
 
-        let location = match modification_type {
-            ModificationType::Insert => Location {
-                id: tiploc.to_string(),
-                name: name.to_string(),
-                public_id: opt_crs.clone(),
-                timezone: London,
+        match modification_type {
+            ModificationType::Insert => {
+                let location = location::ActiveModelEx {
+                    id: ActiveValue::Set(tiploc.to_string()),
+                    namespace: ActiveValue::Set(namespace.to_string()),
+                    name: ActiveValue::Set(name.to_string()),
+                    public_id: ActiveValue::Set(opt_crs.clone()),
+                    // Assume London, this will be overridden later
+                    timezone: ActiveValue::Set(London.name().to_string()),
+                    ..Default::default()
+                };
+                location.insert(transaction).await?;
+                Ok(1)
             },
             ModificationType::Amend => {
-                let location = schedule.locations.remove(*tiploc);
-                let mut location = match location {
+                let location = location::Entity::load()
+                    .filter_by_id((tiploc.to_string(), namespace.to_owned()))
+                    .one(transaction)
+                    .await?;
+                let mut location: location::ActiveModelEx = match location {
                     None => {
                         return Err(CifError {
                             error_type: CifErrorType::LocationNotFound(tiploc.to_string()),
                             line: number,
                             column: 2,
-                        })
+                        }.into())
                     }
-                    Some(x) => x,
+                    Some(x) => x.into(),
                 };
-                location.id = tiploc.to_string();
-                location.name = name.to_string();
-                location.public_id = opt_crs.clone();
-                location
-            }
+                location.id = ActiveValue::Set(tiploc.to_string());
+                location.name = ActiveValue::Set(name.to_string());
+                location.public_id = ActiveValue::Set(opt_crs.clone());
+                location.update(transaction).await?;
+                Ok(0)
+            },
             ModificationType::Delete => {
-                schedule.locations.remove(*tiploc); // it's OK if the TIPLOC isn't found
-                return Ok(schedule);
-            }
-        };
-        schedule.locations.insert(tiploc.to_string(), location);
-        match opt_crs {
-            None => (),
-            Some(crs) => {
-                schedule
-                    .locations_indexed_by_public_id
-                    .entry(crs.clone())
-                    .or_insert(HashSet::new())
-                    .insert(tiploc.to_string());
-            }
+                location::Entity::delete_by_id((tiploc.to_string(), namespace.to_owned()))
+                    .exec(transaction)
+                    .await?;  // it's OK if the TIPLOC isn't found
+                Ok(0)
+            },
         }
-        Ok(schedule)
     }
 
-    fn read_header(
+    async fn read_header(
         &self,
         line: &str,
-        mut schedule: Schedule,
+        schedule: &schedule::ModelEx,
         number: u64,
-    ) -> Result<Schedule, CifError> {
-        schedule.their_id = Some(line[2..22].to_string());
-        let parsed_datetime = NaiveDateTime::parse_from_str(&line[22..32], "%y%m%d%H%M");
+        transaction: &DatabaseTransaction,
+    ) -> Result<(), Error> {
+        let namespace = schedule.namespace.clone();
+        let mut schedule: schedule::ActiveModelEx = schedule.clone().into();
+
+        schedule.their_id = ActiveValue::Set(Some(line[2..22].to_string()));
+        let parsed_datetime = NaiveDateTime::parse_from_str(&line[22..32], "%d%m%y%H%M");
         let parsed_datetime = match parsed_datetime {
             Ok(x) => x,
             Err(x) => {
@@ -3900,191 +4313,253 @@ impl CifImporter {
                     error_type: CifErrorType::ChronoParseError(x),
                     line: number,
                     column: 22,
-                })
+                }.into())
             }
         };
-        schedule.last_updated = Some(London.from_local_datetime(&parsed_datetime).unwrap());
-        if &line[46..47] == "F" {
-            schedule.valid_begin = Some(read_backwards_date(
-                &line[48..54],
-                produce_cif_error_closure(number, 48),
-            )?);
-            schedule.valid_end = Some(read_backwards_date(
-                &line[54..60],
-                produce_cif_error_closure(number, 48),
-            )?);
-        }
-        Ok(schedule)
+        // CIF does not support timezones, assume these times are London time
+        schedule.timezone = ActiveValue::Set(Some(London.name().to_string()));
+        schedule.last_updated = ActiveValue::Set(Some(parsed_datetime));
+        schedule.valid_begin = ActiveValue::Set(Some(read_backwards_date(
+            &line[48..54],
+            produce_cif_error_closure(number, 48),
+        )?));
+        schedule.valid_end = ActiveValue::Set(Some(read_backwards_date(
+            &line[54..60],
+            produce_cif_error_closure(number, 48),
+        )?));
+
+        println!("[{}] Updating root schedule...", namespace);
+        schedule.update(transaction).await?;
+        println!("[{}] Updated root schedule", namespace);
+
+        Ok(())
     }
 
-    fn finalise(
+    async fn finalise(
         &mut self,
         _line: &str,
-        mut schedule: Schedule,
+        namespace: &str,
         number: u64,
-    ) -> Result<Schedule, CifError> {
+        transaction: &DatabaseTransaction,
+    ) -> Result<usize, Error> {
+        println!(
+            "[{}] Writing {} unwritten associations...", namespace, self.unwritten_assocs.len()
+        );
         for ((train_id, location, location_suffix), assocs) in &self.unwritten_assocs {
-            let mut trains = match schedule.trains.get_mut(train_id) {
-                Some(x) => x,
-                None => {
-                    return Err(CifError {
-                        error_type: CifErrorType::TrainNotFound(train_id.clone()),
-                        line: number,
-                        column: 0,
-                    })
-                }
-            };
+            if assocs.len() == 0 {
+                // Can happen when assocs are deleted
+                continue;
+            }
+            let train_variants = get_all_train_variants_for_assoc_write(
+                &self.get_train_variant_ids(train_id),
+                transaction
+            ).await?;
+            if train_variants.len() == 0 {
+                return Err(CifError {
+                    error_type: CifErrorType::TrainNotFound(train_id.clone()),
+                    line: number,
+                    column: 0,
+                }.into())
+            }
 
-            write_assocs_to_trains(&mut trains, &location, &location_suffix, &assocs);
+            write_assocs_to_trains(
+                train_variants, &location, &location_suffix, &assocs, transaction
+            ).await?;
         }
+        println!("[{}] Written unwritten associations", namespace);
         self.unwritten_assocs.clear();
 
-        for ((train_id, _begin), new_train) in &self.orphaned_overlay_trains {
-            let old_trains = schedule.trains.remove(train_id);
-            let mut old_trains = match old_trains {
-                None => {
-                    // This orphaned overlay was probably intended to be an N instead.
-                    schedule
-                        .trains
-                        .insert(train_id.to_string(), vec![new_train.clone()]);
-                    continue;
-                }
-                Some(x) => x,
-            };
+        let mut trains_written = 0;
 
-            // we replace main trains
-            for train in old_trains.iter_mut() {
+        println!(
+            "[{}] Writing {} orphaned overlay train variants...",
+            namespace,
+            self.orphaned_overlay_trains.len(),
+        );
+        for ((train_id, _begin), new_train_variant) in &self.orphaned_overlay_trains {
+            let train_variants = get_all_train_variants_for_replace(
+                &self.get_train_variant_ids(train_id),
+                transaction
+            ).await?;
+            if train_variants.len() == 0 {
+                let mut new_train_variant = new_train_variant.clone();
+                // This orphaned overlay was probably intended to be an N instead.
+                let inserted = if !self.cached_train_variant_ids.contains_key(train_id) {
+                    // There's no train at all, write a new one
+                    let train = train::ActiveModelEx {
+                        id: ActiveValue::Set(train_id.to_string()),
+                        namespace: ActiveValue::Set(namespace.to_string()),
+                        ..Default::default()
+                    };
+
+                    new_train_variant.train = ActiveBelongsTo::Set(Some(Box::new(train)));
+
+                    trains_written += 1;
+                    new_train_variant.insert(transaction).await?
+                } else {
+                    // There's an empty train present — likely the previous train got deleted or
+                    // cancelled.
+                    new_train_variant.train_id = ActiveValue::Set(Some(train_id.to_string()));
+                    new_train_variant.insert(transaction).await?
+                };
+
+                self
+                    .cached_train_variant_ids
+                    .entry(train_id.to_string())
+                    .or_default()
+                    .insert(inserted.id);
+
+                continue;
+            }
+
+            for train_variant in train_variants {
+                let mut train_variant: train_variant::ActiveModelEx = train_variant.clone().into();
                 if !check_date_applicability(
-                    &train.validity[0],
-                    new_train.validity[0].valid_begin,
-                    new_train.validity[0].valid_end,
-                    &new_train.validity[0].days_of_week,
+                    &train_variant.validity[0],
+                    new_train_variant.validity[0].valid_begin.clone().unwrap(),
+                    new_train_variant.validity[0].valid_end.clone().unwrap(),
+                    &train_validity_period::DaysOfWeek::get_from_active_model(
+                        &new_train_variant.validity[0]
+                    ),
                 ) {
                     continue;
                 }
-                train.replacements.push(new_train.clone())
+                train_variant
+                    .replacements
+                    .push(new_train_variant.clone());
+                train_variant.save(transaction).await?;
             }
-
-            schedule.trains.insert(train_id.to_string(), old_trains);
         }
+        println!("[{}] Written orphaned overlay train variants", namespace);
+        self.orphaned_overlay_trains.clear();
 
-        Ok(schedule)
+        Ok(trains_written)
     }
 
-    async fn override_locations(&self, mut schedule: Schedule) -> Result<Schedule, Error> {
+    async fn override_locations(
+        &self, namespace: &str, transaction: &DatabaseTransaction
+    ) -> Result<(), Error> {
         let mut location_overrides = vec![];
         match &self.config.location_overrides {
             None => (),
             Some(filename) => match fs::read_to_string(filename).await {
                 Ok(contents) => {
-                    location_overrides = serde_json::from_str::<Vec<Location>>(&contents)?;
+                    location_overrides
+                        = serde_json::from_str::<Vec<OverriddenLocation>>(&contents)?;
                 }
                 Err(x) => {
                     println!("WARNING: Failed to load location overrides: {}", x);
                 }
             },
         }
-        println!("Overriding locations");
+        println!("[{}] Overriding locations", namespace);
         for location in location_overrides {
-            schedule
-                .locations
-                .insert(location.id.clone(), location.clone());
-            match location.public_id {
-                Some(x) => {
-                    schedule
-                        .locations_indexed_by_public_id
-                        .entry(x.clone())
-                        .or_insert(HashSet::new())
-                        .insert(location.id.clone());
-                }
-                None => (),
-            }
+            let old_location = location::Entity::load()
+                .filter(location::COLUMN.id.eq(location.id.clone()))
+                .filter(location::COLUMN.namespace.eq(namespace))
+                .one(transaction)
+                .await?;
+            let location: location::ActiveModelEx = location::ActiveModelEx {
+                id: ActiveValue::Set(location.id),
+                namespace: ActiveValue::Set(namespace.to_string()),
+                name: ActiveValue::Set(location.name),
+                public_id: ActiveValue::Set(location.public_id),
+                timezone: ActiveValue::Set(location.timezone),
+                ..Default::default()
+            };
+            match old_location {
+                Some(_) => location.update(transaction).await?,
+                None => location.insert(transaction).await?,
+            };
         }
 
-        // can now validate locations
-        for (_id, trains) in &schedule.trains {
-            validate_train_locations(
-                &trains,
-                &schedule.locations,
-                &produce_cif_error_closure(0, 0),
-            )?;
-        }
-
-        Ok(schedule)
+        Ok(())
     }
 
-    fn read_record(
+    async fn read_record(
         &mut self,
         line: String,
-        schedule: Schedule,
+        schedule: &schedule::ModelEx,
         number: u64,
-    ) -> Result<Schedule, CifError> {
+        transaction: &DatabaseTransaction,
+    ) -> Result<(usize, usize, usize, usize, usize), Error> {
         if line.is_empty() {
-            return Ok(schedule);
+            return Ok((0, 0, 0, 0, 0));
         }
         if line.len() != 80 {
             return Err(CifError {
                 error_type: CifErrorType::InvalidRecordLength(line.len()),
                 line: number,
                 column: 0,
-            });
+            }.into());
         }
 
+        let namespace = &schedule.namespace;
+
         match &line[..2] {
-            "HD" => Ok(self.read_header(&line, schedule, number)?),
-            "TI" => Ok(self.read_tiploc(&line, schedule, number, ModificationType::Insert)?),
-            "TA" => Ok(self.read_tiploc(&line, schedule, number, ModificationType::Amend)?),
-            "TD" => Ok(self.read_tiploc(&line, schedule, number, ModificationType::Delete)?),
-            "AA" => Ok(self.read_association(&line, schedule, number)?),
-            "BS" => Ok(self.read_basic_schedule(&line, schedule, number)?),
-            "BX" => Ok(self.read_extended_schedule(&line, schedule, number)?),
-            "LO" => Ok(self.read_location_origin(&line, schedule, number)?),
-            "LI" => Ok(self.read_location_intermediate(&line, schedule, number)?),
-            "LT" => Ok(self.read_location_terminating(&line, schedule, number)?),
-            "CR" => Ok(self.read_change_en_route(&line, schedule, number)?),
-            "ZZ" => Ok(self.finalise(&line, schedule, number)?),
+            "HD" => {
+                self.read_header(&line, schedule, number, transaction).await?;
+                Ok((0, 0, 0, 0, 0))
+            },
+            "TI" => {
+                Ok((self
+                    .read_tiploc(&line, namespace, number, ModificationType::Insert, transaction)
+                    .await?,
+                    0, 0, 0, 0))
+            },
+            "TA" => {
+                Ok((self
+                    .read_tiploc(&line, namespace, number, ModificationType::Amend, transaction)
+                    .await?,
+                    0, 0, 0, 0))
+            },
+            "TD" => {
+                Ok((self
+                    .read_tiploc(&line, namespace, number, ModificationType::Delete, transaction)
+                    .await?,
+                    0, 0, 0, 0))
+            },
+            "AA" => {
+                self.read_association(&line, namespace, number, transaction).await?;
+                Ok((0, 0, 0, 0, 0))
+            },
+            "BS" => {
+                let (train_count, line_count, allocation_count)
+                    = self.read_basic_schedule(&line, namespace, number, transaction).await?;
+                Ok((0, line_count, allocation_count, 0, train_count))
+            },
+            "BX" => Ok((
+                0,
+                0,
+                0,
+                self.read_extended_schedule(&line, namespace, number, transaction).await?,
+                0
+            )),
+            "LO" => {
+                self.read_location_origin(&line, namespace, number, transaction).await?;
+                Ok((0, 0, 0, 0, 0))
+            },
+            "LI" => {
+                self.read_location_intermediate(&line, namespace, number, transaction).await?;
+                Ok((0, 0, 0, 0, 0))
+            },
+            "LT" => {
+                self.read_location_terminating(&line, namespace, number, transaction).await?;
+                Ok((0, 0, 0, 0, 0))
+            },
+            "CR" => {
+                let (line_count, allocation_count)
+                    = self.read_change_en_route(&line, namespace, number, transaction).await?;
+                Ok((0, line_count, allocation_count, 0, 0))
+            },
+            "ZZ" => Ok((0, 0, 0, 0, self.finalise(&line, namespace, number, transaction).await?)),
             x => Err(CifError {
                 error_type: CifErrorType::InvalidRecordType(x.to_string()),
                 line: number,
                 column: 0,
-            }),
+            }.into()),
         }
     }
-}
-
-fn validate_train_location<F, T>(
-    train: &Train,
-    locations: &HashMap<String, Location>,
-    error_logic: &F,
-) -> Result<(), T>
-where
-    F: Fn(CifErrorType) -> T,
-{
-    validate_train_locations(&train.replacements, &locations, error_logic)?;
-    for location in &train.route {
-        if !locations.contains_key(&location.id) {
-            return Err(error_logic(CifErrorType::LocationNotFound(
-                location.id.clone(),
-            )));
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_train_locations<F, T>(
-    trains: &Vec<Train>,
-    locations: &HashMap<String, Location>,
-    error_logic: &F,
-) -> Result<(), T>
-where
-    F: Fn(CifErrorType) -> T,
-{
-    for train in trains {
-        validate_train_location(&train, &locations, error_logic)?;
-    }
-
-    Ok(())
 }
 
 #[async_trait]
@@ -4092,25 +4567,73 @@ impl SlowStreamingImporter for CifImporter {
     async fn overlay(
         &mut self,
         reader: impl AsyncBufReadExt + Unpin + Send,
-        mut schedule: Schedule,
-    ) -> Result<Schedule, Error> {
+        schedule: &schedule::ModelEx,
+        transaction: &DatabaseTransaction,
+    ) -> Result<(), Error> {
         let mut lines = reader.lines();
 
         let mut i: u64 = 0;
 
+        let namespace = schedule.namespace.clone();
+
+        let mut location_count = 0;
+        let mut line_count = 0;
+        let mut allocation_count = 0;
+        let mut operator_count = 0;
+        let mut train_count = 0;
+
+        println!("[{}] Populating cache...", namespace);
+        self.populate_train_variant_cache(&namespace, transaction).await?;
+        println!("[{}] Populated cache...", namespace);
+
+        println!("[{}] Loading records...", namespace);
+
         while let Some(line) = lines.next_line().await? {
             i += 1;
-            schedule = self.read_record(line, schedule, i)?;
+            let (new_locations, new_lines, new_allocations, new_operators, new_trains)
+                = self.read_record(line, schedule, i, transaction).await?;
+            location_count += new_locations;
+            line_count += new_lines;
+            allocation_count += new_allocations;
+            operator_count += new_operators;
+            train_count += new_trains;
+            if i % 1000 == 0 {
+                println!(
+                    "[{}] After {} lines, \
+                    persisted {} locations, {} lines, {} operators, {} allocations, {} trains",
+                    namespace,
+                    i,
+                    location_count,
+                    line_count,
+                    operator_count,
+                    allocation_count,
+                    train_count,
+                );
+            }
         }
 
-        schedule = self.override_locations(schedule).await?;
+        self.cached_allocation_ids.clear();
+        self.cached_line_ids.clear();
+        self.cached_operator_ids.clear();
 
         println!(
-            "Successfully loaded {} trains from {} lines of CIF",
-            schedule.trains.len(),
+            "[{}] Persisted {} locations, {} lines, {} operators, {} allocations, {} trains",
+            namespace,
+            location_count,
+            line_count,
+            operator_count,
+            allocation_count,
+            train_count,
+        );
+
+        self.override_locations(&namespace, transaction).await?;
+
+        println!(
+            "[{}] Successfully loaded trains from {} lines of CIF",
+            namespace,
             i
         );
-        Ok(schedule)
+        Ok(())
     }
 }
 
@@ -4245,64 +4768,40 @@ struct NrJsonVstp {
 }
 
 pub struct NrJsonImporter {
-    previously_received: Arc<RwLock<Vec<NrJsonVstp>>>,
-    config: NrJsonImporterConfig,
-    persister_mutex: Arc<Mutex<()>>,
-}
-
-#[derive(Clone, Deserialize)]
-pub struct NrJsonImporterConfig {
-    filename: Option<String>,
 }
 
 impl NrJsonImporter {
-    pub async fn new(config: NrJsonImporterConfig) -> Result<NrJsonImporter, Error> {
-        let mut previously_received = vec![];
-        match &config.filename {
-            None => (),
-            Some(filename) => match fs::read_to_string(filename).await {
-                Ok(contents) => {
-                    previously_received = serde_json::from_str::<Vec<NrJsonVstp>>(&contents)?;
-                }
-                Err(x) => {
-                    println!("WARNING: Failed to load previous VSTP workings: {}", x);
-                }
-            },
-        }
-        Ok(NrJsonImporter {
-            previously_received: Arc::new(RwLock::new(previously_received)),
-            config,
-            persister_mutex: Arc::new(Mutex::new(())),
-        })
+    pub async fn new() -> Result<NrJsonImporter, Error> {
+        Ok(NrJsonImporter {})
     }
 
-    fn read_vstp_route(
+    async fn read_vstp_route(
         &self,
         schedule_segments: &Vec<NrJsonScheduleSegment>,
         train_status: &TrainStatus,
-        train_id: &str,
-        schedule: &mut Schedule,
-    ) -> Result<Vec<TrainLocation>, NrJsonError> {
+        namespace: &str,
+        transaction: &DatabaseTransaction,
+    ) -> Result<Vec<train_location::ActiveModelEx>, Error> {
         let mut route = vec![];
         for (i, segment) in schedule_segments.iter().enumerate() {
             if segment.schedule_location.len() == 0 {
                 return Err(NrJsonError {
                     error_type: CifErrorType::NotEnoughLocations,
                     field_name: "schedule_location".to_string(),
-                });
+                }.into());
             }
             for (j, location) in segment.schedule_location.iter().enumerate() {
                 // don't populate a change en route on the first segment as this
                 // will be populated quite happily in the main train's variable_train field.
                 let change_en_route = if i == 0 || j != 0 {
-                    None
+                    ActiveHasOne::NotSet
                 } else {
-                    Some(self.read_vstp_variable_train(
+                    ActiveHasOne::Set(Some(Box::new(self.read_vstp_variable_train(
                         segment,
                         train_status,
-                        train_id,
-                        schedule,
-                    )?)
+                        namespace,
+                        transaction,
+                    ).await?)))
                 };
 
                 let is_origin = if i == 0 && j == 0 { true } else { false };
@@ -4319,7 +4818,7 @@ impl NrJsonImporter {
                     return Err(NrJsonError {
                         error_type: CifErrorType::NotEnoughLocations,
                         field_name: "schedule_location".to_string(),
-                    });
+                    }.into());
                 }
 
                 let (last_wtt_time, last_wtt_day) = match is_origin {
@@ -4371,7 +4870,7 @@ impl NrJsonImporter {
                         return Err(NrJsonError {
                             error_type: CifErrorType::InvalidWttTimesCombo,
                             field_name: "scheduled_*_time".to_string(),
-                        })
+                        }.into())
                     }
                 };
 
@@ -4410,13 +4909,11 @@ impl NrJsonImporter {
                 };
 
                 let activities = match &location.cif_activity {
-                    Some(x) => read_activities(
+                    Some(x) => Some(read_activities(
                         format!("{: <12}", x).as_str(),
                         produce_nr_json_error_closure("CIF_activity".to_string()),
-                    )?,
-                    None => Activities {
-                        ..Default::default()
-                    },
+                    )?),
+                    None => None,
                 };
 
                 let eng_allowance = match &location.cif_engineering_allowance {
@@ -4441,55 +4938,52 @@ impl NrJsonImporter {
                     None => None,
                 };
 
-                let new_location = TrainLocation {
-                    timing_tz: None,
-                    id: location_id.to_string(),
-                    id_suffix: location_suffix,
-                    working_arr: wtt_arr,
-                    working_arr_day: wtt_arr_day,
-                    working_dep: wtt_dep,
-                    working_dep_day: wtt_dep_day,
-                    working_pass: wtt_pass,
-                    working_pass_day: wtt_pass_day,
-                    public_arr: pub_arr,
-                    public_arr_day: pub_arr_day,
-                    public_dep: pub_dep,
-                    public_dep_day: pub_dep_day,
-                    platform,
-                    platform_zone: None,
-                    line: line_code,
-                    path: path_code,
-                    engineering_allowance_s: eng_allowance,
-                    pathing_allowance_s: path_allowance,
-                    performance_allowance_s: perf_allowance,
-                    activities,
-                    change_en_route: change_en_route,
-                    divides_to_form: vec![],
-                    joins_to: vec![],
-                    becomes: None,
-                    divides_from: vec![],
-                    is_joined_to_by: vec![],
-                    forms_from: None,
+                let mut new_location = train_location::ActiveModelEx {
+                    namespace: ActiveValue::Set(namespace.to_string()),
+                    index: ActiveValue::Set(j.try_into().unwrap()),
+                    timing_tz: ActiveValue::Set(None),
+                    location_id: ActiveValue::Set(location_id.to_string()),
+                    id_suffix: ActiveValue::Set(location_suffix),
+                    working_arr: ActiveValue::Set(wtt_arr),
+                    working_arr_day: ActiveValue::Set(wtt_arr_day),
+                    working_dep: ActiveValue::Set(wtt_dep),
+                    working_dep_day: ActiveValue::Set(wtt_dep_day),
+                    working_pass: ActiveValue::Set(wtt_pass),
+                    working_pass_day: ActiveValue::Set(wtt_pass_day),
+                    public_arr: ActiveValue::Set(pub_arr),
+                    public_arr_day: ActiveValue::Set(pub_arr_day),
+                    public_dep: ActiveValue::Set(pub_dep),
+                    public_dep_day: ActiveValue::Set(pub_dep_day),
+                    platform: ActiveValue::Set(platform),
+                    platform_zone: ActiveValue::Set(None),
+                    line: ActiveValue::Set(line_code),
+                    path: ActiveValue::Set(path_code),
+                    engineering_allowance_s: ActiveValue::Set(eng_allowance),
+                    pathing_allowance_s: ActiveValue::Set(path_allowance),
+                    performance_allowance_s: ActiveValue::Set(perf_allowance),
+                    change_en_route,
+                    ..Default::default()
+                };
+                match &activities {
+                    Some(activities) => new_location.populate_activities(activities),
+                    None => new_location.populate_activities(
+                        &train_location::Activities { ..Default::default() }
+                    ),
                 };
 
                 route.push(new_location);
-                schedule
-                    .trains_indexed_by_location
-                    .entry(location_id.to_string())
-                    .or_insert(HashSet::new())
-                    .insert(train_id.to_string());
             }
         }
         Ok(route)
     }
 
-    fn read_vstp_variable_train(
+    async fn read_vstp_variable_train(
         &self,
         schedule_segment: &NrJsonScheduleSegment,
         train_status: &TrainStatus,
-        train_id: &str,
-        schedule: &mut Schedule,
-    ) -> Result<VariableTrain, NrJsonError> {
+        namespace: &str,
+        transaction: &DatabaseTransaction,
+    ) -> Result<variable_train::ActiveModelEx, Error> {
         let train_type = match read_train_type(
             &schedule_segment.cif_train_category,
             produce_nr_json_error_closure("CIF_train_category".to_string()),
@@ -4511,11 +5005,6 @@ impl NrJsonImporter {
         };
 
         let public_id = &schedule_segment.signalling_id;
-        schedule
-            .trains_indexed_by_public_id
-            .entry(public_id.to_string())
-            .or_insert(HashSet::new())
-            .insert(train_id.to_string());
 
         let headcode = match &schedule_segment.cif_headcode {
             Some(x) => read_optional_string(x),
@@ -4566,16 +5055,14 @@ impl NrJsonImporter {
         };
 
         let (operating_characteristics, _) = match &schedule_segment.cif_operating_characteristics {
-            Some(x) => read_operating_characteristics(
-                x,
-                produce_nr_json_error_closure("CIF_operating_characteristics".to_string()),
-            )?,
-            None => (
-                OperatingCharacteristics {
-                    ..Default::default()
-                },
-                false,
-            ),
+            Some(x) => {
+                let (operating_characteristics, runs_as_required) = read_operating_characteristics(
+                    x,
+                    produce_nr_json_error_closure("CIF_operating_characteristics".to_string()),
+                )?;
+                (Some(operating_characteristics), runs_as_required)
+            },
+            None => (None, false),
         };
 
         let timing_load_str = match (
@@ -4586,13 +5073,19 @@ impl NrJsonImporter {
             (Some(x), None) => read_timing_load(
                 x,
                 "",
-                operating_characteristics.br_mark_four_coaches,
+                operating_characteristics
+                .as_ref()
+                .map(|x| x.br_mark_four_coaches)
+                .unwrap_or(false),
                 produce_nr_json_error_closure("CIF_power_type or CIF_timing_load".to_string()),
             )?,
             (Some(x), Some(y)) => read_timing_load(
                 x,
                 y,
-                operating_characteristics.br_mark_four_coaches,
+                operating_characteristics
+                .as_ref()
+                .map(|x| x.br_mark_four_coaches)
+                .unwrap_or(false),
                 produce_nr_json_error_closure("CIF_power_type or CIF_timing_load".to_string()),
             )?,
         };
@@ -4604,7 +5097,11 @@ impl NrJsonImporter {
             (None, Some(x)) => format!("   {: <4}", x),
             (Some(x), None) => format!("{: <3}    ", x),
             (Some(x), Some(y)) => format!("{: <3}{: <4}", x, y),
-        };
+        } + if operating_characteristics
+            .as_ref()
+            .map(|x| x.br_mark_four_coaches)
+            .unwrap_or(false) { "1" }
+            else { "0" };
 
         let (first_seating, standard_seating) = match &schedule_segment.cif_train_class {
             Some(x) => read_seating_class(
@@ -4627,16 +5124,14 @@ impl NrJsonImporter {
         };
 
         let (catering, wheelchair_reservations) = match &schedule_segment.cif_catering_code {
-            Some(x) => read_catering(
-                x,
-                produce_nr_json_error_closure("CIF_catering_code".to_string()),
-            )?,
-            None => (
-                Catering {
-                    ..Default::default()
-                },
-                false,
-            ),
+            Some(x) => {
+                let (catering, wheelchair_reservations) = read_catering(
+                    x,
+                    produce_nr_json_error_closure("CIF_catering_code".to_string()),
+                )?;
+                (Some(catering), wheelchair_reservations)
+            },
+            None => (None, false),
         };
 
         let reservations_str = match &schedule_segment.cif_reservations {
@@ -4679,120 +5174,170 @@ impl NrJsonImporter {
             produce_nr_json_error_closure("atoc_code".to_string()),
         )?;
 
-        Ok(VariableTrain {
-            train_type,
-            public_id: Some(public_id.to_string()),
-            headcode,
-            power_type: power_type,
-            timing_allocation: match timing_load_str {
-                None => None,
-                Some(x) => Some(TrainAllocation {
-                    id: timing_load_id,
-                    description: x,
-                    vehicles: None,
-                }),
-            },
-            actual_allocation: None,
-            timing_speed_m_per_s: speed_m_per_s,
-            operating_characteristics: Some(operating_characteristics),
-            accommodation: Some(
-                AccommodationTypesByClass {
-                    unknown: None,
-                    first_premium: None,
-                    first: Some(
-                        AccommodationTypes {
-                            standing: None,
-                            seating: Some(first_seating),
-                            reclining_seating: None,
-                            special_seating: None,
-                            sleeper: Some(first_sleepers),
-                            single_sleeper: None,
-                            double_sleeper: None,
-                            special_sleeper: None,
-                            couchette: None,
-                            single_couchette: None,
-                            double_couchette: None,
-                            baby: None,
-                            family: None,
-                            recreation: None,
-                            panoramic: None,
-                            pullman: None,
-                            pushchair: None,
-                            wheelchair: None,
-                            has_female_only: None,
-                            has_male_only: None,
-                            has_same_sex_only: None,
-                        },
-                    ),
-                    second_premium: None,
-                    second: Some(
-                        AccommodationTypes {
-                            standing: None,
-                            seating: Some(standard_seating),
-                            reclining_seating: None,
-                            special_seating: None,
-                            sleeper: Some(standard_sleepers),
-                            single_sleeper: None,
-                            double_sleeper: None,
-                            special_sleeper: None,
-                            couchette: None,
-                            single_couchette: None,
-                            double_couchette: None,
-                            baby: None,
-                            family: None,
-                            recreation: None,
-                            panoramic: None,
-                            pullman: None,
-                            pushchair: None,
-                            wheelchair: None,
-                            has_female_only: None,
-                            has_male_only: None,
-                            has_same_sex_only: None,
-                        },
-                    ),
-                    third: None,
-                    unclassified: None,
+        // From this point on we will need to ensure that the line, allocation, and operator are in
+        // the database, so fill them in here
+        match &timing_load_str {
+            Some(timing_load_str) => {
+                let timing_load = train_allocation::Entity::load()
+                    .filter(train_allocation::COLUMN.id.eq(&timing_load_id))
+                    .filter(train_allocation::COLUMN.namespace.eq(namespace))
+                    .one(transaction)
+                    .await?;
+                if timing_load.is_none() {
+                    let timing_load = train_allocation::ActiveModelEx {
+                        id: ActiveValue::Set(timing_load_id.clone()),
+                        namespace: ActiveValue::Set(namespace.to_string()),
+                        description: ActiveValue::Set(timing_load_str.clone()),
+                        vehicles: ActiveHasMany::Append(vec![]),
+                        ..Default::default()
+                    };
+
+                    timing_load.insert(transaction).await?;
                 }
-            ),
-            reservations,
-            catering: Some(catering),
-            brand,
-            name: None,
-            line: match service_group {
-                Some(service_group) => Some(Line {
-                    id: service_group.clone(),
-                    public_id: None,
-                    name: None,
-                    number: None,
-                    description: None,
-                    url: None,
-                    background_colour: None,
-                    foreground_colour: None,
-                }),
-                None => None,
+            }
+            None => (),
+        };
+
+        match &service_group {
+            Some(service_group) => {
+                let line = line::Entity::load()
+                    .filter(line::COLUMN.id.eq(service_group))
+                    .filter(line::COLUMN.namespace.eq(namespace))
+                    .one(transaction)
+                    .await?;
+                if line.is_none() {
+                    let line = line::ActiveModelEx {
+                        id: ActiveValue::Set(service_group.clone()),
+                        namespace: ActiveValue::Set(namespace.to_string()),
+                        public_id: ActiveValue::Set(None),
+                        name: ActiveValue::Set(None),
+                        description: ActiveValue::Set(None),
+                        url: ActiveValue::Set(None),
+                        background_colour: ActiveValue::Set(None),
+                        foreground_colour: ActiveValue::Set(None),
+                        ..Default::default()
+                    };
+
+                    line.insert(transaction).await?;
+                }
             },
-            uic_code,
-            operator: Some(TrainOperator {
-                id: atoc_code.to_string(),
-                public_id: None,
-                description: train_operator_desc,
+            None => (),
+        };
+
+        let operator = train_operator::Entity::load()
+            .filter(train_operator::COLUMN.id.eq(atoc_code))
+            .filter(train_operator::COLUMN.namespace.eq(namespace))
+            .one(transaction)
+            .await?;
+        if operator.is_none() {
+            let operator = train_operator::ActiveModelEx {
+                id: ActiveValue::Set(atoc_code.to_string()),
+                namespace: ActiveValue::Set(namespace.to_string()),
+                public_id: ActiveValue::Set(None),
+                description: ActiveValue::Set(train_operator_desc),
+                ..Default::default()
+            };
+
+            operator.insert(transaction).await?;
+        }
+
+        let mut variable_train = variable_train::ActiveModelEx {
+            namespace: ActiveValue::Set(namespace.to_string()),
+            train_type: ActiveValue::Set(train_type),
+            public_id: ActiveValue::Set(Some(public_id.to_string())),
+            headcode: ActiveValue::Set(headcode),
+            power_type: ActiveValue::Set(power_type),
+            timing_allocation_id: ActiveValue::Set(match timing_load_str {
+                None => None,
+                Some(_) => Some(timing_load_id),
             }),
-            wheelchair_accessible: None,
-            toilets: None,
-            luggage: None,
-            families: None,
-            passenger_communications: None,
-            assistance: None,
-            passenger_information: None,
-        })
+            actual_allocation_id: ActiveValue::Set(None),
+            timing_speed_m_per_s: ActiveValue::Set(speed_m_per_s),
+            accommodation: ActiveHasMany::Append(vec![
+                accommodation_types::ActiveModelEx {
+                    class: ActiveValue::Set(AccommodationClass::First),
+                    standing: ActiveValue::Set(None),
+                    seating: ActiveValue::Set(Some(first_seating)),
+                    reclining_seating: ActiveValue::Set(None),
+                    special_seating: ActiveValue::Set(None),
+                    sleeper: ActiveValue::Set(Some(first_sleepers)),
+                    single_sleeper: ActiveValue::Set(None),
+                    double_sleeper: ActiveValue::Set(None),
+                    special_sleeper: ActiveValue::Set(None),
+                    couchette: ActiveValue::Set(None),
+                    single_couchette: ActiveValue::Set(None),
+                    double_couchette: ActiveValue::Set(None),
+                    baby: ActiveValue::Set(None),
+                    family: ActiveValue::Set(None),
+                    recreation: ActiveValue::Set(None),
+                    panoramic: ActiveValue::Set(None),
+                    pullman: ActiveValue::Set(None),
+                    pushchair: ActiveValue::Set(None),
+                    wheelchair: ActiveValue::Set(None),
+                    has_female_only: ActiveValue::Set(None),
+                    has_male_only: ActiveValue::Set(None),
+                    has_same_sex_only: ActiveValue::Set(None),
+                    ..Default::default()
+                },
+                accommodation_types::ActiveModelEx {
+                    class: ActiveValue::Set(AccommodationClass::Second),
+                    standing: ActiveValue::Set(None),
+                    seating: ActiveValue::Set(Some(standard_seating)),
+                    reclining_seating: ActiveValue::Set(None),
+                    special_seating: ActiveValue::Set(None),
+                    sleeper: ActiveValue::Set(Some(standard_sleepers)),
+                    single_sleeper: ActiveValue::Set(None),
+                    double_sleeper: ActiveValue::Set(None),
+                    special_sleeper: ActiveValue::Set(None),
+                    couchette: ActiveValue::Set(None),
+                    single_couchette: ActiveValue::Set(None),
+                    double_couchette: ActiveValue::Set(None),
+                    baby: ActiveValue::Set(None),
+                    family: ActiveValue::Set(None),
+                    recreation: ActiveValue::Set(None),
+                    panoramic: ActiveValue::Set(None),
+                    pullman: ActiveValue::Set(None),
+                    pushchair: ActiveValue::Set(None),
+                    wheelchair: ActiveValue::Set(None),
+                    has_female_only: ActiveValue::Set(None),
+                    has_male_only: ActiveValue::Set(None),
+                    has_same_sex_only: ActiveValue::Set(None),
+                    ..Default::default()
+                },
+            ]),
+            brand: ActiveValue::Set(brand),
+            name: ActiveValue::Set(None),
+            line_id: ActiveValue::Set(service_group.clone()),
+            uic_code: ActiveValue::Set(uic_code),
+            operator_id: ActiveValue::Set(Some(atoc_code.to_string())),
+            wheelchair_accessible: ActiveValue::Set(None),
+            has_toilets: ActiveValue::Set(false),
+            has_luggage: ActiveValue::Set(false),
+            has_families: ActiveValue::Set(false),
+            has_passenger_communications: ActiveValue::Set(false),
+            has_assistance: ActiveValue::Set(false),
+            has_passenger_information: ActiveValue::Set(false),
+            ..Default::default()
+        };
+        variable_train.populate_reservations(&reservations);
+        match &catering {
+            Some(catering) => variable_train.populate_catering(catering),
+            None => variable_train.has_catering = ActiveValue::Set(false),
+        };
+        match &operating_characteristics {
+            Some(x) => variable_train.populate_operating_characteristics(x),
+            None => variable_train.has_operating_characteristics = ActiveValue::Set(false),
+        };
+        Ok(variable_train)
     }
 
-    fn read_vstp_entry(
+    async fn read_vstp_entry(
         &self,
         parsed_json: &NrJsonVstp,
-        mut schedule: Schedule,
-    ) -> Result<(Schedule, bool), NrJsonError> {
-        //println!("Input: {:#?}", parsed_json);
+        schedule: &schedule::ModelEx,
+        transaction: &DatabaseTransaction,
+    ) -> Result<bool, Error> {
+        let namespace = &schedule.namespace;
         let modification_type = match parsed_json
             .vstp_cif_msg_v1
             .schedule
@@ -4806,7 +5351,7 @@ impl NrJsonImporter {
                 return Err(NrJsonError {
                     error_type: CifErrorType::InvalidTransactionType(x.to_string()),
                     field_name: "transaction_type".to_string(),
-                })
+                }.into())
             }
         };
         let (stp_modification_type, is_stp) = read_stp_indicator(
@@ -4831,56 +5376,69 @@ impl NrJsonImporter {
                 begin,
                 schedule.valid_end.as_ref().unwrap()
             );
-            return Ok((schedule, false));
+            return Ok(false);
         }
 
         // At this stage we have all the data we need for a simple delete, so handle this here
         //
         // Note these are NOT the same as STP cancels and indeed handled completely differently
         if modification_type == ModificationType::Delete {
-            let old_trains = schedule.trains.remove(main_train_id);
-            let mut old_trains = match old_trains {
-                None => return Ok((schedule, false)),
-                Some(x) => x,
+            let train_variants = get_all_train_variants_for_delete_without_cache(
+                main_train_id,
+                namespace,
+                transaction
+            ).await?;
+
+            match stp_modification_type {
+                ModificationType::Insert => {
+                    let train_variant_ids_to_delete: HashSet<i64> = train_variants
+                        .into_iter()
+                        .filter(|train_variant|
+                            train_variant.train_id.is_some()
+                            && train_variant.validity[0].valid_begin == begin
+                            && ((is_stp && train_variant.source.unwrap() != TrainSource::LongTerm)
+                                ||
+                                (!is_stp && train_variant.source.unwrap() == TrainSource::LongTerm)
+                            )
+                        )
+                        .map(|x| x.id)
+                        .collect();
+                    train_variant::Entity::delete_many()
+                        .filter(train_variant::COLUMN.id.is_in(train_variant_ids_to_delete.clone()))
+                        .exec(transaction)
+                        .await?;
+                },
+                ModificationType::Amend => {
+                    let train_variant_ids_to_delete: HashSet<i64> = train_variants
+                        .into_iter()
+                        .filter(|train_variant|
+                            train_variant.train_id.is_none()
+                            && train_variant.validity[0].valid_begin == begin
+                        )
+                        .map(|x| x.id)
+                        .collect();
+                    train_variant::Entity::delete_many()
+                        .filter(train_variant::COLUMN.id.is_in(train_variant_ids_to_delete.clone()))
+                        .exec(transaction)
+                        .await?;
+                },
+                ModificationType::Delete => {
+                    let cancellation_ids_to_delete: Vec<i64> = train_variants
+                        .into_iter()
+                        .flat_map(|train_variant|
+                            train_variant.cancellations.clone().into_iter().filter(|cancellation|
+                                cancellation.validity[0].valid_begin == begin
+                            ).collect::<Vec<train_cancellation::ModelEx>>()).map(|x| x.id)
+                        .collect();
+                    train_cancellation::Entity::delete_many()
+                        .filter(train_cancellation::COLUMN.id.is_in(cancellation_ids_to_delete))
+                        .exec(transaction)
+                        .await?;
+                },
             };
 
-            if stp_modification_type == ModificationType::Insert {
-                // first we delete main trains
-                old_trains.retain(|train| {
-                    match is_stp {
-                        false => {
-                            train.source.unwrap() != TrainSource::LongTerm
-                                || train.validity[0].valid_begin != begin
-                        } // delete the entire train for deleted inserts
-                        true => {
-                            train.source.unwrap() == TrainSource::LongTerm
-                                || train.validity[0].valid_begin != begin
-                        }
-                    }
-                });
-            } else {
-                // now we clean up modifications/cancellations
-                for ref mut train in old_trains.iter_mut() {
-                    match stp_modification_type {
-                        ModificationType::Insert => {
-                            panic!("Insert found where Amend or Cancel expected")
-                        }
-                        ModificationType::Amend => train
-                            .replacements
-                            .retain(|replacement| replacement.validity[0].valid_begin != begin),
-                        ModificationType::Delete => train
-                            .cancellations
-                            .retain(|(cancellation, _source)| cancellation.valid_begin != begin),
-                    }
-                }
-            }
-
-            schedule
-                .trains
-                .insert(main_train_id.to_string(), old_trains);
-
             println!("Successfully deleted train {}", main_train_id);
-            return Ok((schedule, true));
+            return Ok(true);
         }
 
         let end = read_vstp_date(
@@ -4895,7 +5453,7 @@ impl NrJsonImporter {
                 begin,
                 schedule.valid_end.as_ref().unwrap()
             );
-            return Ok((schedule, false));
+            return Ok(false);
         }
 
         let days_of_week = read_days_of_week(
@@ -4908,62 +5466,70 @@ impl NrJsonImporter {
         if stp_modification_type == ModificationType::Delete
             && modification_type == ModificationType::Insert
         {
-            let old_trains = schedule.trains.remove(main_train_id);
-            let mut old_trains = match old_trains {
-                None => return Ok((schedule, false)),
-                Some(x) => x,
-            };
-
-            // we cancel main trains
-            for train in old_trains.iter_mut() {
-                if !check_date_applicability(&train.validity[0], begin, end, &days_of_week) {
+            let train_variants = get_all_train_variants_for_cancel_without_cache(
+                main_train_id,
+                namespace,
+                transaction
+            ).await?;
+            for train_variant in &train_variants {
+                if !check_date_applicability(
+                    &train_variant.validity[0].clone().into(), begin, end, &days_of_week
+                ) {
                     continue;
                 }
-                let new_cancel = TrainValidityPeriod {
-                    valid_begin: begin.clone(),
-                    valid_end: end.clone(),
-                    days_of_week: days_of_week.clone(),
+                let mut validity = train_validity_period::ActiveModelEx {
+                    valid_begin: ActiveValue::Set(begin),
+                    valid_end: ActiveValue::Set(end),
+                    timezone: ActiveValue::Set(London.name().to_string()),
+                    ..Default::default()
                 };
-                train
+                validity.populate_days_of_week(&days_of_week);
+                let new_cancel = train_cancellation::ActiveModelEx {
+                    validity: ActiveHasMany::Append(vec![validity]),
+                    source: ActiveValue::Set(Some(TrainSource::VeryShortTerm)),
+                    ..Default::default()
+                };
+                let mut train_variant: train_variant::ActiveModelEx = train_variant.clone().into();
+                train_variant
                     .cancellations
-                    .push((new_cancel, TrainSource::VeryShortTerm))
+                    .push(new_cancel);
+                train_variant.save(transaction).await?;
             }
 
-            schedule
-                .trains
-                .insert(main_train_id.to_string(), old_trains);
-
             println!("Successfully cancelled train {}", main_train_id);
-            return Ok((schedule, true));
+            return Ok(true);
         }
 
         if modification_type == ModificationType::Amend
             && stp_modification_type == ModificationType::Delete
         {
-            let old_trains = schedule.trains.remove(main_train_id);
-            let mut old_trains = match old_trains {
-                None => return Ok((schedule, false)),
-                Some(x) => x,
-            };
-
-            for ref mut train in old_trains.iter_mut() {
-                for (cancellation, _source) in train.cancellations.iter_mut() {
-                    if cancellation.valid_begin == begin {
-                        *cancellation = TrainValidityPeriod {
-                            valid_begin: begin,
-                            valid_end: end,
-                            days_of_week: days_of_week.clone(),
+            let train_variants = get_all_train_variants_for_amend_cancel_without_cache(
+                main_train_id,
+                namespace,
+                transaction
+            ).await?;
+            for train_variant in &train_variants {
+                for cancellation in train_variant.cancellations.iter() {
+                    if cancellation.validity[0].valid_begin == begin {
+                        let mut validity = train_validity_period::ActiveModelEx {
+                            valid_begin: ActiveValue::Set(begin),
+                            valid_end: ActiveValue::Set(end),
+                            timezone: ActiveValue::Set(London.name().to_string()),
+                            ..Default::default()
                         };
+                        validity.populate_days_of_week(&days_of_week);
+
+                        let mut cancellation: train_cancellation::ActiveModelEx
+                            = cancellation.clone().into();
+                        cancellation.validity = ActiveHasMany::Replace(vec![validity]);
+                        cancellation.save(transaction).await?;
                     }
                 }
             }
 
             println!("Successfully updated cancellation {}", main_train_id);
-            schedule
-                .trains
-                .insert(main_train_id.to_string(), old_trains);
 
-            return Ok((schedule, true));
+            return Ok(true);
         }
 
         let train_status = read_train_status(
@@ -4988,7 +5554,7 @@ impl NrJsonImporter {
             return Err(NrJsonError {
                 error_type: CifErrorType::NoScheduleSegments,
                 field_name: "schedule_segment".to_string(),
-            });
+            }.into());
         }
 
         // actually in the variable train, but re-run it here to get runs as required
@@ -5005,7 +5571,7 @@ impl NrJsonImporter {
                 produce_nr_json_error_closure("CIF_operating_characteristics".to_string()),
             )?,
             None => (
-                OperatingCharacteristics {
+                variable_train::OperatingCharacteristics {
                     ..Default::default()
                 },
                 false,
@@ -5022,16 +5588,21 @@ impl NrJsonImporter {
             };
 
         // all of the below will use this so construct it now
-        let new_train = Train {
-            id: main_train_id.to_string(),
-            validity: vec![TrainValidityPeriod {
-                valid_begin: begin,
-                valid_end: end,
-                days_of_week,
-            }],
-            cancellations: vec![],
-            replacements: vec![],
-            variable_train: self.read_vstp_variable_train(
+        let mut new_validity = train_validity_period::ActiveModelEx {
+                valid_begin: ActiveValue::Set(begin),
+                valid_end: ActiveValue::Set(end),
+                timezone: ActiveValue::Set(London.name().to_string()),
+                ..Default::default()
+            };
+        new_validity.populate_days_of_week(&days_of_week);
+
+        let mut new_train_variant = train_variant::ActiveModelEx {
+            namespace: ActiveValue::Set(namespace.clone()),
+            // Performance cost but VSTP is relatively low volume so not an issue
+            validity: ActiveHasMany::Replace(vec![new_validity]),
+            cancellations: ActiveHasMany::Append(vec![]),
+            replacements: ActiveHasMany::Append(vec![]),
+            variable_train: ActiveHasOne::Set(Some(Box::new(self.read_vstp_variable_train(
                 &parsed_json
                     .vstp_cif_msg_v1
                     .schedule
@@ -5039,13 +5610,14 @@ impl NrJsonImporter {
                     .as_ref()
                     .unwrap()[0],
                 &train_status,
-                main_train_id,
-                &mut schedule,
-            )?,
-            source: Some(TrainSource::VeryShortTerm),
-            runs_as_required,
-            performance_monitoring: performance_monitoring,
-            route: self.read_vstp_route(
+                namespace,
+                transaction,
+            ).await?))),
+            source: ActiveValue::Set(Some(TrainSource::VeryShortTerm)),
+            runs_as_required: ActiveValue::Set(runs_as_required),
+            performance_monitoring: ActiveValue::Set(performance_monitoring),
+            // Performance cost but VSTP is relatively low volume so not an issue
+            route: ActiveHasMany::Replace(self.read_vstp_route(
                 &parsed_json
                     .vstp_cif_msg_v1
                     .schedule
@@ -5053,159 +5625,123 @@ impl NrJsonImporter {
                     .as_ref()
                     .unwrap(),
                 &train_status,
-                main_train_id,
-                &mut schedule,
-            )?,
+                namespace,
+                transaction,
+            ).await?),
+            ..Default::default()
         };
-
-        validate_train_location(
-            &new_train,
-            &schedule.locations,
-            &produce_nr_json_error_closure("".to_string()),
-        )?;
 
         if modification_type == ModificationType::Insert
             && stp_modification_type == ModificationType::Insert
         {
-            println!(
-                "Successfully written train {} ({})",
-                new_train.id,
-                new_train.variable_train.public_id.as_ref().unwrap()
-            );
-            //println!("Output: {:#?}", new_train);
-            schedule
-                .trains
-                .entry(main_train_id.to_string())
-                .or_insert(vec![])
-                .push(new_train);
-
-            return Ok((schedule, true));
-        }
-        if modification_type == ModificationType::Amend {
-            let old_trains = schedule.trains.remove(main_train_id);
-            let mut old_trains = match old_trains {
-                None => return Ok((schedule, false)),
-                Some(x) => x,
-            };
-
-            // first we amend main trains
-            if stp_modification_type == ModificationType::Insert {
-                for ref mut train in old_trains.iter_mut() {
-                    if match is_stp {
-                        false => {
-                            train.source.unwrap() == TrainSource::LongTerm
-                                && train.validity[0].valid_begin == begin
-                        }
-                        true => {
-                            train.source.unwrap() != TrainSource::LongTerm
-                                && train.validity[0].valid_begin == begin
-                        }
-                    } {
-                        amend_train(train, new_train.clone());
-                    }
-                }
-            } else {
-                // now we clean up modifications (cancellations handled above)
-                for ref mut train in old_trains.iter_mut() {
-                    for replacement in train.replacements.iter_mut() {
-                        if replacement.validity[0].valid_begin == begin {
-                            amend_train(replacement, new_train.clone());
-                        }
-                    }
-                }
-            }
-
-            println!("Successfully updated train {}", main_train_id);
-            schedule
-                .trains
-                .insert(main_train_id.to_string(), old_trains);
-
-            return Ok((schedule, true));
-        }
-        if stp_modification_type == ModificationType::Amend {
-            let old_trains = schedule.trains.remove(main_train_id);
-            let mut old_trains = match old_trains {
-                None => return Ok((schedule, false)),
-                Some(x) => x,
-            };
-
-            // we replace main trains
-            for train in old_trains.iter_mut() {
-                if !check_date_applicability(&train.validity[0], begin, end, &days_of_week) {
-                    continue;
-                }
-                train.replacements.push(new_train.clone())
-            }
-
-            println!("Successfully replaced train {}", main_train_id);
-            schedule
-                .trains
-                .insert(main_train_id.to_string(), old_trains);
-
-            return Ok((schedule, true));
-        }
-
-        Ok((schedule, false))
-    }
-
-    async fn write(&self) -> Result<(), Error> {
-        match &self.config.filename {
-            None => Ok(()),
-            Some(filename) => {
-                let _mutex = self.persister_mutex.lock().await;
-                let json_string = {
-                    let previously_received = self.previously_received.read().unwrap();
-                    serde_json::to_string(&*previously_received)?
+            let train = train::Entity::load()
+                .filter(train::COLUMN.id.eq(main_train_id))
+                .filter(train::COLUMN.namespace.eq(namespace))
+                .one(transaction)
+                .await?;
+            if train.is_none() {
+                // Construct it now
+                let new_train = train::ActiveModelEx {
+                    id: ActiveValue::Set(main_train_id.to_string()),
+                    namespace: ActiveValue::Set(namespace.to_string()),
+                    ..Default::default()
                 };
 
-                let tmp_filename = format!("{}.bak", filename);
-
-                fs::write(&tmp_filename, json_string).await?;
-
-                fs::rename(tmp_filename, filename).await?;
-
-                Ok(())
+                new_train_variant.train = ActiveBelongsTo::Set(Some(Box::new(new_train)));
             }
+            else {
+                new_train_variant.train_id = ActiveValue::Set(Some(main_train_id.to_string()));
+            }
+
+            let public_id
+                = new_train_variant.variable_train.as_ref().unwrap().public_id.clone().unwrap();
+            new_train_variant.insert(transaction).await?;
+            println!(
+                "[{}] VSTP Successfully written train {} ({})",
+                namespace,
+                main_train_id,
+                public_id.unwrap(),
+            );
+            //println!("Output: {:#?}", new_train);
+
+            return Ok(true);
         }
+
+        if modification_type == ModificationType::Amend {
+            // We are finding an existing train and completely replacing it in the DB
+            let train_variants = get_all_train_variants_for_amend_without_cache(
+                main_train_id,
+                namespace,
+                transaction,
+            ).await?;
+
+            for train_variant in &train_variants {
+                if stp_modification_type == ModificationType::Insert
+                    && ((!is_stp && train_variant.source == Some(TrainSource::LongTerm))
+                        || is_stp && train_variant.source != Some(TrainSource::LongTerm))
+                    && train_variant.validity[0].valid_begin == begin
+                    && train_variant.train_id.is_some()
+                {
+                    let mut train_variant: train_variant::ActiveModelEx
+                        = train_variant.clone().into();
+                    amend_train(&mut train_variant, new_train_variant.clone());
+                    train_variant.save(transaction).await?;
+                    println!("Successfully updated train {}", main_train_id);
+                }
+                else if stp_modification_type == ModificationType::Amend
+                    && train_variant.validity[0].valid_begin == begin
+                    && train_variant.train_id.is_none()
+                {
+                    let mut train_variant: train_variant::ActiveModelEx
+                        = train_variant.clone().into();
+                    amend_train(&mut train_variant, new_train_variant.clone());
+                    train_variant.save(transaction).await?;
+                    println!("Successfully updated train {}", main_train_id);
+                }
+            }
+
+            return Ok(true);
+        }
+
+
+        if stp_modification_type == ModificationType::Amend {
+            let train_variants = get_all_train_variants_for_replace_without_cache(
+                main_train_id,
+                namespace,
+                transaction,
+            ).await?;
+
+            for train_variant in &train_variants {
+                // We replace main trains
+                if train_variant.train_id.is_none() {
+                    continue;
+                }
+                if !check_date_applicability(
+                    &train_variant.validity[0].clone().into(), begin, end, &days_of_week
+                ) {
+                    continue;
+                }
+                new_train_variant.parent_train_variant_id
+                    = ActiveValue::Set(Some(train_variant.id));
+                new_train_variant.clone().insert(transaction).await?;
+                println!("Successfully replaced train {}", main_train_id);
+            }
+
+            return Ok(true);
+        }
+
+        panic!("Unreachable");
     }
 }
 
 #[async_trait]
 impl FastImporter for NrJsonImporter {
-    fn overlay(&self, data: Vec<u8>, schedule: Schedule) -> Result<Schedule, Error> {
+    async fn overlay(
+        &self, data: Vec<u8>, schedule: &schedule::ModelEx, transaction: &DatabaseTransaction
+    ) -> Result<(), Error> {
         let parsed_json = serde_json::from_slice::<NrJsonVstp>(&data)?;
-        let (schedule, change_made) = self.read_vstp_entry(&parsed_json, schedule)?;
-        if change_made {
-            let mut previously_received = self.previously_received.write().unwrap();
-            previously_received.push(parsed_json);
-        }
+        self.read_vstp_entry(&parsed_json, schedule, transaction).await?;
 
-        Ok(schedule)
-    }
-}
-
-#[async_trait]
-impl EphemeralImporter for NrJsonImporter {
-    async fn repopulate(&self, mut schedule: Schedule) -> Result<Schedule, Error> {
-        println!("Repopulating VSTP entries...");
-        let mut new_previously_received = vec![];
-        {
-            let previously_received = self.previously_received.read().unwrap();
-            for parsed_json in &*previously_received {
-                let (new_schedule, change_made) = self.read_vstp_entry(&parsed_json, schedule)?;
-                schedule = new_schedule;
-                if change_made {
-                    new_previously_received.push(parsed_json.clone());
-                }
-            }
-        }
-        let mut previously_received = self.previously_received.write().unwrap();
-        *previously_received = new_previously_received;
-
-        Ok(schedule)
-    }
-
-    async fn persist(&self) -> Result<(), Error> {
-        Ok(self.write().await?)
+        Ok(())
     }
 }

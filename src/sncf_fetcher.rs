@@ -38,7 +38,7 @@ impl fmt::Display for SncfFetcherError {
 #[async_trait]
 impl StreamingFetcher for SncfFetcher {
     async fn fetch(&self) -> Result<Box<dyn AsyncBufRead + Unpin + Send>, Error> {
-        println!("Fetching SNCF Voyageurs TGV/Intercités/TER data from {}", self.source);
+        println!("[frsv] Fetching SNCF Voyageurs TGV/Intercités/TER data from {}", self.source);
         let client = Client::new();
         let response = client.get(self.url.clone()).send().await?.error_for_status()?;
         let mut reader = response

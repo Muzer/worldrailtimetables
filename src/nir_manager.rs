@@ -3,13 +3,16 @@ use crate::fetcher::StreamingFetcher;
 use crate::importer::SlowStreamingImporter;
 use crate::manager::Manager;
 use crate::nir_fetcher::NirFetcher;
-use crate::schedule::Schedule;
+use crate::schedule::schedule;
 use crate::schedule_manager::ScheduleManager;
 use crate::uk_importer::{CifImporter, CifImporterConfig};
 
 use chrono::offset::Utc;
 use chrono::{Days, NaiveTime, TimeZone};
 use chrono_tz::Europe::London;
+
+use sea_orm::EntityTrait;
+use sea_orm::entity::ActiveValue;
 
 use tokio::time;
 use tokio::time::Duration;
@@ -47,21 +50,24 @@ impl NirManager {
         cif_importer: &mut CifImporter,
     ) -> Result<(), Error> {
         {
-            // lock for writing now, such that there will be no chance of smaller updates being
-            // lost
-            let mut transaction = self.schedule_manager.transactional_write().await;
+            let transaction = self.schedule_manager.transactional_write().await?;
 
-            let mut schedule = Schedule::new(
-                "gbni".to_string(),
-                "United Kingdom — Translink NI Railways".to_string(),
-            );
+            // Clear all the old data — all the deletes are set as cascades so should just need to
+            // clear the database.
+            schedule::Entity::delete_by_id("gbni")
+                .exec(&*transaction)
+                .await?;
+
+            let schedule = schedule::ActiveModelEx {
+                namespace: ActiveValue::Set("gbni".to_owned()),
+                description: ActiveValue::Set("United Kingdom — Translink NI Railways".to_owned()),
+                ..Default::default()
+            }.insert(&*transaction).await?;
 
             let mut reader = nir_fetcher.fetch().await?;
-            schedule = cif_importer.overlay(&mut reader, schedule).await?;
+            cif_importer.overlay(&mut reader, &schedule, &transaction).await?;
 
-            // always replace the schedule
-            transaction.insert("gbni".to_string(), schedule);
-            transaction.commit();
+            transaction.commit().await?;
         }
 
         Ok(())

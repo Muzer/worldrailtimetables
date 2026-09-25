@@ -3,18 +3,21 @@ use crate::fetcher::StreamingFetcher;
 use crate::importer::SlowStreamingImporter;
 use crate::manager::Manager;
 use crate::netex_importer::NetexImporter;
-use crate::schedule::Schedule;
+use crate::schedule::schedule;
 use crate::schedule_manager::ScheduleManager;
 use crate::sncf_fetcher::SncfFetcher;
+
+use async_trait::async_trait;
 
 use chrono::offset::Utc;
 use chrono::{Days, NaiveTime, TimeZone};
 use chrono_tz::Europe::Paris;
 
+use sea_orm::EntityTrait;
+use sea_orm::entity::ActiveValue;
+
 use tokio::time;
 use tokio::time::Duration;
-
-use async_trait::async_trait;
 
 use std::sync::Arc;
 
@@ -37,21 +40,24 @@ impl SncfManager {
         netex_importer: &mut NetexImporter,
     ) -> Result<(), Error> {
         {
-            // lock for writing now, such that there will be no chance of smaller updates being
-            // lost
-            let mut transaction = self.schedule_manager.transactional_write().await;
+            let transaction = self.schedule_manager.transactional_write().await?;
 
-            let mut schedule = Schedule::new(
-                "frsv".to_string(),
-                "France — SNCF Voyageurs".to_string(),
-            );
+            // Clear all the old data — all the deletes are set as cascades so should just need to
+            // clear the database.
+            schedule::Entity::delete_by_id("frsv")
+                .exec(&*transaction)
+                .await?;
+
+            let schedule = schedule::ActiveModelEx {
+                namespace: ActiveValue::Set("frsv".to_owned()),
+                description: ActiveValue::Set("France — SNCF Voyageurs".to_owned()),
+                ..Default::default()
+            }.insert(&*transaction).await?;
 
             let mut reader = sncf_fetcher.fetch().await?;
-            schedule = netex_importer.overlay(&mut reader, schedule).await?;
+            netex_importer.overlay(&mut reader, &schedule, &*transaction).await?;
 
-            // always replace the schedule
-            transaction.insert("frsv".to_string(), schedule);
-            transaction.commit();
+            transaction.commit().await?;
         }
 
         Ok(())

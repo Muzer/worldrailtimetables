@@ -8,13 +8,15 @@ use gtfs_structures::{Gtfs, GtfsReader};
 pub struct GtfsUrlFetcher {
     url: String,
     source: String,
+    namespace: String,
 }
 
 impl GtfsUrlFetcher {
-    pub fn new(url: &str, source: &str) -> Self {
+    pub fn new(url: &str, source: &str, namespace: &str) -> Self {
         Self {
             url: url.to_string(),
             source: source.to_string(),
+            namespace: namespace.to_string(),
         }
     }
 }
@@ -22,7 +24,7 @@ impl GtfsUrlFetcher {
 #[async_trait]
 impl GtfsFetcher for GtfsUrlFetcher {
     async fn fetch(&self) -> Result<Gtfs, Error> {
-        println!("Fetching GTFS from {}", self.source);
+        println!("[{}] Fetching GTFS from {}", self.namespace, self.source);
         Ok(GtfsReader::default()
             .read_shapes(false)
             .unkown_enum_as_default(false)
