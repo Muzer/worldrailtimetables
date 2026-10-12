@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Train {% if train.variable_train.public_id %}{{ train.variable_train.public_id }}{% else %}{{ train.id }}{% endif %} &mdash; World Rail Timetables</title>
+    <title>Train {% if train.variable_train.public_id %}{{ train.variable_train.public_id }}{% else %}{{ train.train_id }}{% endif %} &mdash; World Rail Timetables</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
   </head>
   <body>
@@ -32,7 +32,7 @@
     <div class="container" role="main">
       {% set train_first = train.route | first %}
       {% set train_last = train.route | last %}
-      <h2>{{ namespace }}/{% if train.variable_train.public_id %}{{ train.variable_train.public_id }}{% else %}{{ train.id }}{% endif %} {% if cancelled %} CANCELLED {% endif %}{% if modified %} MODIFIED {% endif %} {% if train.variable_train.name %}&ldquo;{{ train.variable_train.name }}&rdquo;{% endif %} {% if train_first.public_dep %}{{ train_first.public_dep | truncate(length=5, end="") }}{% else %}{{ train_first.working_dep }}{% endif %} {{ locations_by_namespace[namespace][train_first.location_id].name }} to {{ locations_by_namespace[namespace][train_last.location_id].name }} on {{ dates | first | split(pat="T") | first }}</h2>
+      <h2>{{ namespace }}/{% if train.variable_train.public_id %}{{ train.variable_train.public_id }}{% else %}{{ train.train_id }}{% endif %} {% if cancelled %} CANCELLED {% endif %}{% if modified %} MODIFIED {% endif %} {% if train.variable_train.name %}&ldquo;{{ train.variable_train.name }}&rdquo;{% endif %} {% if train_first.public_dep %}{{ train_first.public_dep | truncate(length=5, end="") }}{% else %}{{ train_first.working_dep }}{% endif %} {{ locations_by_namespace[namespace][train_first.location_id].name }} to {{ locations_by_namespace[namespace][train_last.location_id].name }} on {{ dates | first | split(pat="T") | first }}</h2>
       <table class="table table-sm"><thead>
         <tr>
           <th>Station</th>
@@ -69,7 +69,7 @@
             {% set time = location.working_pass %}
           {% endif %}
           <td style="border-bottom: none;"><a href="/location/{{ namespace }}{% if locations_by_namespace[namespace][location.location_id].public_id %}-public{% else %}-internal{% endif %}/{% if locations_by_namespace[namespace][location.location_id].public_id %}{{ locations_by_namespace[namespace][location.location_id].public_id }}{% else %}{{ location.location_id }}{% endif %}/{{ dates[day] | split(pat="T") | first }}/{{ time | truncate(length=5, end="") }}">{{ locations_by_namespace[namespace][location.location_id].name }}{% if locations_by_namespace[namespace][location.location_id].public_id %} [{{ locations_by_namespace[namespace][location.location_id].public_id }}]{% endif %}</a></td>
-          <td style="border-bottom: none;">{% if location.platform %}{{ location.platform }}{% if location.platform_zone %}-{{ location.platform_zone }}{% endif %}{% endif %}</td>
+          <td style="border-bottom: none;">{% if location.platform %}{{ location.platform }}{% if location.platform_zone %}-{{ location.platform_zone }}{% endif %}{% endif %}{% if location.arr_platform %} (Arr: {{ location.arr_platform }}{% if location.arr_platform_zone %}-{{ location.arr_platform_zone }}{% endif %}){% endif %}</td>
           <td style="border-bottom: none;">{% if location.path %}{{ location.path }}&ndash;{% endif %}{% if location.line %}{{ location.line }}{% endif %}</td>
           <td style="border-bottom: none;">{% if location.working_arr %}{% if location.times_approximate %}~{% endif %}{{ location.working_arr }}{% if location.working_arr_day > 0 %} +{{ location.working_arr_day }}{% endif %}{% endif %}</td>
           <td style="border-bottom: none;">{% if location.working_pass %}{% if location.times_approximate %}~{% endif %}{{ location.working_pass }}{% if location.working_pass_day > 0 %} +{{ location.working_pass_day }}{% endif %}{% endif %}</td>
@@ -173,6 +173,9 @@
         {% if train.variable_train.headcode %}
         <li>Headcode: {{ train.variable_train.headcode }}</li>
         {% endif %}
+        {% if train.variable_train.direction %}
+        <li>Direction: {{ train.variable_train.direction }}</li>
+        {% endif %}
         {% if train.variable_train.power_type %}
         <li>Power type: {{ train.variable_train.power_type }}</li>
         {% endif %}
@@ -243,6 +246,9 @@
         {% if accommodation["Unknown"]?.wheelchair or accommodation["FirstPremium"]?.wheelchair or accommodation["First"]?.wheelchair or accommodation["SecondPremium"]?.wheelchair or accommodation["Second"]?.wheelchair or accommodation["Third"]?.wheelchair %}
         <li>Wheelchair classes: {% if accommodation["Unknown"]?.wheelchair %} ? {% endif %}{% if accommodation["FirstPremium"]?.wheelchair %} 1+ {% endif %}{% if accommodation["First"]?.wheelchair %} 1 {% endif %}{% if accommodation["SecondPremium"]?.wheelchair %} 2+ {% endif %}{% if accommodation["Second"]?.wheelchair %} 2 {% endif %}{% if accommodation["Third"]?.wheelchair %} 3 {% endif %}</li>
         {% endif %}
+        {% if accommodation["Unknown"]?.quiet_zone or accommodation["FirstPremium"]?.quiet_zone or accommodation["First"]?.quiet_zone or accommodation["SecondPremium"]?.quiet_zone or accommodation["Second"]?.quiet_zone or accommodation["Third"]?.quiet_zone %}
+        <li>Quiet zone classes: {% if accommodation["Unknown"]?.quiet_zone %} ? {% endif %}{% if accommodation["FirstPremium"]?.quiet_zone %} 1+ {% endif %}{% if accommodation["First"]?.quiet_zone %} 1 {% endif %}{% if accommodation["SecondPremium"]?.quiet_zone %} 2+ {% endif %}{% if accommodation["Second"]?.quiet_zone %} 2 {% endif %}{% if accommodation["Third"]?.quiet_zone %} 3 {% endif %}</li>
+        {% endif %}
         {% if accommodation["Unknown"]?.has_male_only or accommodation["FirstPremium"]?.has_male_only or accommodation["First"]?.has_male_only or accommodation["SecondPremium"]?.has_male_only or accommodation["Second"]?.has_male_only or accommodation["Third"]?.has_male_only %}
         <li>Male only available in classes: {% if accommodation["Unknown"]?.has_male_only %} ? {% endif %}{% if accommodation["FirstPremium"]?.has_male_only %} 1+ {% endif %}{% if accommodation["First"]?.has_male_only %} 1 {% endif %}{% if accommodation["SecondPremium"]?.has_male_only %} 2+ {% endif %}{% if accommodation["Second"]?.has_male_only %} 2 {% endif %}{% if accommodation["Third"]?.has_male_only %} 3 {% endif %}</li>
         {% endif %}
@@ -253,13 +259,13 @@
         <li>Same-sex only available in classes: {% if accommodation["Unknown"]?.has_same_sex_only %} ? {% endif %}{% if accommodation["FirstPremium"]?.has_same_sex_only %} 1+ {% endif %}{% if accommodation["First"]?.has_same_sex_only %} 1 {% endif %}{% if accommodation["SecondPremium"]?.has_same_sex_only %} 2+ {% endif %}{% if accommodation["Second"]?.has_same_sex_only %} 2 {% endif %}{% if accommodation["Third"]?.has_same_sex_only %} 3 {% endif %}</li>
         {% endif %}
         {% if train.variable_train.has_reservations %}
-        <li>Reservations: Seats {{ train.variable_train.seats }}, Groups {{ train.variable_train.groups }}, First class {{ train.variable_train.first_class }}, Second class {{ train.variable_train.second_class }}, Not every class {{ train.variable_train.not_every_class }}, Bicycles {{ train.variable_train.reservations_bicycles }}, Sleepers {{ train.variable_train.sleepers }}, Road Vehicles {{ train.variable_train.reservations_vehicles }}, Wheelchairs {{ train.variable_train.wheelchairs }}, {% if train.variable_train.supplement_charged %}Supplement charged{% elif train.variable_train.supplement_charged == false %}No supplement charged{% endif %}</li>
+        <li>Reservations: Seats {{ train.variable_train.seats }}, Groups {{ train.variable_train.groups }}, First class {{ train.variable_train.first_class }}, Second class {{ train.variable_train.second_class }}, Not every class {{ train.variable_train.not_every_class }}, Bicycles {{ train.variable_train.reservations_bicycles }}, Sleepers {{ train.variable_train.sleepers }}, Road Vehicles {{ train.variable_train.reservations_vehicles }}, Wheelchairs {{ train.variable_train.wheelchairs }}, International {{ train.variable_train.international }}, {% if train.variable_train.supplement_charged %}Supplement charged{% elif train.variable_train.supplement_charged == false %}No supplement charged{% endif %}</li>
         {% endif %}
         {% if train.variable_train.has_catering %}
         <li>Catering: {% if train.variable_train.at_seat_meal %}At seat meal. {% endif %}{% if train.variable_train.bar %}Bar. {% endif %}{% if train.variable_train.bistro %}Bistro. {% endif %}{% if train.variable_train.breakfast_in_coach %}Breakfast served in coach. {% endif %}{% if train.variable_train.buffet %}Buffet service. {% endif %}{% if train.variable_train.coffee_shop %}Coffee shop. {% endif %}{% if train.variable_train.self_service %}Self-service. {% endif %}{% if train.variable_train.trolley %}Trolley. {% endif %}{% if train.variable_train.vending_machine_food %}Vending machine selling food. {% endif %}{% if train.variable_train.vending_machine_drink %}Vending machine selling drink. {% endif %}{% if train.variable_train.mini_bar %}Minibar. {% endif %}{% if train.variable_train.restaurant %}Restaurant car. {% endif %}{% if train.variable_train.first_class_restaurant %}Restaurant for first class passengers. {% endif %}{% if train.variable_train.first_class_meal %}Meal included for first class passengers. {% endif %}{% if train.variable_train.catering_other %}Other. {% endif %}{% if train.variable_train.food_available %}Food available. {% elif train.variable_train.food_available == false %}Food not available. {% endif %}{% if train.variable_train.drink_available %}Drink available. {% elif train.variable_train.drink_available == false %}Drink not available. {% endif %}{% if train.variable_train.hot_food_available %}Hot food available. {% elif train.variable_train.hot_food_available == false %}Hot food not available. {% endif %}{% if train.variable_train.snacks_available %}Snacks available. {% elif train.variable_train.snacks_available == false %}Snacks not available. {% endif %}</li>
         {% endif %}
         {% if train.variable_train.brand %}
-        <li>Brand: {{ train.variable_train.brand }}</li>
+        <li>Brand: {{ train.variable_train.brand.public_id or train.variable_train.brand.id }}{% if train.variable_train.brand.description %}: {{ train.variable_train.brand.description }}{% endif %}</li>
         {% endif %}
         {% if train.variable_train.name %}
         <li>Name: {{ train.variable_train.name }}</li>
@@ -282,7 +288,7 @@
         <li>Toilets: {% if train.variable_train.toilet %}Toilet {% endif %}{% if train.variable_train.sink %}Sink {% endif %}{% if train.variable_train.disabled_toilet %}Disabled toilet {% endif %}{% if train.variable_train.shower %}Shower {% endif %}{% if train.variable_train.changing %}Changing {% endif %}{% if train.variable_train.baby_changing %}Baby changing {% endif %}{% if train.variable_train.disabled_baby_changing %}Disabled baby changing {% endif %}{% if train.variable_train.shoe_shiner %}Shoe shiner {% endif %}{% if train.variable_train.toilets_other %}Other {% endif %}</li>
         {% endif %}
         {% if train.variable_train.has_luggage %}
-        <li>Luggage: {% if train.variable_train.bag_storage %}Bag storage {% endif %}{% if train.variable_train.racks %}Luggage Racks {% endif %}{% if train.variable_train.skis %}Skis {% endif %}{% if train.variable_train.bag_storage %}Skis on rear {% endif %}{% if train.variable_train.extra_large_racks %}Extra large luggage racks {% endif %}{% if train.variable_train.van %}Luggage van {% endif %}{% if train.variable_train.luggage_bicycles %}Bicycles allowed {% elif train.variable_train.luggage_bicycles == false %}Bicycles not allowed{% endif %}{% if train.variable_train.bicycles_in_van %}Bicycles in luggage van {% endif %}{% if train.variable_train.bicycles_in_carriage %}Bicycles in carriage {% endif %}{% if train.variable_train.pushchairs %}Pushchairs {% endif %}{% if train.variable_train.luggage_vehicles %}Vehicles {% endif %}</li>
+        <li>Luggage: {% if train.variable_train.bag_storage %}Bag storage {% endif %}{% if train.variable_train.racks %}Luggage Racks {% endif %}{% if train.variable_train.skis %}Skis {% endif %}{% if train.variable_train.bag_storage %}Skis on rear {% endif %}{% if train.variable_train.extra_large_racks %}Extra large luggage racks {% endif %}{% if train.variable_train.van %}Luggage van {% endif %}{% if train.variable_train.luggage_bicycles %}Bicycles allowed {% elif train.variable_train.luggage_bicycles == false %}Bicycles not allowed {% endif %}{% if train.variable_train.bicycles_in_van %}Bicycles in luggage van {% endif %}{% if train.variable_train.bicycles_in_carriage %}Bicycles in carriage {% endif %}{% if train.variable_train.limited_bicycles %}Limited bicycle spaces {% endif %}{% if train.variable_train.pushchairs %}Pushchairs {% endif %}{% if train.variable_train.luggage_vehicles %}Vehicles {% endif %}</li>
         {% endif %}
         {% if train.variable_train.has_families %}
         <li>Families: {% if train.variable_train.children_facilities %}Facilities for children {% endif %}{% if train.variable_train.military_family_facilities %}Facilities for military families {% endif %}{% if train.variable_train.nursery %}Nursery {% endif %}</li>
@@ -296,6 +302,15 @@
         {% if train.variable_train.has_passenger_information %}
         <li>Passenger information: {% if train.variable_train.next_stop_indication %}Next stop indication {% endif %}{% if train.variable_train.stop_announcements %}Stop announcements {% endif %}{% if train.variable_train.information_display %}Information display {% endif %}{% if train.variable_train.realtime_connections %}Realtime connections {% endif %}{% if train.variable_train.audible_information %}Audible information {% endif %}{% if train.variable_train.hearing_impaired_audible_information %}Audible information with hearing-impaired accessibility features {% endif %}{% if train.variable_train.visible_information %}Visible information {% endif %}{% if train.variable_train.visually_impaired_visible_information %}Visible information with visually-impaired accessibility features {% endif %}{% if train.variable_train.large_print_timetable.next_stop_indication %}Large print timetable {% endif %}{% if train.variable_train.passenger_information_other %}Other {% endif %}</li>
         {% endif %}
+        {% if train.variable_train.has_fares %}
+        <li>Fares: {% if train.variable_train.non_standard_fares %}Non-standard fares {% endif %}{% if train.variable_train.special_ticket_required %}Special ticket required {% endif %}{% if train.variable_train.supplement_required %}Supplement required {% endif %}{% if train.variable_train.supplement_required_part %}Supplement required for part of the journey {% endif %}{% if train.variable_train.national_rights_apply %}National rights apply {% elif train.variable_train.national_rights_apply == false %}National rights do not apply {% endif %}{% if train.variable_train.attraction_visitors_only %}For passengers visiting another attraction only {% endif %}{% if train.variable_train.supplement_required_rail_passes %}Supplement required for holders of rail passes {% endif %}</li>
+        {% endif %}
+        {% if train.variable_train.has_occupancy %}
+        <li>Occupancy: {% if train.variable_train.very_busy %}Likely to be very busy {% endif %}</li>
+        {% endif %}
+        {% if train.variable_train.has_boarding_information %}
+        <li>Boarding information: {% if train.variable_train.international_border_check %}Passengers must pass through an international border check {% endif %}</li>
+        {% endif %}
       </ul>
       {% for location in train.route %}
         {% if location.change_en_route %}
@@ -307,6 +322,9 @@
             {% endif %}
             {% if location.change_en_route.headcode %}
             <li>Headcode: {{ location.change_en_route.headcode }}</li>
+            {% endif %}
+            {% if location.change_en_route.direction %}
+            <li>Direction: {{ location.change_en_route.direction }}</li>
             {% endif %}
             {% if location.change_en_route.power_type %}
             <li>Power type: {{ location.change_en_route.power_type }}</li>
@@ -378,6 +396,9 @@
             {% if accommodation["Unknown"]?.wheelchair or accommodation["FirstPremium"]?.wheelchair or accommodation["First"]?.wheelchair or accommodation["SecondPremium"]?.wheelchair or accommodation["Second"]?.wheelchair or accommodation["Third"]?.wheelchair %}
             <li>Wheelchair classes: {% if accommodation["Unknown"]?.wheelchair %} ? {% endif %}{% if accommodation["FirstPremium"]?.wheelchair %} 1+ {% endif %}{% if accommodation["First"]?.wheelchair %} 1 {% endif %}{% if accommodation["SecondPremium"]?.wheelchair %} 2+ {% endif %}{% if accommodation["Second"]?.wheelchair %} 2 {% endif %}{% if accommodation["Third"]?.wheelchair %} 3 {% endif %}</li>
             {% endif %}
+            {% if accommodation["Unknown"]?.quiet_zone or accommodation["FirstPremium"]?.quiet_zone or accommodation["First"]?.quiet_zone or accommodation["SecondPremium"]?.quiet_zone or accommodation["Second"]?.quiet_zone or accommodation["Third"]?.quiet_zone %}
+            <li>Quiet zone classes: {% if accommodation["Unknown"]?.quiet_zone %} ? {% endif %}{% if accommodation["FirstPremium"]?.quiet_zone %} 1+ {% endif %}{% if accommodation["First"]?.quiet_zone %} 1 {% endif %}{% if accommodation["SecondPremium"]?.quiet_zone %} 2+ {% endif %}{% if accommodation["Second"]?.quiet_zone %} 2 {% endif %}{% if accommodation["Third"]?.quiet_zone %} 3 {% endif %}</li>
+            {% endif %}
             {% if accommodation["Unknown"]?.has_male_only or accommodation["FirstPremium"]?.has_male_only or accommodation["First"]?.has_male_only or accommodation["SecondPremium"]?.has_male_only or accommodation["Second"]?.has_male_only or accommodation["Third"]?.has_male_only %}
             <li>Male only available in classes: {% if accommodation["Unknown"]?.has_male_only %} ? {% endif %}{% if accommodation["FirstPremium"]?.has_male_only %} 1+ {% endif %}{% if accommodation["First"]?.has_male_only %} 1 {% endif %}{% if accommodation["SecondPremium"]?.has_male_only %} 2+ {% endif %}{% if accommodation["Second"]?.has_male_only %} 2 {% endif %}{% if accommodation["Third"]?.has_male_only %} 3 {% endif %}</li>
             {% endif %}
@@ -388,13 +409,13 @@
             <li>Same-sex only available in classes: {% if accommodation["Unknown"]?.has_same_sex_only %} ? {% endif %}{% if accommodation["FirstPremium"]?.has_same_sex_only %} 1+ {% endif %}{% if accommodation["First"]?.has_same_sex_only %} 1 {% endif %}{% if accommodation["SecondPremium"]?.has_same_sex_only %} 2+ {% endif %}{% if accommodation["Second"]?.has_same_sex_only %} 2 {% endif %}{% if accommodation["Third"]?.has_same_sex_only %} 3 {% endif %}</li>
             {% endif %}
             {% if location.change_en_route.has_reservations %}
-            <li>Reservations: Seats {{ location.change_en_route.seats }}, Groups {{ location.change_en_route.groups }}, First class {{ location.change_en_route.first_class }}, Second class {{ location.change_en_route.second_class }}, Not every class {{ location.change_en_route.not_every_class }}, Bicycles {{ location.change_en_route.reservations_bicycles }}, Sleepers {{ location.change_en_route.sleepers }}, Road Vehicles {{ location.change_en_route.reservations_vehicles }}, Wheelchairs {{ location.change_en_route.wheelchairs }}, {% if location.change_en_route.supplement_charged %}Supplement charged{% elif location.change_en_route.supplement_charged == false %}No supplement charged{% endif %}</li>
+            <li>Reservations: Seats {{ location.change_en_route.seats }}, Groups {{ location.change_en_route.groups }}, First class {{ location.change_en_route.first_class }}, Second class {{ location.change_en_route.second_class }}, Not every class {{ location.change_en_route.not_every_class }}, Bicycles {{ location.change_en_route.reservations_bicycles }}, Sleepers {{ location.change_en_route.sleepers }}, Road Vehicles {{ location.change_en_route.reservations_vehicles }}, Wheelchairs {{ location.change_en_route.wheelchairs }}, International {{ location.change_en_route.international }}, {% if location.change_en_route.supplement_charged %}Supplement charged{% elif location.change_en_route.supplement_charged == false %}No supplement charged{% endif %}</li>
             {% endif %}
             {% if location.change_en_route.has_catering %}
             <li>Catering: {% if location.change_en_route.at_seat_meal %}At seat meal. {% endif %}{% if location.change_en_route.bar %}Bar. {% endif %}{% if location.change_en_route.bistro %}Bistro. {% endif %}{% if location.change_en_route.breakfast_in_coach %}Breakfast served in coach. {% endif %}{% if location.change_en_route.buffet %}Buffet service. {% endif %}{% if location.change_en_route.coffee_shop %}Coffee shop. {% endif %}{% if location.change_en_route.self_service %}Self-service. {% endif %}{% if location.change_en_route.trolley %}Trolley. {% endif %}{% if location.change_en_route.vending_machine_food %}Vending machine selling food. {% endif %}{% if location.change_en_route.vending_machine_drink %}Vending machine selling drink. {% endif %}{% if location.change_en_route.mini_bar %}Minibar. {% endif %}{% if location.change_en_route.restaurant %}Restaurant car. {% endif %}{% if location.change_en_route.first_class_restaurant %}Restaurant for first class passengers. {% endif %}{% if location.change_en_route.first_class_meal %}Meal included for first class passengers. {% endif %}{% if location.change_en_route.catering_other %}Other. {% endif %}{% if location.change_en_route.food_available %}Food available. {% elif location.change_en_route.food_available == false %}Food not available. {% endif %}{% if location.change_en_route.drink_available %}Drink available. {% elif location.change_en_route.drink_available == false %}Drink not available. {% endif %}{% if location.change_en_route.hot_food_available %}Hot food available. {% elif location.change_en_route.hot_food_available == false %}Hot food not available. {% endif %}{% if location.change_en_route.snacks_available %}Snacks available. {% elif location.change_en_route.snacks_available == false %}Snacks not available. {% endif %}</li>
             {% endif %}
             {% if location.change_en_route.brand %}
-            <li>Brand: {{ location.change_en_route.brand }}</li>
+            <li>Brand: {{ location.change_en_route.brand.public_id or location.change_en_route.brand.id }}{% if location.change_en_route.brand.description %}: {{ location.change_en_route.brand.description }}{% endif %}</li>
             {% endif %}
             {% if location.change_en_route.name %}
             <li>Name: {{ location.change_en_route.name }}</li>
@@ -417,7 +438,7 @@
             <li>Toilets: {% if location.change_en_route.toilet %}Toilet {% endif %}{% if location.change_en_route.sink %}Sink {% endif %}{% if location.change_en_route.disabled_toilet %}Disabled toilet {% endif %}{% if location.change_en_route.shower %}Shower {% endif %}{% if location.change_en_route.changing %}Changing {% endif %}{% if location.change_en_route.baby_changing %}Baby changing {% endif %}{% if location.change_en_route.disabled_baby_changing %}Disabled baby changing {% endif %}{% if location.change_en_route.shoe_shiner %}Shoe shiner {% endif %}{% if location.change_en_route.toilets_other %}Other {% endif %}</li>
             {% endif %}
             {% if location.change_en_route.has_luggage %}
-            <li>Luggage: {% if location.change_en_route.bag_storage %}Bag storage {% endif %}{% if location.change_en_route.racks %}Luggage Racks {% endif %}{% if location.change_en_route.skis %}Skis {% endif %}{% if location.change_en_route.bag_storage %}Skis on rear {% endif %}{% if location.change_en_route.extra_large_racks %}Extra large luggage racks {% endif %}{% if location.change_en_route.van %}Luggage van {% endif %}{% if location.change_en_route.luggage_bicycles %}Bicycles allowed {% elif location.change_en_route.bicycles == false %}Bicycles not allowed{% endif %}{% if location.change_en_route.bicycles_in_van %}Bicycles in luggage van {% endif %}{% if location.change_en_route.bicycles_in_carriage %}Bicycles in carriage {% endif %}{% if location.change_en_route.pushchairs %}Pushchairs {% endif %}{% if location.change_en_route.luggage_vehicles %}Vehicles {% endif %}</li>
+            <li>Luggage: {% if location.change_en_route.bag_storage %}Bag storage {% endif %}{% if location.change_en_route.racks %}Luggage Racks {% endif %}{% if location.change_en_route.skis %}Skis {% endif %}{% if location.change_en_route.bag_storage %}Skis on rear {% endif %}{% if location.change_en_route.extra_large_racks %}Extra large luggage racks {% endif %}{% if location.change_en_route.van %}Luggage van {% endif %}{% if location.change_en_route.luggage_bicycles %}Bicycles allowed {% elif location.change_en_route.bicycles == false %}Bicycles not allowed{% endif %}{% if location.change_en_route.bicycles_in_van %}Bicycles in luggage van {% endif %}{% if location.change_en_route.bicycles_in_carriage %}Bicycles in carriage {% endif %}{% if location.change_en_route.limited_bicycles %}Limited bicycles {% endif %}{% if location.change_en_route.pushchairs %}Pushchairs {% endif %}{% if location.change_en_route.luggage_vehicles %}Vehicles {% endif %}</li>
             {% endif %}
             {% if location.change_en_route.has_families %}
             <li>Families: {% if location.change_en_route.children_facilities %}Facilities for children {% endif %}{% if location.change_en_route.military_family_facilities %}Facilities for military families {% endif %}{% if location.change_en_route.nursery %}Nursery {% endif %}</li>
@@ -430,6 +451,15 @@
             {% endif %}
             {% if location.change_en_route.has_passenger_information %}
             <li>Passenger information: {% if location.change_en_route.next_stop_indication %}Next stop indication {% endif %}{% if location.change_en_route.stop_announcements %}Stop announcements {% endif %}{% if location.change_en_route.information_display %}Information display {% endif %}{% if location.change_en_route.realtime_connections %}Realtime connections {% endif %}{% if location.change_en_route.audible_information %}Audible information {% endif %}{% if location.change_en_route.hearing_impaired_audible_information %}Audible information with hearing-impaired accessibility features {% endif %}{% if location.change_en_route.visible_information %}Visible information {% endif %}{% if location.change_en_route.visually_impaired_visible_information %}Visible information with visually-impaired accessibility features {% endif %}{% if location.change_en_route.large_print_timetable.next_stop_indication %}Large print timetable {% endif %}{% if location.change_en_route.passenger_information_other %}Other {% endif %}</li>
+            {% endif %}
+            {% if location.change_en_route.has_fares %}
+            <li>Fares: {% if location.change_en_route.non_standard_fares %}Non-standard fares {% endif %}{% if location.change_en_route.special_ticket_required %}Special ticket required {% endif %}{% if location.change_en_route.supplement_required %}Supplement required {% endif %}{% if location.change_en_route.supplement_required_part %}Supplement required for part of the journey {% endif %}{% if location.change_en_route.national_rights_apply %}National rights apply {% elif location.change_en_route.national_rights_apply == false %}National rights do not apply {% endif %}{% if location.change_en_route.attraction_visitors_only %}For passengers visiting another attraction only {% endif %}{% if location.change_en_route.supplement_required_rail_passes %}Supplement required for holders of rail passes {% endif %}</li>
+            {% endif %}
+            {% if location.change_en_route.has_occupancy %}
+            <li>Occupancy: {% if location.change_en_route.very_busy %}Likely to be very busy {% endif %}</li>
+            {% endif %}
+            {% if location.change_en_route.has_boarding_information %}
+            <li>Boarding information: {% if location.change_en_route.international_border_check %}Passengers must pass through an international border check {% endif %}</li>
             {% endif %}
           </ul>
         {% endif %}

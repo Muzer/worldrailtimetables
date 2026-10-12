@@ -142,6 +142,8 @@ impl NrManager {
                     .unwrap();
                 i = (i + 1) % 7;
             }
+
+            transaction.commit().await?;
         }
 
         Ok(())

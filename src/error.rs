@@ -1,17 +1,29 @@
 use crate::gtfs_importer::GtfsImportError;
+use crate::gtfs_rt_importer::GtfsRtError;
+use crate::iff_importer::IffError;
 use crate::netex_importer::NetexError;
 //use crate::nir_fetcher::{CkanError, NirFetcherError};
 use crate::nr_vstp_subscriber::NrVstpError;
 use crate::sncf_fetcher::SncfFetcherError;
 use crate::uk_importer::{CifError, NrJsonError};
 use crate::webui::WebUiError;
+
 use anyhow;
+
 use config_file::ConfigFileError;
+
+use prost::DecodeError;
+
 use quick_xml::de::DeError;
+
 use rc_zip_tokio::rc_zip::error::Error as RcZipError;
+
 use reqwest;
+
 use sea_orm::DbErr;
+
 use serde_path_to_error::Error as SerdePathToErrorError;
+
 use tokio::task::JoinError;
 
 use std::fmt;
@@ -34,10 +46,13 @@ pub enum Error {
     GtfsError(gtfs_structures::error::Error),
     JoinError(JoinError),
     GtfsImportError(GtfsImportError),
+    GtfsRtError(GtfsRtError),
     SncfFetcherError(SncfFetcherError),
     //CkanError(CkanError),
     //NirFetcherError(NirFetcherError),
     NetexError(NetexError),
+    ProstDecodeError(DecodeError),
+    IffError(IffError),
 }
 
 impl fmt::Display for Error {
@@ -59,10 +74,13 @@ impl fmt::Display for Error {
             Error::GtfsError(x) => write!(f, "WorldRailTimetables error: {}", x),
             Error::JoinError(x) => write!(f, "WorldRailTimetables error: {}", x),
             Error::GtfsImportError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::GtfsRtError(x) => write!(f, "WorldRailTimetables error: {}", x),
             Error::SncfFetcherError(x) => write!(f, "WorldRailTimetables error: {}", x),
             //Error::CkanError(x) => write!(f, "WorldRailTimetables error: {}", x),
             //Error::NirFetcherError(x) => write!(f, "WorldRailTimetables error: {}", x),
             Error::NetexError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::ProstDecodeError(x) => write!(f, "WorldRailTimetables error: {}", x),
+            Error::IffError(x) => write!(f, "WorldRailTimetables error: {}", x),
         }
     }
 }
@@ -157,6 +175,12 @@ impl From<GtfsImportError> for Error {
     }
 }
 
+impl From<GtfsRtError> for Error {
+    fn from(error: GtfsRtError) -> Self {
+        Error::GtfsRtError(error)
+    }
+}
+
 impl From<SncfFetcherError> for Error {
     fn from(error: SncfFetcherError) -> Self {
         Error::SncfFetcherError(error)
@@ -178,5 +202,17 @@ impl From<NirFetcherError> for Error {
 impl From<NetexError> for Error {
     fn from(error: NetexError) -> Self {
         Error::NetexError(error)
+    }
+}
+
+impl From<DecodeError> for Error {
+    fn from(error: DecodeError) -> Self {
+        Error::ProstDecodeError(error)
+    }
+}
+
+impl From<IffError> for Error {
+    fn from(error: IffError) -> Self {
+        Error::IffError(error)
     }
 }

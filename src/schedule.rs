@@ -2,6 +2,8 @@ use sea_orm::entity::prelude::*;
 
 use serde::Serialize;
 
+use std::fmt::{Display, Formatter, Result as FmtResult};
+
 // Note: throughout this file there is an apparent inconsistency with the way primary keys are used.
 // This is, at least somewhat, intentional — some entities are expected to correspond 1:1 with an
 // entity from the source schedule, in which case the primary key will be the source ID (as a
@@ -59,6 +61,9 @@ pub mod schedule {
         // Relationship to vehicles in this namespace
         #[sea_orm(has_many)]
         pub train_vehicles: HasMany<super::train_vehicle::Entity>,
+        // Relationship to brands in this namespace
+        #[sea_orm(has_many)]
+        pub brands: HasMany<super::brand::Entity>,
     }
 
     #[async_trait]
@@ -102,6 +107,44 @@ pub mod location {
         // (and potentially stopping)
         #[sea_orm(has_many)]
         pub train_locations: HasMany<super::train_location::Entity>,
+        // Relationship to Sublocations, which represent smaller fractions of a location to be used
+        // as reference data for schedules that need it
+        #[sea_orm(has_many)]
+        pub sublocations: HasMany<super::sublocation::Entity>,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod sublocation {
+    use sea_orm::entity::prelude::*;
+
+    use serde::Serialize;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, DeriveEntityModel, Eq, PartialEq, Serialize)]
+    #[sea_orm(table_name = "sublocations")]
+    pub struct Model {
+        // Represents a sublocation (eg platform, platform zone) and the parent location it ties to.
+        // Currently only used as reference data to allow realtime updates to tie back into their
+        // parent locations.
+
+        // The ID of the sublocation from the source schedule
+        #[sea_orm(primary_key)]
+        pub id: String,
+        // this is defined by me to uniquely identify the schedule source
+        #[sea_orm(primary_key)]
+        pub namespace: String,
+        // The parent location
+        pub location_id: String,
+        // The platform number to be used when this location is found
+        pub platform: Option<String>,
+        // Platform zone — this indicates which fraction of a longer platform a train will stop at
+        pub platform_zone: Option<String>,
+
+        // Relationship to the Location to which this Sublocation belongs
+        #[sea_orm(belongs_to, from = "(location_id, namespace)", to = "(id, namespace)", on_delete = "Cascade")]
+        pub location: BelongsTo<super::location::Entity>,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
@@ -300,6 +343,16 @@ pub enum TrainType {
     ServiceBus,
     // A bus replacing a train
     ReplacementBus,
+    // A bus which runs in response to customer demand
+    OnDemandBus,
+    // A replacement bus which runs in response to customer demand
+    OnDemandReplacementBus,
+    // A replacement bus which stops at many stations
+    StoppingReplacementBus,
+    // A replacement bus which bypasses many stations
+    ExpressReplacementBus,
+    // A bus which is wheelchair-accesible
+    AccessibleBus,
     // A freight train
     Freight,
     // A departmental (ie for internal railway use) freight train
@@ -388,6 +441,8 @@ pub enum TrainType {
     // A passenger train that runs at least some portion of its route at high speeds, as defined by
     // the EU being above 200km/h for upgraded lines and 250km/h on newly built lines
     HighSpeedPassenger,
+    // An international train that runs at high speeds as above
+    InternationalHighSpeedPassenger,
     // A passenger train that runs to suburban destinations, eg commuter towns
     SuburbanPassenger,
     // A passenger train that runs on regional routes, usually within a single region and with many
@@ -448,6 +503,8 @@ pub enum TrainType {
     Metro,
     // An empty passenger train for a metro service
     EmptyMetro,
+    // A rail replacement metro service
+    ReplacementMetro,
     // A train conveying post/mail
     Post,
     // A train conveying parcels
@@ -464,6 +521,8 @@ pub enum TrainType {
     // A tram, that is a train with a substantial portion of street running, which (depending on
     // country) may be operated under different regulations, and is sometimes driven on sight
     Tram,
+    // A rail replacement tram service
+    ReplacementTram,
     // A tram hauled by a cable under the road
     CableTram,
     // An elevated cable from which cars hang, for example up a mountain
@@ -500,6 +559,8 @@ pub enum TrainType {
     CommuterCoach,
     // A private taxi
     Taxi,
+    // A rail replacement taxi
+    ReplacementTaxi,
     // An aircraft
     Air,
     // An unknown form of transport
@@ -690,6 +751,44 @@ pub mod train_operator {
         // ID will be used instead.
         pub public_id: Option<String>,
         // Textual description (eg human-readable name) of the operator.
+        pub description: Option<String>,
+
+        // Relationship to VariableTrains that run with this operator
+        #[sea_orm(has_many)]
+        pub variable_trains: HasMany<super::variable_train::Entity>,
+        // Relationship to Lines that are run by this operator
+        #[sea_orm(has_many)]
+        pub lines: HasMany<super::line::Entity>,
+        // Relationship to the parent Schedule
+        #[sea_orm(belongs_to, from = "namespace", to = "namespace", on_delete = "Cascade")]
+        pub schedule: BelongsTo<super::schedule::Entity>,
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod brand {
+    use sea_orm::entity::prelude::*;
+
+    use serde::Serialize;
+
+    #[sea_orm::model]
+    #[derive(Clone, Debug, DeriveEntityModel, Eq, PartialEq, Serialize)]
+    #[sea_orm(table_name = "brands")]
+    pub struct Model {
+        // Represents the brand of a given train at a given point. This is often used to classify
+        // subgroups of service, depending on the source data.
+
+        // ID from the source schedule
+        #[sea_orm(primary_key)]
+        pub id: String,
+        // namespace of the source schedule
+        #[sea_orm(primary_key)]
+        pub namespace: String,
+        // Public-facing ID of the brand, if there is one. Generally if left empty the internal ID
+        // will be used instead. In many countries, placed before train numbers for display.
+        pub public_id: Option<String>,
+        // Textual description (eg human-readable name) of the brand.
         pub description: Option<String>,
 
         // Relationship to VariableTrains that run with this operator
@@ -938,6 +1037,10 @@ pub mod train_location {
         pub platform: Option<String>,
         // Platform zone — this indicates which fraction of a longer platform a train will stop at
         pub platform_zone: Option<String>,
+        // Arrival platform number, provided in some data sources as different to departure.
+        pub arr_platform: Option<String>,
+        // Arrival platform zone
+        pub arr_platform_zone: Option<String>,
         // Code of the line the train will use after departure from this location
         pub line: Option<String>,
         // Code of the line the train will have used to enter this location
@@ -1313,6 +1416,8 @@ pub mod accommodation_types {
         // Contains same-sex-only accommodation (traditionally applies to sleeping compartments, but
         // not couchettes, when booked by strangers)
         pub has_same_sex_only: Option<bool>,
+        // Has a quiet zone
+        pub quiet_zone: Option<bool>,
 
         // Relationship to the VariableTrain to which this applies
         #[sea_orm(belongs_to, from = "variable_train_id", to = "id", on_delete = "Cascade")]
@@ -1345,6 +1450,8 @@ pub mod line {
         // Namespace of the line
         #[sea_orm(primary_key)]
         pub namespace: String,
+        // Operator responsible for this line. Not always necessarily present
+        pub operator_id: Option<String>,
         // Public-facing ID of the line, if one exists. This may be the line number.
         pub public_id: Option<String>,
         // Human-readable name of the line
@@ -1357,6 +1464,8 @@ pub mod line {
         pub background_colour: Option<u32>,
         // Contrasting colour of text to be used on top of the line colour
         pub foreground_colour: Option<u32>,
+        // The type of service (train or otherwise). Not always necessarily present
+        pub train_type: Option<super::TrainType>,
 
         // Variable trains associated with this line — opposite to usual relationship direction as a
         // Line is a source entity and not one generated per-VariableTrain.
@@ -1365,9 +1474,39 @@ pub mod line {
         // Relationship to the parent Schedule
         #[sea_orm(belongs_to, from = "namespace", to = "namespace", on_delete = "Cascade")]
         pub schedule: BelongsTo<super::schedule::Entity>,
+        // Relationship to the Operator of this line
+        #[sea_orm(belongs_to, from = "(operator_id, namespace)", to = "(id, namespace)", on_delete = "Cascade")]
+        pub operator: BelongsTo<Option<super::train_operator::Entity>>,
     }
 
     impl ActiveModelBehavior for ActiveModel {}
+}
+
+#[derive(Clone, Copy, Debug, DeriveActiveEnum, EnumIter, Eq, PartialEq, Serialize)]
+#[sea_orm(rs_type = "String", db_type = "String(StringLen::None)", rename_all = "PascalCase")]
+pub enum Direction {
+    // Represents a direction of travel for a trip
+
+    // Away from an important place (== outbound, down, odd)
+    Outbound,
+    // Towards an important place (== inbound, up, even)
+    Inbound,
+
+    // Clockwise in a circle (outer rail for left-hand running)
+    Clockwise,
+    // Anticlockwise in a circle (inner rail for left-hand running)
+    Anticlockwise,
+}
+
+impl Display for Direction {
+    fn fmt(&self, f: &mut Formatter) -> FmtResult {
+        match self {
+            Direction::Outbound => write!(f, "OUTBOUND"),
+            Direction::Inbound => write!(f, "INBOUND"),
+            Direction::Clockwise => write!(f, "CLOCKWISE"),
+            Direction::Anticlockwise => write!(f, "ANTICLOCKWISE"),
+        }
+    }
 }
 
 pub mod variable_train {
@@ -1404,6 +1543,8 @@ pub mod variable_train {
         pub line_id: Option<String>,
         // ID of the operator of this train, if available
         pub operator_id: Option<String>,
+        // ID of the brand of this train, if available.
+        pub brand_id: Option<String>,
         // The type of service (train or otherwise)
         pub train_type: super::TrainType,
         // The public-facing ID of the train. "Public" may be a stretch in some systems as sometimes
@@ -1422,9 +1563,6 @@ pub mod variable_train {
         // Indicates the maximum speed in m/s the train is timed to run at. Again may or may not
         // correspond to the train's actual maximum speed on this route.
         pub timing_speed_m_per_s: Option<f64>,
-        // Indicates the brand the train runs as; this may differ from the operator. Brands are
-        // often used for subgroups of service.
-        pub brand: Option<String>,
         // Indicates the name of the train; this should be used for individually-named trains on
         // networks that still do this.
         pub name: Option<String>,
@@ -1433,6 +1571,8 @@ pub mod variable_train {
         // Whether or not the train is accessible to wheelchair users, regardless of actual
         // facilities available.
         pub wheelchair_accessible: Option<bool>,
+        // The direction of the trip.
+        pub direction: Option<super::Direction>,
 
         // OPERATING CHARACTERISTICS (optional)
         // Represents a set of characteristics affecting the operation of the train (as opposed to
@@ -1490,6 +1630,8 @@ pub mod variable_train {
         pub reservations_vehicles: Option<super::ReservationField>,
         // The nature of reservations for wheelchair users on this train
         pub wheelchairs: Option<super::ReservationField>,
+        // The nature of reservations for international travel, as distinct from domestic
+        pub international: Option<super::ReservationField>,
         // Whether or not a supplement is charged for reservations
         pub supplement_charged: Option<bool>,
 
@@ -1585,6 +1727,8 @@ pub mod variable_train {
         pub bicycles_in_van: Option<bool>,
         // Conveyance of bicycles possible in the carriage
         pub bicycles_in_carriage: Option<bool>,
+        // Limited conveyance of bicycles possible
+        pub limited_bicycles: Option<bool>,
         // Conveyance of pushchairs possible
         pub pushchairs: Option<bool>,
         // Conveyance of automotive vehicles possible
@@ -1684,6 +1828,43 @@ pub mod variable_train {
         // Another form of information is available
         pub passenger_information_other: Option<bool>,
 
+        // FARES (optional)
+        // Represents information about the fares charged for travel on this train.
+        // Whether or not fares data is available
+        pub has_fares: bool,
+        // Whether or not non-standard fares are charged for this train, in the context of a
+        // standardised fares system
+        pub non_standard_fares: Option<bool>,
+        // Whether or not a special ticket (one not obtainable through the usual means) is required
+        pub special_ticket_required: Option<bool>,
+        // Whether or not a supplement is charged to travel on this train, besides the normal fare
+        // and the reservation charge (if applicable)
+        pub supplement_required: Option<bool>,
+        // Whether or not a supplement is charged to travel on part of this train's route. This is
+        // currently used for the Schiphol-Rotterdam supplement.
+        pub supplement_required_part: Option<bool>,
+        // Whether or not standard national passenger rights apply to fares valid on this train
+        pub national_rights_apply: Option<bool>,
+        // Whether or not the train is only available to passengers of another attraction
+        pub attraction_visitors_only: Option<bool>,
+        // Whether or not a supplement is charged to rail pass holders to be able to travel on this
+        // train (most notably Interrail/Eurail).
+        pub supplement_required_rail_passes: Option<bool>,
+
+        // OCCUPANCY (optional)
+        // Represents information about the expected occupancy of this train.
+        // Whether or not occupancy data is available
+        pub has_occupancy: bool,
+        // Whether or not the train is expected to be very busy
+        pub very_busy: Option<bool>,
+
+        // BOARDING INFORMATION (optional)
+        // Represents information about unusual circumstances around boarding this train.
+        // Whether or not boarding information data is available
+        pub has_boarding_information: bool,
+        // Passengers are required to pass through an international border check to board this train
+        pub international_border_check: Option<bool>,
+
         // Relationship to VariableTrains for actual allocations. Indicates the rolling stock
         // allocated to run this service in the schedule.
         #[sea_orm(
@@ -1714,6 +1895,9 @@ pub mod variable_train {
         // Relationship to the Operator of this train
         #[sea_orm(belongs_to, from = "(operator_id, namespace)", to = "(id, namespace)", on_delete = "Cascade")]
         pub operator: BelongsTo<Option<super::train_operator::Entity>>,
+        // Relationship to the Brand of this train
+        #[sea_orm(belongs_to, from = "(brand_id, namespace)", to = "(id, namespace)", on_delete = "Cascade")]
+        pub brand: BelongsTo<Option<super::brand::Entity>>,
         // Relationship to parent TrainVariant
         #[sea_orm(belongs_to, from = "train_variant_id", to = "id", on_delete = "Cascade")]
         pub train_variant: BelongsTo<Option<super::train_variant::Entity>>,
@@ -1774,6 +1958,8 @@ pub mod variable_train {
         pub vehicles: super::ReservationField,
         // The nature of reservations for wheelchair users on this train
         pub wheelchairs: super::ReservationField,
+        // The nature of reservations for international travel, as distinct from domestic
+        pub international: super::ReservationField,
         // Whether or not a supplement is charged for reservations
         pub supplement_charged: Option<bool>,
     }
@@ -1863,6 +2049,8 @@ pub mod variable_train {
         pub bicycles_in_van: Option<bool>,
         // Conveyance of bicycles possible in the carriage
         pub bicycles_in_carriage: Option<bool>,
+        // Limited conveyance of bicycles possible
+        pub limited_bicycles: Option<bool>,
         // Conveyance of pushchairs possible
         pub pushchairs: Option<bool>,
         // Conveyance of automotive vehicles possible
@@ -1953,6 +2141,40 @@ pub mod variable_train {
         pub other: Option<bool>,
     }
 
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct Fares {
+        // Whether or not non-standard fares are charged for this train, in the context of a
+        // standardised fares system
+        pub non_standard_fares: Option<bool>,
+        // Whether or not a special ticket (one not obtainable through the usual means) is required
+        pub special_ticket_required: Option<bool>,
+        // Whether or not a supplement is charged to travel on this train, besides the normal fare
+        // and the reservation charge (if applicable)
+        pub supplement_required: Option<bool>,
+        // Whether or not a supplement is charged to travel on part of this train's route. This is
+        // currently used for the Schiphol-Rotterdam supplement.
+        pub supplement_required_part: Option<bool>,
+        // Whether or not standard national passenger rights apply to fares valid on this train
+        pub national_rights_apply: Option<bool>,
+        // Whether or not the train requires a museum visit
+        pub attraction_visitors_only: Option<bool>,
+        // Whether or not a supplement is charged to rail pass holders to be able to travel on this
+        // train (most notably Interrail/Eurail).
+        pub supplement_required_rail_passes: Option<bool>,
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct Occupancy {
+        // Whether or not the train is expected to be very busy
+        pub very_busy: Option<bool>,
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct BoardingInformation {
+        // Passengers are required to pass through an international border check to board this train
+        pub international_border_check: Option<bool>,
+    }
+
     impl OperatingCharacteristics {
         pub fn get_from_model(m: &ModelEx) -> Option<Self> {
             if m.has_operating_characteristics {
@@ -1988,6 +2210,7 @@ pub mod variable_train {
                     sleepers: m.sleepers.unwrap(),
                     vehicles: m.reservations_vehicles.unwrap(),
                     wheelchairs: m.wheelchairs.unwrap(),
+                    international: m.international.unwrap(),
                     supplement_charged: m.supplement_charged,
                 })
             } else {
@@ -2059,6 +2282,7 @@ pub mod variable_train {
                     bicycles: m.luggage_bicycles,
                     bicycles_in_van: m.bicycles_in_van,
                     bicycles_in_carriage: m.bicycles_in_carriage,
+                    limited_bicycles: m.limited_bicycles,
                     pushchairs: m.pushchairs,
                     vehicles: m.luggage_vehicles,
                 })
@@ -2146,6 +2370,48 @@ pub mod variable_train {
         }
     }
 
+    impl Fares {
+        pub fn get_from_model(m: &ModelEx) -> Option<Self> {
+            if m.has_fares {
+                Some(Self {
+                    non_standard_fares: m.non_standard_fares,
+                    special_ticket_required: m.special_ticket_required,
+                    supplement_required: m.supplement_required,
+                    supplement_required_part: m.supplement_required_part,
+                    national_rights_apply: m.national_rights_apply,
+                    attraction_visitors_only: m.attraction_visitors_only,
+                    supplement_required_rail_passes: m.supplement_required_rail_passes,
+                })
+            } else {
+                None
+            }
+        }
+    }
+
+    impl Occupancy {
+        pub fn get_from_model(m: &ModelEx) -> Option<Self> {
+            if m.has_occupancy {
+                Some(Self {
+                    very_busy: m.very_busy,
+                })
+            } else {
+                None
+            }
+        }
+    }
+
+    impl BoardingInformation {
+        pub fn get_from_model(m: &ModelEx) -> Option<Self> {
+            if m.has_boarding_information {
+                Some(Self {
+                    international_border_check: m.international_border_check,
+                })
+            } else {
+                None
+            }
+        }
+    }
+
     impl ActiveModelEx {
         pub fn populate_operating_characteristics(&mut self, o: &OperatingCharacteristics) -> () {
             self.has_operating_characteristics = ActiveValue::Set(true);
@@ -2174,6 +2440,7 @@ pub mod variable_train {
             self.sleepers = ActiveValue::Set(Some(r.sleepers));
             self.reservations_vehicles = ActiveValue::Set(Some(r.vehicles));
             self.wheelchairs = ActiveValue::Set(Some(r.wheelchairs));
+            self.international = ActiveValue::Set(Some(r.international));
             self.supplement_charged = ActiveValue::Set(r.supplement_charged);
         }
 
@@ -2224,6 +2491,7 @@ pub mod variable_train {
             self.luggage_bicycles = ActiveValue::Set(l.bicycles);
             self.bicycles_in_van = ActiveValue::Set(l.bicycles_in_van);
             self.bicycles_in_carriage = ActiveValue::Set(l.bicycles_in_carriage);
+            self.limited_bicycles = ActiveValue::Set(l.limited_bicycles);
             self.pushchairs = ActiveValue::Set(l.pushchairs);
             self.luggage_vehicles = ActiveValue::Set(l.vehicles);
         }
@@ -2278,6 +2546,28 @@ pub mod variable_train {
                 = ActiveValue::Set(p.visually_impaired_visible_information);
             self.large_print_timetable = ActiveValue::Set(p.large_print_timetable);
             self.passenger_information_other = ActiveValue::Set(p.other);
+        }
+
+        pub fn populate_fares(&mut self, f: &Fares) -> () {
+            self.has_fares = ActiveValue::Set(true);
+            self.non_standard_fares = ActiveValue::Set(f.non_standard_fares);
+            self.special_ticket_required = ActiveValue::Set(f.special_ticket_required);
+            self.supplement_required = ActiveValue::Set(f.supplement_required);
+            self.supplement_required_part = ActiveValue::Set(f.supplement_required_part);
+            self.national_rights_apply = ActiveValue::Set(f.national_rights_apply);
+            self.attraction_visitors_only = ActiveValue::Set(f.attraction_visitors_only);
+            self.supplement_required_rail_passes
+                = ActiveValue::Set(f.supplement_required_rail_passes);
+        }
+
+        pub fn populate_occupancy(&mut self, o: &Occupancy) -> () {
+            self.has_occupancy = ActiveValue::Set(true);
+            self.very_busy = ActiveValue::Set(o.very_busy);
+        }
+
+        pub fn populate_boarding_information(&mut self, b: &BoardingInformation) -> () {
+            self.has_boarding_information = ActiveValue::Set(true);
+            self.international_border_check = ActiveValue::Set(b.international_border_check);
         }
     }
 }

@@ -1013,27 +1013,6 @@ async fn location_line_up(
                 &train_ids, &excluded_variants
             ).await.unwrap();
             for train in trains.into_iter() {
-                // OK, we have a train, but now we want to check if it has a duplicate in the
-                // current namespace. We prefer to show trains in the current namespace over an
-                // alternative, and we hide duplicates.
-                if location_namespace != namespace {
-                    if futures::future::join_all(train
-                        .train_variants
-                        .iter()
-                        .map(
-                            async |train| schedule_manager
-                                .get_duplicate_trains(&train.namespace, train)
-                                .await
-                                .unwrap()
-                                .iter()
-                                .any(|(_, duplicate_namespace)| duplicate_namespace == namespace)
-                        ))
-                        .await
-                        .iter()
-                        .any(|x| *x) {
-                        continue;
-                    };
-                }
                 if !seen_ids.contains(&(train.id.clone(), train.namespace.clone())) {
                     seen_ids.insert((train.id.clone(), train.namespace.clone()));
                     let namespace = train.namespace.clone();
@@ -1055,11 +1034,13 @@ async fn location_line_up(
                     );
             }
         }
+
         (out_trains, locations_by_namespace)
     };
 
     let mut actual_trains = vec![];
-    for (train, train_namespace) in trains {
+    let mut final_train_variants = vec![];
+    for (train, train_namespace) in &trains {
         // OK, this is somewhat hacky but I haven't yet thought of a better way.
         if train.train_variants.len() == 0 {
             // deleted trains remain in database
@@ -1128,7 +1109,7 @@ async fn location_line_up(
                         );
                 }
                 let location_detail
-                    = locations_by_namespace[&train_namespace][&location.location_id]
+                    = locations_by_namespace[train_namespace][&location.location_id]
                     .clone()
                     .unwrap();
 
@@ -1186,7 +1167,7 @@ async fn location_line_up(
             if at_least_one_stop {
                 for (i, location) in route.iter().enumerate() {
                     let location_detail
-                        = locations_by_namespace[&train_namespace][&location.location_id]
+                        = locations_by_namespace[train_namespace][&location.location_id]
                         .clone()
                         .unwrap();
                     if just_found_from {
@@ -1463,14 +1444,54 @@ async fn location_line_up(
 
             cur_date = cur_date.add(Days::new(1));
 
+            let mut added_train = false;
             if to_station.is_some() {
                 for addition in additions_for_this_train {
                     if cur_found_tos > addition.cur_found_tos {
+                        added_train = true;
                         actual_trains.push(addition.clone());
                     }
                 }
             } else {
+                if additions_for_this_train.len() > 0 {
+                    added_train = true;
+                }
                 actual_trains.append(&mut additions_for_this_train);
+            }
+
+            // We also add to final_train_variants so we can find duplicates
+            if added_train {
+                final_train_variants.push((train_id, train));
+            }
+        }
+    }
+
+    // Now we can remove any duplicate trains from the final results
+    for (train_id, train_variant) in &final_train_variants {
+        if train_variant.namespace != namespace {
+            // We now filter out trains that are the same train but from different
+            // namespaces. We prefer the current namespace if one of the trains has that
+            // namespace; if not we arbitrarily remove the earlier alphabetical one.
+            let dupes = schedule_manager.find_duplicate_trains(
+                train_id, train_variant, &train_variant.namespace, &final_train_variants
+            ).unwrap();
+            let mut found_dupe = false;
+            for dupe in dupes {
+                if dupe.namespace == namespace {
+                    found_dupe = true;
+                    break;
+                }
+                if dupe.namespace < train_variant.namespace {
+                    found_dupe = true;
+                    break;
+                }
+            }
+            if found_dupe {
+                // TODO this might not be a perfect mapping as different variants could match/not
+                // match on different days in theory, and the search could span multiple days.
+                actual_trains.retain(
+                    |x| x.id != *train_id || x.namespace != train_variant.namespace
+                );
             }
         }
     }

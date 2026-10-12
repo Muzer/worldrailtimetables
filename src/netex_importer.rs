@@ -11,8 +11,8 @@ use chrono_tz::CET;
 
 use quick_xml::de;
 
-use sea_orm::DatabaseTransaction;
-use sea_orm::entity::{ActiveHasMany, ActiveHasOne, ActiveValue};
+use sea_orm::{DatabaseTransaction, EntityLoaderTrait, EntityTrait};
+use sea_orm::entity::{ActiveBelongsTo, ActiveHasMany, ActiveHasOne, ActiveValue};
 
 use serde::{Deserialize, Serialize};
 
@@ -21,9 +21,10 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use crate::error::Error;
 use crate::importer::SlowStreamingImporter;
 use crate::schedule::{
-    AccommodationClass, accommodation_types, association_node, AssociationType, line, location,
-    schedule, ReservationField, train, train_cancellation, train_location, train_operator,
-    TrainSource, TrainType, train_validity_period, train_variant, variable_train
+    AccommodationClass, AssociationType, Direction, ReservationField, TrainSource, TrainType,
+    accommodation_types, association_node, brand, line, location, schedule, train,
+    train_cancellation, train_location, train_operator, train_validity_period, train_variant,
+    variable_train,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1057,7 +1058,7 @@ pub struct Line {
     #[serde(rename = "TransportMode")]
     pub transport_mode: AllPublicTransportModes,
     #[serde(rename = "TransportSubmode")]
-    pub transport_submode: Option<LineTransportSubmode>,
+    pub transport_submode: Option<ServiceJourneyTransportSubmode>,
     #[serde(rename = "PublicCode")]
     pub public_code: String,
     #[serde(rename = "OperatorRef")]
@@ -1067,17 +1068,6 @@ pub struct Line {
     pub presentation: Option<Presentation>,
     #[serde(rename = "TypeOfLineRef")]
     pub type_of_line_ref: Option<TypeOfLineRef>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LineTransportSubmode {
-    #[serde(rename = "$text")]
-    pub text: Option<String>,
-    #[serde(rename = "CoachSubmode")]
-    pub coach_submode: Option<CoachSubmode>,
-    #[serde(rename = "RailSubmode")]
-    pub rail_submode: Option<RailSubmode>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2494,6 +2484,7 @@ pub enum NetexErrorType {
     DestinationDisplayNotFound(String),
     JourneyPartNotFound(String),
     JourneyPartCoupleNotFound(String),
+    RouteNotFound(String),
     ScheduledStopPointNotFound(String),
     ServiceJourneyPatternNotFound(String),
     StopPlaceNotFound(String),
@@ -2524,6 +2515,7 @@ impl fmt::Display for NetexErrorType {
             NetexErrorType::JourneyPartCoupleNotFound(x) => write!(
                 f, "Journey part couple not found {}", x
             ),
+            NetexErrorType::RouteNotFound(x) => write!(f, "Route not found {}", x),
             NetexErrorType::ScheduledStopPointNotFound(x) => write!(
                 f, "Scheduled stop point not found {}", x
             ),
@@ -2566,12 +2558,14 @@ impl fmt::Display for NetexError {
 
 #[derive(Default)]
 pub struct NetexImporter {
+    cached_brand_ids: HashSet<String>,
     coupled_journey_by_id: HashMap<String, CoupledJourney>,
     coupled_train_ids_by_train_id: HashMap<String, HashSet<String>>,
     destination_display_by_id: HashMap<String, DestinationDisplay>,
     journey_part_by_id: HashMap<String, JourneyPart>,
     journey_part_couple_by_id: HashMap<String, JourneyPartCouple>,
     journey_part_couple_ids_by_train_id: HashMap<String, HashSet<String>>,
+    route_by_id: HashMap<String, Route>,
     scheduled_stop_point_by_id: HashMap<String, ScheduledStopPoint>,
     service_journey_ids_by_train_number_id: HashMap<String, HashSet<String>>,
     service_journey_pattern_by_id: HashMap<String, ServiceJourneyPattern>,
@@ -2590,6 +2584,7 @@ impl NetexImporter {
             journey_part_by_id: HashMap::new(),
             journey_part_couple_by_id: HashMap::new(),
             journey_part_couple_ids_by_train_id: HashMap::new(),
+            route_by_id: HashMap::new(),
             scheduled_stop_point_by_id: HashMap::new(),
             service_journey_ids_by_train_number_id: HashMap::new(),
             service_journey_pattern_by_id: HashMap::new(),
@@ -2689,6 +2684,15 @@ impl NetexImporter {
             self.read_train_number(&train_number)?;
         }
 
+        // Load operators
+        let mut operator_count: usize = 0;
+        println!("[{}] Loading operators...", namespace);
+        for operator in &composite_frame.frames.resource_frame.organisations.operator {
+            self.read_operator(&operator, &namespace, transaction).await?;
+            operator_count += 1;
+        }
+        println!("[{}] Persisted {} operators", namespace, operator_count);
+
         // Load lines
         let mut line_count: usize = 0;
         println!("[{}] Loading lines...", namespace);
@@ -2704,19 +2708,15 @@ impl NetexImporter {
             self.read_destination_display(&destination_display)?;
         }
 
-        // Load operators
-        let mut operator_count: usize = 0;
-        println!("[{}] Loading operators...", namespace);
-        for operator in &composite_frame.frames.resource_frame.organisations.operator {
-            self.read_operator(&operator, &namespace, transaction).await?;
-            operator_count += 1;
-        }
-        println!("[{}] Persisted {} operators", namespace, operator_count);
-
         // Load journey patterns
         for service_journey_pattern
             in &composite_frame.frames.service_frame.journey_patterns.service_journey_pattern {
             self.read_service_journey_pattern(&service_journey_pattern)?;
+        }
+
+        // Load routes
+        for route in &composite_frame.frames.service_frame.routes.route {
+            self.read_route(&route)?;
         }
 
         // Load journey parts
@@ -2850,6 +2850,13 @@ impl NetexImporter {
         Ok(())
     }
 
+    fn read_route(
+        &mut self, route: &Route
+    ) -> Result<(), NetexError> {
+        self.route_by_id.insert(route.id.clone(), route.clone());
+        Ok(())
+    }
+
     async fn read_operator(
         &mut self, operator: &Operator, namespace: &str, transaction: &DatabaseTransaction
     ) -> Result<(), Error> {
@@ -2878,9 +2885,14 @@ impl NetexImporter {
     async fn read_line(
         &mut self, line: &Line, namespace: &str, transaction: &DatabaseTransaction
     ) -> Result<(), Error> {
+        let train_type = self.get_train_type(
+            line.transport_mode.clone(), &line.transport_submode
+        )?;
+
         let line = line::ActiveModelEx {
             id: ActiveValue::Set(line.id.clone()),
             namespace: ActiveValue::Set(namespace.to_string()),
+            operator_id: ActiveValue::Set(line.operator_ref.clone().map(|x| x.operator_ref_ref)),
             public_id: ActiveValue::Set(Some(line.public_code.clone())),
             name: ActiveValue::Set(Some(line.name.clone())),
             description: ActiveValue::Set(Some(line.description.clone())),
@@ -2937,6 +2949,7 @@ impl NetexImporter {
                 },
                 None => None,
             }),
+            train_type: ActiveValue::Set(Some(train_type)),
             ..Default::default()
         };
 
@@ -3210,8 +3223,13 @@ impl NetexImporter {
         &self,
         rail: bool,
         coach: bool,
-        transport_submode: &ServiceJourneyTransportSubmode
+        transport_submode: &Option<ServiceJourneyTransportSubmode>,
     ) -> Result<(), NetexError> {
+        let transport_submode = match transport_submode {
+            Some(x) => x,
+            None => return Ok(()),
+        };
+
         if rail && transport_submode.rail_submode.is_some() {
             return Err(
                 NetexError {
@@ -3237,7 +3255,7 @@ impl NetexImporter {
     fn get_train_type(
         &self,
         transport_mode: AllPublicTransportModes,
-        transport_submode: &ServiceJourneyTransportSubmode
+        transport_submode: &Option<ServiceJourneyTransportSubmode>,
     ) -> Result<TrainType, NetexError> {
         match transport_mode {
             AllPublicTransportModes::All => return Err(
@@ -3265,7 +3283,7 @@ impl NetexImporter {
             },
             AllPublicTransportModes::Coach => {
                 self.assert_submodes_not_present(true, false, transport_submode)?;
-                match &transport_submode.coach_submode {
+                match &transport_submode.as_ref().and_then(|x| x.coach_submode.clone()) {
                     Some(coach_submode) => match coach_submode {
                         CoachSubmode::Unknown => Ok(TrainType::Coach),
                         CoachSubmode::Undefined => Ok(TrainType::UndefinedCoach),
@@ -3284,7 +3302,7 @@ impl NetexImporter {
             },
             AllPublicTransportModes::Rail => {
                 self.assert_submodes_not_present(false, true, transport_submode)?;
-                match &transport_submode.rail_submode {
+                match &transport_submode.as_ref().and_then(|x| x.rail_submode.clone()) {
                     Some(rail_submode) => match rail_submode {
                         RailSubmode::Unknown => Ok(TrainType::Passenger),
                         RailSubmode::Local => Ok(TrainType::LocalPassenger),
@@ -3721,6 +3739,7 @@ impl NetexImporter {
                 } else {
                     ReservationField::Impossible
                 },
+                international: ReservationField::Unknown,
                 supplement_charged: Some(
                     service_reservation_facility_list.text.contains(
                         &Reservation::ReservationsSupplementCharged
@@ -3920,6 +3939,7 @@ impl NetexImporter {
                                 &LuggageCarriage::CyclesAllowedInCarriage
                             )
                         ),
+                        limited_bicycles: None,
                         pushchairs: Some(
                             luggage_carriage_facility_list.text.contains(
                                 &LuggageCarriage::PushchairsAllowed
@@ -4173,6 +4193,15 @@ impl NetexImporter {
                 )
             },
         }
+    }
+
+    fn get_direction(&self, route: &Route) -> Option<Direction> {
+        route.direction_type.as_ref().map(|direction_type| match direction_type {
+            DirectionType::Inbound => Direction::Inbound,
+            DirectionType::Outbound => Direction::Outbound,
+            DirectionType::Clockwise => Direction::Clockwise,
+            DirectionType::Anticlockwise => Direction::Anticlockwise,
+        })
     }
 
     fn get_route(
@@ -4536,7 +4565,7 @@ impl NetexImporter {
     }
 
     async fn read_service_journey(
-        &self,
+        &mut self,
         service_journey: &ServiceJourney,
         namespace: &str,
         default_timezone: &str,
@@ -4564,9 +4593,11 @@ impl NetexImporter {
         let validity = self.calculate_validities(
             &service_journey.valid_between, &operating_periods, default_timezone
         )?;
+
         let train_type = self.get_train_type(
-            service_journey.transport_mode.clone(), &service_journey.transport_submode
+            service_journey.transport_mode.clone(), &Some(service_journey.transport_submode.clone())
         )?;
+
         let train_number = match self.train_number_by_id.get(
             &service_journey.train_numbers.train_number_ref.train_number_ref_ref
         ) {
@@ -4579,62 +4610,74 @@ impl NetexImporter {
                 }.into()
             ),
         };
+
         let accommodation = match &service_journey.facilities {
             Some(facilities) => self.get_accommodation(
                 &facilities.service_facility_set
             )?,
             None => vec![],
         };
+
         let reservations = match &service_journey.facilities {
             Some(facilities) => self.get_reservations(
                 &facilities.service_facility_set
             )?,
             None => None,
         };
+
         let catering = match &service_journey.facilities {
             Some(facilities) => self.get_catering(
                 &facilities.service_facility_set
             )?,
             None => None,
         };
+
         let line_id = Some(service_journey.line_ref.line_ref_ref.clone());
+
         let operator_id = self.get_operator(&service_journey.operator_ref.operator_ref_ref)?;
+
         let toilets = match &service_journey.facilities {
             Some(facilities) => self.get_toilets(
                 &facilities.service_facility_set
             )?,
             None => None,
         };
+
         let luggage = match &service_journey.facilities {
             Some(facilities) => self.get_luggage(
                 &facilities.service_facility_set
             )?,
             None => None,
         };
+
         let families = match &service_journey.facilities {
             Some(facilities) => self.get_families(
                 &facilities.service_facility_set
             )?,
             None => None,
         };
+
         let passenger_communications = match &service_journey.facilities {
             Some(facilities) => self.get_passenger_communications(
                 &facilities.service_facility_set
             )?,
             None => None,
         };
+
         let assistance = match &service_journey.facilities {
             Some(facilities) => self.get_assistance(
                 &facilities.service_facility_set
             )?,
             None => None,
         };
+
         let passenger_information = match &service_journey.facilities {
             Some(facilities) => self.get_passenger_information(
                 &facilities.service_facility_set
             )?,
             None => None,
         };
+
         let service_journey_pattern = match self.service_journey_pattern_by_id.get(
             &service_journey.journey_pattern_ref.journey_pattern_ref_ref
         ) {
@@ -4648,7 +4691,21 @@ impl NetexImporter {
             ),
         };
         let headcode = self.get_headcode(service_journey_pattern)?;
-        let route = self.get_route(
+
+        let netex_route
+            = match self.route_by_id.get(&service_journey_pattern.route_ref.route_ref_ref) {
+            Some(route) => route,
+            None => return Err(
+                NetexError {
+                    error_type: NetexErrorType::RouteNotFound(
+                        service_journey_pattern.route_ref.route_ref_ref.clone()
+                    )
+                }.into()
+            ),
+        };
+        let direction = self.get_direction(netex_route);
+
+        let mut route = self.get_route(
             service_journey_pattern,
             &service_journey.passing_times.timetabled_passing_time,
             &validity,
@@ -4662,6 +4719,28 @@ impl NetexImporter {
             ServiceAlteration::Cancellation => TrainSource::LongTerm, // The original
             ServiceAlteration::Replaced => TrainSource::LongTerm, // The original
         });
+
+        let brand_id = service_journey.branding_ref.branding_ref_ref.clone();
+
+        if !self.cached_brand_ids.contains(&brand_id) {
+            let brand = brand::Entity::load()
+                .filter_by_id((brand_id.clone(), namespace.to_string()))
+                .one(transaction)
+                .await?;
+
+            if brand.is_none() {
+                let brand = brand::ActiveModelEx {
+                    id: ActiveValue::Set(brand_id.clone()),
+                    namespace: ActiveValue::Set(namespace.to_string()),
+                    ..Default::default()
+                };
+
+                brand.insert(transaction).await?;
+            }
+
+            self.cached_brand_ids.insert(brand_id.clone());
+        }
+
         let mut variable_train = variable_train::ActiveModelEx {
             namespace: ActiveValue::Set(namespace.to_string()),
             train_type: ActiveValue::Set(train_type),
@@ -4670,7 +4749,7 @@ impl NetexImporter {
             power_type: ActiveValue::Set(None),
             timing_speed_m_per_s: ActiveValue::Set(None),
             accommodation: ActiveHasMany::Append(accommodation),
-            brand: ActiveValue::Set(Some(service_journey.branding_ref.branding_ref_ref.clone())),
+            brand_id: ActiveValue::Set(Some(brand_id)),
             name: ActiveValue::Set(None),
             line_id: ActiveValue::Set(line_id),
             // This may or may not be == public_id, but we can't tell
@@ -4678,7 +4757,11 @@ impl NetexImporter {
             operator_id: ActiveValue::Set(operator_id),
             // TODO does this need removing now?
             wheelchair_accessible: ActiveValue::Set(None),
+            direction: ActiveValue::Set(direction),
             has_operating_characteristics: ActiveValue::Set(false),
+            has_fares: ActiveValue::Set(false),
+            has_occupancy: ActiveValue::Set(false),
+            has_boarding_information: ActiveValue::Set(false),
             ..Default::default()
         };
         match &catering {
@@ -4736,18 +4819,44 @@ impl NetexImporter {
             source: ActiveValue::Set(source),
             runs_as_required: ActiveValue::Set(false),
             performance_monitoring: ActiveValue::Set(None),
-            route: ActiveHasMany::Append(route),
+            route: ActiveHasMany::NotSet,
+            train: ActiveBelongsTo::Set(Some(Box::new(train::ActiveModelEx {
+                id: ActiveValue::Set(service_journey.id.clone()),
+                namespace: ActiveValue::Set(namespace.to_string()),
+                ..Default::default()
+            }))),
             ..Default::default()
         };
 
-        let train = train::ActiveModelEx {
-            id: ActiveValue::Set(service_journey.id.clone()),
-            namespace: ActiveValue::Set(namespace.to_string()),
-            train_variants: ActiveHasMany::Append(vec![train_variant]),
-            ..Default::default()
-        };
-
-        train.insert(transaction).await?;
+        let inserted = train_variant.insert(transaction).await?;
+        let mut association_nodes: HashMap<i64, Vec<association_node::ActiveModelEx>>
+            = HashMap::new();
+        for train_location in route.iter_mut() {
+            train_location.train_variant_id = ActiveValue::Set(inserted.id);
+            association_nodes.insert(
+                train_location.index.clone().unwrap(),
+                train_location.association_nodes.clone().into_vec(),
+            );
+            train_location.association_nodes = ActiveHasMany::NotSet;
+        }
+        let inserted_ids =
+            train_location::Entity
+            ::insert_many(
+                route.into_iter().map(|x| Into::<train_location::ActiveModel>::into(x))
+            )
+            .exec_with_returning_keys(transaction)
+            .await?;
+        for (index, mut association_nodes) in association_nodes {
+            // We could try to be fancy here, but these could be fairly complex models in
+            // theory, and they're likely rare enough we can just push them manually
+            for association_node in association_nodes.iter_mut() {
+                association_node.main_train_location_id
+                    = ActiveValue::Set(
+                        Some(inserted_ids[usize::try_from(index).unwrap()])
+                    );
+                association_node.clone().insert(transaction).await?;
+            };
+        }
 
         Ok(())
     }

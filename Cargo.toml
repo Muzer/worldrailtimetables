@@ -10,19 +10,23 @@ anyhow = "1.0.82"
 async-compression = { version = "0.4.9", features = ["gzip", "deflate", "tokio"] }
 async-stomp = "0.7.0"
 async-trait = "0.1.68"
+bytes = "1.12.1"
 chrono = { version = "0.4.26", features = ["serde"] }
 chrono-tz = { version = "0.8.2", features = ["serde"] }
 config-file = "0.2.3"
+encoding_rs = "0.8.42"
 futures = "0.3.28"
 gtfs-structures = "0.49.0"
+gtfs_rt_decode = "0.1.2"
 itertools = "0.12.1"
+prost = "0.14.4"
 quick-xml = { version = "0.41.0", features = ["async-tokio", "serialize"] }
 rc-zip-tokio = "4.1.0"
-reqwest = { version = "0.11.18", features = ["stream"] }
+reqwest = { version = "0.13.5", features = ["stream"] }
 rgb = { version = "0.8.53", features = ["serde"] }
 rocket = "0.5.0"
 rocket_tera = "2.0.0-rc2"
-sea-orm = { version = "2", features = ["chrono", "entity-registry", "runtime-tokio", "schema-sync", "sqlx-sqlite"] }
+sea-orm = { version = "2", features = ["chrono", "debug-print", "entity-registry", "runtime-tokio", "schema-sync", "sqlx-sqlite"] }
 serde = { version = "1.0.164", features = ["derive"] }
 serde_json = "1.0.116"
 serde_path_to_error = "0.1.20"

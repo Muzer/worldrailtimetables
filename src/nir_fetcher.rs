@@ -2,7 +2,7 @@ use crate::error::Error;
 use crate::fetcher::StreamingFetcher;
 use async_trait::async_trait;
 use futures::stream::TryStreamExt;
-use reqwest::Client;
+use reqwest::{Client, retry};
 // I tried to use ReadZiptreaming here, but sadly these files sometimes have malformed local
 // headers (with size == 0) which means this is impossible
 use rc_zip_tokio::ReadZip;
@@ -242,7 +242,8 @@ impl NirFetcher {
     }
 
     async fn get_url(&self) -> Result<String, Error> {
-        let client = Client::new();
+        let client
+            = Client::builder().retry(retry::for_host("https://admin.opendatani.gov.uk")).build()?;
         let response = client
             .get("https://admin.opendatani.gov.uk/api/3/action/package_show?id=nir20160126v2")
             .send()
@@ -265,8 +266,8 @@ impl NirFetcher {
 impl StreamingFetcher for NirFetcher {
     async fn fetch(&self) -> Result<Box<dyn AsyncBufRead + Unpin + Send>, Error> {
         println!("Fetching NIR Rail CIF data from OpenDataNI");
-        let client = Client::new();
         let url = self.get_url().await?;
+        let client = Client::builder().retry(retry::for_host(url)).build()?;
         println!("{}", url);
         let response = client.get(url).send().await?.error_for_status()?;
         let response_bytes = Vec::<u8>::from(response.bytes().await?);

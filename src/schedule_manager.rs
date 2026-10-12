@@ -1,7 +1,7 @@
 use crate::error::Error;
 use crate::schedule::{
-    accommodation_types, association_cancellation, association_node, line, location, schedule,
-    train, train_allocation, train_cancellation, train_location, train_operator,
+    accommodation_types, association_cancellation, association_node, brand, line, location,
+    schedule, train, train_allocation, train_cancellation, train_location, train_operator,
     train_validity_period, train_variant, train_vehicle, variable_train
 };
 
@@ -262,6 +262,24 @@ impl ScheduleManager {
             },
             None => variable_train.operator = BelongsTo::Loaded(None),
         };
+        match &variable_train.brand_id {
+            Some(brand_id) => {
+                let brand = brand::Entity::load()
+                    .filter_by_id((brand_id.to_owned(), variable_train.namespace.to_owned()))
+                    .one(&self.db)
+                    .await?;
+                let brand = match brand {
+                    Some(x) => x,
+                    None => return Err(
+                        DbErr::RecordNotFound(
+                            "variable_train.brand not found".to_owned()
+                        ).into()
+                    ),
+                };
+                variable_train.brand = BelongsTo::Loaded(Some(Box::new(brand)));
+            },
+            None => variable_train.brand = BelongsTo::Loaded(None),
+        };
         Ok(())
     }
 
@@ -354,17 +372,25 @@ impl ScheduleManager {
     pub async fn populate_train_variants_for_location_lineup(
         &self, train_variants: &mut Vec<train_variant::ModelEx>, excluded_variants: &HashSet<i64>,
     ) -> Result<(), Error> {
-        let mut replacements = train_variant::Entity::load()
-            .filter(train_variant::COLUMN.parent_train_variant_id.is_in(
-                train_variants.iter().map(|x| Some(x.id))
-            ))
-            .filter(train_variant::COLUMN.id.is_not_in(excluded_variants.clone()))
-            .with((train_cancellation::Entity, train_validity_period::Entity))
-            .with(train_location::Entity)
-            .with(train_validity_period::Entity)
-            .with((variable_train::Entity, train_operator::Entity))
-            .all(&self.db)
-            .await?;
+        let mut replacements = vec![];
+        let variant_id_chunks: Vec<Vec<Option<i64>>> = train_variants
+            .iter()
+            .map(|x| Some(x.id))
+            .collect::<Vec<Option<i64>>>()
+            .chunks(10000)
+            .map(|x| x.to_vec())
+            .collect();
+        for chunk in variant_id_chunks {
+            replacements.extend(train_variant::Entity::load()
+                .filter(train_variant::COLUMN.parent_train_variant_id.is_in(chunk))
+                .filter(train_variant::COLUMN.id.is_not_in(excluded_variants.clone()))
+                .with((train_cancellation::Entity, train_validity_period::Entity))
+                .with(train_location::Entity)
+                .with(train_validity_period::Entity)
+                .with((variable_train::Entity, train_operator::Entity))
+                .all(&self.db)
+                .await?);
+        }
         if replacements.len() > 0 {
             Box::pin(self.populate_train_variants_for_location_lineup(
                 &mut replacements, excluded_variants
@@ -475,31 +501,48 @@ impl ScheduleManager {
     pub async fn get_trains_for_location_lineup_by_ids(
         &self, ids: &HashSet<(String, String)>, excluded_variants: &HashSet<i64>
     ) -> Result<Vec<train::ModelEx>, Error> {
-        let mut trains = train::Entity::load()
-            .filter(Expr::tuple(
-                    [train::COLUMN.id.into_simple_expr(),
-                    train::COLUMN.namespace.into_simple_expr()]
-                )
-                .is_in(ids.iter().map(|(x, y)| Expr::tuple([x.into(), y.into()])))
-            )
-            .all(&self.db)
-            .await?;
+        let excluded_variants = if excluded_variants.len() > 10000 {
+            HashSet::new()
+        } else {
+            excluded_variants.clone()
+        };
+        let chunks: Vec<Vec<(String, String)>> = ids.clone()
+            .into_iter()
+            .collect::<Vec<(String, String)>>()
+            .chunks(10000)
+            .map(|x| x.to_vec())
+            .collect();
 
-        let mut train_variants = train_variant::Entity::load()
-            .filter(
-                Expr::tuple(
-                    [train_variant::COLUMN.train_id.into_simple_expr(),
-                    train_variant::COLUMN.namespace.into_simple_expr()]
+        let mut trains = vec![];
+        let mut train_variants = vec![];
+
+        for chunk in chunks {
+            trains.extend(train::Entity::load()
+                .filter(Expr::tuple(
+                        [train::COLUMN.id.into_simple_expr(),
+                        train::COLUMN.namespace.into_simple_expr()]
+                    )
+                    .is_in(chunk.iter().map(|(x, y)| Expr::tuple([x.into(), y.into()])))
                 )
-                .is_in(ids.iter().map(|(x, y)| Expr::tuple([x.into(), y.into()])))
-            )
-            .filter(train_variant::COLUMN.id.is_not_in(excluded_variants.clone()))
-            .with((train_cancellation::Entity, train_validity_period::Entity))
-            .with(train_location::Entity)
-            .with(train_validity_period::Entity)
-            .with((variable_train::Entity, train_operator::Entity))
-            .all(&self.db)
-            .await?;
+                .all(&self.db)
+                .await?);
+
+            train_variants.extend(train_variant::Entity::load()
+                .filter(
+                    Expr::tuple(
+                        [train_variant::COLUMN.train_id.into_simple_expr(),
+                        train_variant::COLUMN.namespace.into_simple_expr()]
+                    )
+                    .is_in(chunk.iter().map(|(x, y)| Expr::tuple([x.into(), y.into()])))
+                )
+                .filter(train_variant::COLUMN.id.is_not_in(excluded_variants.clone()))
+                .with((train_cancellation::Entity, train_validity_period::Entity))
+                .with(train_location::Entity)
+                .with(train_validity_period::Entity)
+                .with((variable_train::Entity, train_operator::Entity))
+                .all(&self.db)
+                .await?);
+        }
 
         self.populate_train_variants_for_location_lineup(
             &mut train_variants, &excluded_variants
@@ -560,10 +603,15 @@ impl ScheduleManager {
     pub async fn get_train_ids_by_train_variant_ids(
         &self, train_variant_ids: Vec<i64>
     ) -> Result<Vec<(String, String)>, Error> {
-        let train_variants = train_variant::Entity::load()
-            .filter(train_variant::COLUMN.id.is_in(train_variant_ids))
-            .all(&self.db)
-            .await?;
+        let train_variant_id_chunks: Vec<Vec<i64>>
+            = train_variant_ids.chunks(10000).map(|x| x.to_vec()).collect();
+        let mut train_variants = vec![];
+        for chunk in train_variant_id_chunks {
+            train_variants.extend(train_variant::Entity::load()
+                .filter(train_variant::COLUMN.id.is_in(chunk))
+                .all(&self.db)
+                .await?);
+        }
 
         let mut train_ids: Vec<(String, String)>
             = train_variants
@@ -637,10 +685,190 @@ impl ScheduleManager {
         Ok(output)
     }
 
+    pub async fn get_train_ids_by_public_id_and_brand_id(
+        &self, public_id: &str, brand_id: &str, namespace: &str
+    ) -> Result<HashSet<(String, String)>, Error> {
+        let variable_trains = variable_train::Entity::load()
+            .filter(variable_train::COLUMN.public_id.eq(public_id))
+            .filter(variable_train::COLUMN.brand_id.eq(brand_id))
+            .filter(variable_train::COLUMN.namespace.eq(namespace))
+            .with(train_variant::Entity)
+            .with((train_location::Entity, train_variant::Entity))
+            .all(&self.db)
+            .await?;
+        let mut output = HashSet::new();
+
+        for variable_train in variable_trains {
+            match variable_train.train_variant.into_option() {
+                Some(x) => {
+                    match x.train_id {
+                        Some(train_id) =>
+                            output.insert((train_id.clone(), variable_train.namespace.clone())),
+                        // Replacement train, recurse into the parent train
+                        None => output.insert((
+                            self.get_train_id_by_train_variant_id(
+                                x.parent_train_variant_id
+                            ).await?,
+                            variable_train.namespace.clone(),
+                        )),
+                    };
+                },
+                None => (),
+            };
+
+            match variable_train.train_location.into_option() {
+                Some(x) => {
+                    let train_variant = x.train_variant.unwrap();
+                    match train_variant.train_id {
+                        Some(train_id) =>
+                            output.insert(
+                                (train_id.clone(), variable_train.namespace.clone())
+                            ),
+                        // Replacement train, recurse into the parent train
+                        None => output.insert((
+                            self.get_train_id_by_train_variant_id(
+                                train_variant.parent_train_variant_id
+                            ).await?,
+                            variable_train.namespace.clone(),
+                        )),
+                    };
+                },
+                None => (),
+            }
+        }
+
+        Ok(output)
+    }
+
+    pub async fn get_train_ids_by_public_id_part(
+        &self, public_id: &str, namespace: &str
+    ) -> Result<HashSet<(String, String)>, Error> {
+        let variable_trains = variable_train::Entity::load()
+            .filter(
+                variable_train::COLUMN.public_id.eq(public_id)
+                .or(variable_train::COLUMN.public_id.like(format!("%-{}", public_id)))
+                .or(variable_train::COLUMN.public_id.like(format!("{}-%", public_id)))
+            )
+            .filter(variable_train::COLUMN.namespace.eq(namespace))
+            .with(train_variant::Entity)
+            .with((train_location::Entity, train_variant::Entity))
+            .all(&self.db)
+            .await?;
+        let mut output = HashSet::new();
+
+        for variable_train in variable_trains {
+            match variable_train.train_variant.into_option() {
+                Some(x) => {
+                    match x.train_id {
+                        Some(train_id) =>
+                            output.insert((train_id.clone(), variable_train.namespace.clone())),
+                        // Replacement train, recurse into the parent train
+                        None => output.insert((
+                            self.get_train_id_by_train_variant_id(
+                                x.parent_train_variant_id
+                            ).await?,
+                            variable_train.namespace.clone(),
+                        )),
+                    };
+                },
+                None => (),
+            };
+
+            match variable_train.train_location.into_option() {
+                Some(x) => {
+                    let train_variant = x.train_variant.unwrap();
+                    match train_variant.train_id {
+                        Some(train_id) =>
+                            output.insert(
+                                (train_id.clone(), variable_train.namespace.clone())
+                            ),
+                        // Replacement train, recurse into the parent train
+                        None => output.insert((
+                            self.get_train_id_by_train_variant_id(
+                                train_variant.parent_train_variant_id
+                            ).await?,
+                            variable_train.namespace.clone(),
+                        )),
+                    };
+                },
+                None => (),
+            }
+        }
+
+        Ok(output)
+    }
+
+    pub async fn get_train_ids_by_public_id_and_operator(
+        &self, public_id: &str, operator_id: &str, namespace: &str
+    ) -> Result<HashSet<(String, String)>, Error> {
+        let variable_trains = variable_train::Entity::load()
+            .filter(variable_train::COLUMN.public_id.eq(public_id))
+            .filter(variable_train::COLUMN.namespace.eq(namespace))
+            .filter(variable_train::COLUMN.operator_id.eq(operator_id))
+            .with(train_variant::Entity)
+            .with((train_location::Entity, train_variant::Entity))
+            .all(&self.db)
+            .await?;
+        let mut output = HashSet::new();
+
+        for variable_train in variable_trains {
+            match variable_train.train_variant.into_option() {
+                Some(x) => {
+                    match x.train_id {
+                        Some(train_id) =>
+                            output.insert((train_id.clone(), variable_train.namespace.clone())),
+                        // Replacement train, recurse into the parent train
+                        None => output.insert((
+                            self.get_train_id_by_train_variant_id(
+                                x.parent_train_variant_id
+                            ).await?,
+                            variable_train.namespace.clone(),
+                        )),
+                    };
+                },
+                None => (),
+            };
+
+            match variable_train.train_location.into_option() {
+                Some(x) => {
+                    let train_variant = x.train_variant.unwrap();
+                    match train_variant.train_id {
+                        Some(train_id) =>
+                            output.insert(
+                                (train_id.clone(), variable_train.namespace.clone())
+                            ),
+                        // Replacement train, recurse into the parent train
+                        None => output.insert((
+                            self.get_train_id_by_train_variant_id(
+                                train_variant.parent_train_variant_id
+                            ).await?,
+                            variable_train.namespace.clone(),
+                        )),
+                    };
+                },
+                None => (),
+            }
+        }
+
+        Ok(output)
+    }
+
+    pub async fn get_train_ids_by_id_substring(
+        &self, id: &str, namespace: &str
+    ) -> Result<HashSet<(String, String)>, Error> {
+        // TODO make this more generic if needed
+        let trains = train::Entity::load()
+            .filter(Expr::cust("substr(id, 6, 5)").eq(id))
+            .filter(train::COLUMN.namespace.eq(namespace))
+            .all(&self.db)
+            .await?;
+        Ok(trains.into_iter().map(|x| (x.id, x.namespace)).collect())
+    }
+
     pub async fn get_train_ids_with_excluded_variants_by_location_id_for_dates(
         &self, location_id: &str, namespace: &str, start_date: NaiveDate, end_date: NaiveDate
     ) -> Result<(HashSet<(String, String)>, HashSet<i64>), Error> {
-        let mut train_locations = train_location::Entity::load()
+        let train_locations = train_location::Entity::load()
             .filter(train_location::COLUMN.location_id.eq(location_id))
             .filter(train_location::COLUMN.namespace.eq(namespace))
             /*.filter(
@@ -660,9 +888,57 @@ impl ScheduleManager {
                     train_location::COLUMN.
                 )
             )*/
-            .with((train_variant::Entity, train_validity_period::Entity))
+            .with(train_variant::Entity)
             .all(&self.db)
             .await?;
+
+        let mut train_locations_by_variant_id_map: HashMap<i64, Vec<train_location::ModelEx>>
+            = train_locations
+                .into_iter()
+                .fold(HashMap::new(), |mut map, item| {
+                    map.entry(item.train_variant_id)
+                        .or_default()
+                        .push(item);
+                    map
+                });
+
+        let chunks: Vec<Vec<i64>> = train_locations_by_variant_id_map
+            .iter()
+            .map(|(x, _)| x.clone())
+            .collect::<Vec<i64>>()
+            .chunks(10000)
+            .map(|x| x.to_vec())
+            .collect();
+
+        for chunk in chunks {
+            let train_validity_periods = train_validity_period::Entity::load()
+                .filter(train_validity_period::COLUMN.train_variant_id.is_in(chunk))
+                .all(&self.db)
+                .await?;
+
+            for train_validity_period in train_validity_periods {
+                for train_location in train_locations_by_variant_id_map.get_mut(
+                    &train_validity_period.train_variant_id.unwrap()
+                ).unwrap().iter_mut() {
+                    train_location.train_variant.as_mut().unwrap().validity =
+                        match &train_location.train_variant.as_ref().unwrap().validity {
+                            HasMany::Loaded(x) => {
+                                let mut new = x.clone();
+                                new.push(train_validity_period.clone());
+                                HasMany::Loaded(new)
+                            },
+                            HasMany::Unloaded
+                                => HasMany::Loaded(vec![train_validity_period.clone()]),
+                        };
+                }
+            }
+        }
+
+        let mut train_locations: Vec<train_location::ModelEx> = train_locations_by_variant_id_map
+            .into_iter()
+            .map(|(_, x)| x)
+            .flatten()
+            .collect();
 
         // We can now build a list of excluded variants based on the date provided. This is to allow
         // the next, "real" loading stage to also exclude them.
@@ -755,47 +1031,164 @@ impl ScheduleManager {
         })
     }
 
-    pub async fn get_irish_duplicate_trains(
-        &self, train_variant: &train_variant::ModelEx, other_namespace: &str
+    pub async fn get_ir_duplicate_trains(
+        &self, train_variant: &train_variant::ModelEx
     ) -> Result<HashSet<(String, String)>, Error> {
-        // Ireland is symmetrical in how to find the other half's trains, so we can have one
-        // function that manages both
-        let public_id = match &train_variant.variable_train.clone().unwrap().public_id {
+        let public_id = match &train_variant.variable_train.as_ref().unwrap().public_id {
             Some(public_id) => public_id.clone(),
             None => return Ok(HashSet::new()),
         };
-        Ok(self.get_train_ids_by_public_id(&public_id, other_namespace).await?)
+        Ok(self.get_train_ids_by_public_id(&public_id, "gbni").await?)
+    }
+
+    pub fn find_ir_duplicate_trains(
+        &self,
+        _train_id: &str,
+        train_variant: &train_variant::ModelEx,
+        other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        let public_id = match &train_variant.variable_train.as_ref().unwrap().public_id {
+            Some(public_id) => public_id.clone(),
+            None => return Ok(vec![]),
+        };
+        Ok(other_trains
+            .iter()
+            .map(|(_id, train)| train)
+            .filter(
+                |train_variant|
+                train_variant.namespace == "gbni"
+                && train_variant.variable_train.as_ref().unwrap().public_id
+                    == Some(public_id.clone())
+            )
+            .cloned()
+            .collect()
+        )
+    }
+
+    pub async fn get_nir_duplicate_trains(
+        &self, train_variant: &train_variant::ModelEx
+    ) -> Result<HashSet<(String, String)>, Error> {
+        let public_id = match &train_variant.variable_train.as_ref().unwrap().public_id {
+            Some(public_id) => public_id.clone(),
+            None => return Ok(HashSet::new()),
+        };
+        Ok(self.get_train_ids_by_public_id(&public_id, "ieir").await?)
+    }
+
+    pub fn find_nir_duplicate_trains(
+        &self,
+        _train_id: &str,
+        train_variant: &train_variant::ModelEx,
+        other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        let public_id = match &train_variant.variable_train.as_ref().unwrap().public_id {
+            Some(public_id) => public_id.clone(),
+            None => return Ok(vec![]),
+        };
+        Ok(other_trains
+            .iter()
+            .map(|(_id, train)| train)
+            .filter(
+                |train_variant|
+                train_variant.namespace == "ieir"
+                && train_variant.variable_train.as_ref().unwrap().public_id
+                    == Some(public_id.clone())
+            )
+            .cloned()
+            .collect()
+        )
     }
 
     pub async fn get_network_rail_duplicate_trains(
         &self, train_variant: &train_variant::ModelEx
     ) -> Result<HashSet<(String, String)>, Error> {
-        // For Network Rail we only currently worry about Eurostar (LU is currently out of scope).
-        // To map Eurostar we convert the reporting number to a train number and find by public ID.
-        let public_id = match &train_variant.variable_train.clone().unwrap().public_id {
+        let public_id = match &train_variant.variable_train.as_ref().unwrap().public_id {
             Some(public_id) => public_id.clone(),
             None => return Ok(HashSet::new()),
         };
         if !public_id.starts_with("9O") && !public_id.starts_with("9I") {
             return Ok(HashSet::new());
         };
-        Ok(self.get_train_ids_by_public_id(
-            &public_id.replace("O", "0").replace("I", "1"), "zzes"
-        ).await?)
+        let operator_id = match &train_variant.variable_train.as_ref().unwrap().operator_id {
+            Some(operator_id) => operator_id.clone(),
+            None => return Ok(HashSet::new()),
+        };
+        if operator_id != "ES" {
+            return Ok(HashSet::new());
+        }
+        Ok(
+            &(&self
+            .get_train_ids_by_public_id(&public_id.replace("O", "0").replace("I", "1"), "zzes")
+            .await?
+            | &self
+            .get_train_ids_by_public_id(&public_id.replace("O", "0").replace("I", "1"), "benb")
+            .await?)
+            | &self
+            .get_train_ids_by_public_id_and_brand_id(
+                &format!("{:0>5}", public_id.replace("O", "0").replace("I", "1")),
+                "EST",
+                "nlns"
+            ).await?
+        )
+    }
+
+    pub fn find_network_rail_duplicate_trains(
+        &self,
+        _train_id: &str,
+        train_variant: &train_variant::ModelEx,
+        other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        let public_id = match &train_variant.variable_train.as_ref().unwrap().public_id {
+            Some(public_id) => public_id.clone(),
+            None => return Ok(vec![]),
+        };
+        if !public_id.starts_with("9O") && !public_id.starts_with("9I") {
+            return Ok(vec![]);
+        };
+        let operator_id = match &train_variant.variable_train.as_ref().unwrap().operator_id {
+            Some(operator_id) => operator_id.clone(),
+            None => return Ok(vec![]),
+        };
+        if operator_id != "ES" {
+            return Ok(vec![]);
+        }
+        Ok(other_trains
+            .iter()
+            .map(|(_id, train)| train)
+            .filter(
+                |train_variant|
+                (
+                    (
+                        train_variant.namespace == "zzes"
+                        || train_variant.namespace == "benb"
+                    )
+                    && train_variant.variable_train.as_ref().unwrap().public_id
+                    == Some(public_id.replace("O", "0").replace("I", "1"))
+                ) || (
+                    train_variant.namespace == "nlns"
+                    && train_variant.variable_train.as_ref().unwrap().brand_id
+                        == Some("EST".to_string())
+                    && train_variant.variable_train.as_ref().unwrap().public_id
+                    == Some(format!("{:0>5}", public_id.replace("O", "0").replace("I", "1")))
+                )
+            )
+            .cloned()
+            .collect()
+        )
     }
 
     pub async fn get_eurostar_duplicate_trains(
         &self, train_variant: &train_variant::ModelEx
     ) -> Result<HashSet<(String, String)>, Error> {
-        // For Eurostar for now we are worried about Network Rail; in future we might care about
-        // other European infra operators but those are currently unsupported.
-        // We convert the train number to a Network Rail alphanumeric reporting number.
-        let public_id = match &train_variant.variable_train.clone().unwrap().public_id {
+        let public_id = match &train_variant.variable_train.as_ref().unwrap().public_id {
             Some(public_id) => public_id.clone(),
             None => return Ok(HashSet::new()),
         };
+        let non_uk = &self.get_train_ids_by_public_id(&public_id, "benb").await?
+            | &self.get_train_ids_by_public_id_and_brand_id(
+                &format!("{:0>5}", public_id), "EST", "nlns").await?;
         if !public_id.starts_with("9") {
-            return Ok(HashSet::new());
+            return Ok(non_uk);
         };
         let train_reporting_number = if public_id[1..2] == *"0" {
             let mut train_reporting_number = public_id.clone();
@@ -806,30 +1199,719 @@ impl ScheduleManager {
             train_reporting_number.replace_range(1..2, "I");
             train_reporting_number
         } else {
-            return Ok(HashSet::new());
+            return Ok(non_uk);
         };
-        Ok(self.get_train_ids_by_public_id(&train_reporting_number, "gbnr").await?)
+        Ok(
+            &self
+            .get_train_ids_by_public_id_and_operator(&train_reporting_number, "ES", "gbnr")
+            .await?
+            | &non_uk
+        )
+    }
+
+    pub fn find_eurostar_duplicate_trains(
+        &self,
+        _train_id: &str,
+        train_variant: &train_variant::ModelEx,
+        other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        let public_id = match &train_variant.variable_train.as_ref().unwrap().public_id {
+            Some(public_id) => public_id.clone(),
+            None => return Ok(vec![]),
+        };
+        let non_uk: Vec<train_variant::ModelEx> = other_trains
+            .iter()
+            .map(|(_id, train)| train)
+            .filter(
+                |train_variant|
+                (
+                    train_variant.namespace == "benb"
+                    && train_variant.variable_train.as_ref().unwrap().public_id
+                        == Some(public_id.clone())
+                ) || (
+                    train_variant.namespace == "nlns"
+                    && train_variant.variable_train.as_ref().unwrap().brand_id
+                        == Some("EST".to_string())
+                    && train_variant.variable_train.as_ref().unwrap().public_id
+                        == Some(format!("{:0>5}", public_id))
+                )
+            )
+            .cloned()
+            .collect();
+        if !public_id.starts_with("9") {
+            return Ok(non_uk);
+        };
+        let train_reporting_number = if public_id[1..2] == *"0" {
+            let mut train_reporting_number = public_id.clone();
+            train_reporting_number.replace_range(1..2, "O");
+            train_reporting_number
+        } else if public_id[1..2] == *"1" {
+            let mut train_reporting_number = public_id.clone();
+            train_reporting_number.replace_range(1..2, "I");
+            train_reporting_number
+        } else {
+            return Ok(non_uk);
+        };
+        let mut res = other_trains
+            .iter()
+            .map(|(_id, train)| train)
+            .filter(
+                |train_variant|
+                train_variant.namespace == "gbnr"
+                && train_variant.variable_train.as_ref().unwrap().operator_id
+                    == Some("ES".to_string())
+                && train_variant.variable_train.as_ref().unwrap().public_id
+                    == Some(train_reporting_number.clone())
+            )
+            .cloned()
+            .collect::<Vec<train_variant::ModelEx>>();
+        res.extend(non_uk);
+        Ok(res)
     }
 
     pub async fn get_sncf_voyageurs_duplicate_trains(
+        &self, train_variant: &train_variant::ModelEx
+    ) -> Result<HashSet<(String, String)>, Error> {
+        let public_id = match &train_variant.variable_train.as_ref().unwrap().public_id {
+            Some(public_id) => public_id.clone(),
+            None => return Ok(HashSet::new()),
+        };
+        let mut res = self.get_train_ids_by_public_id_part(&public_id, "frtr").await?;
+
+        let public_id_int: u32 = match public_id.parse() {
+            Ok(x) => x,
+            Err(_) => return Ok(res),
+        };
+
+        // These are the train number ranges used for cross-border France-Belgium trains. Sadly
+        // doesn't seem to be a more reliable way to identify these than to just hardcode this...
+        if public_id_int < 100 || (public_id_int >= 19000 && public_id_int < 20000) {
+            res = &res | &self.get_train_ids_by_public_id(&public_id, "benb").await?;
+        }
+        Ok(res)
+    }
+
+    pub fn find_sncf_voyageurs_duplicate_trains(
+        &self,
+        _train_id: &str,
+        train_variant: &train_variant::ModelEx,
+        other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        let public_id = match &train_variant.variable_train.as_ref().unwrap().public_id {
+            Some(public_id) => public_id.clone(),
+            None => return Ok(vec![]),
+        };
+        let public_id_int: Option<u32> = public_id.parse().ok();
+        Ok(other_trains
+            .iter()
+            .map(|(_id, train)| train)
+            .filter(
+                |train_variant| {
+                    (
+                        train_variant.namespace == "benb"
+                        && train_variant.variable_train.as_ref().unwrap().public_id
+                            == Some(public_id.clone())
+                        && public_id_int.is_some()
+                        && (public_id_int.unwrap() < 100
+                            || (public_id_int.unwrap() >= 19000 && public_id_int.unwrap() < 20000))
+                    ) || (
+                        train_variant.namespace == "frtr"
+                        && train_variant
+                        .variable_train
+                        .clone()
+                        .unwrap()
+                        .public_id
+                        .unwrap_or("".to_string())
+                        .split("-")
+                        .map(|x| x.to_string())
+                        .collect::<Vec<String>>()
+                        .contains(&public_id)
+                    )
+                }
+            )
+            .cloned()
+            .collect()
+        )
+    }
+
+    pub async fn get_transilien_duplicate_trains(
+        &self, train_variant: &train_variant::ModelEx
+    ) -> Result<HashSet<(String, String)>, Error> {
+        let public_ids: Vec<String>
+            = match &train_variant.variable_train.as_ref().unwrap().public_id {
+            Some(public_id) => public_id.clone(),
+            None => return Ok(HashSet::new()),
+        }.split("-").map(|x| x.to_string()).collect();
+        let mut out: HashSet<(String, String)> = HashSet::new();
+        for public_id in public_ids {
+            out = &out | &self.get_train_ids_by_public_id(&public_id, "frsv").await?;
+        }
+        Ok(out)
+    }
+
+    pub fn find_transilien_duplicate_trains(
+        &self,
+        _train_id: &str,
+        train_variant: &train_variant::ModelEx,
+        other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        let public_ids: HashSet<String>
+            = match &train_variant.variable_train.as_ref().unwrap().public_id {
+            Some(public_id) => public_id.clone(),
+            None => return Ok(vec![]),
+        }.split("-").map(|x| x.to_string()).collect();
+        Ok(other_trains
+            .iter()
+            .map(|(_id, train)| train)
+            .filter(
+                |train_variant|
+                train_variant.namespace == "frsv"
+                && public_ids.contains(
+                    &train_variant
+                    .variable_train
+                    .clone()
+                    .unwrap()
+                    .public_id
+                    .unwrap_or("".to_string())
+                )
+            )
+            .cloned()
+            .collect()
+        )
+    }
+
+    pub async fn get_transdev_rail_sud_duplicate_trains(
         &self, _train_variant: &train_variant::ModelEx
     ) -> Result<HashSet<(String, String)>, Error> {
-        // There's currently nothing
-        return Ok(HashSet::new());
+        Ok(HashSet::new())
+    }
+
+    pub fn find_transdev_rail_sud_duplicate_trains(
+        &self,
+        _train_id: &str,
+        _train_variant: &train_variant::ModelEx,
+        _other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        Ok(vec![])
+    }
+
+    pub async fn get_corse_duplicate_trains(
+        &self, _train_variant: &train_variant::ModelEx
+    ) -> Result<HashSet<(String, String)>, Error> {
+        Ok(HashSet::new())
+    }
+
+    pub fn find_corse_duplicate_trains(
+        &self,
+        _train_id: &str,
+        _train_variant: &train_variant::ModelEx,
+        _other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        Ok(vec![])
+    }
+
+    pub async fn get_renfe_av_ld_duplicate_trains(
+        &self, train_variant: &train_variant::ModelEx
+    ) -> Result<HashSet<(String, String)>, Error> {
+        let public_id = match &train_variant.variable_train.as_ref().unwrap().public_id {
+            Some(public_id) => public_id.clone(),
+            None => return Ok(HashSet::new()),
+        };
+        Ok(self.get_train_ids_by_id_substring(&public_id, "esrc").await?)
+    }
+
+    pub fn find_renfe_av_ld_duplicate_trains(
+        &self,
+        _train_id: &str,
+        train_variant: &train_variant::ModelEx,
+        other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        let public_id = match &train_variant.variable_train.as_ref().unwrap().public_id {
+            Some(public_id) => public_id.clone(),
+            None => return Ok(vec![]),
+        };
+        Ok(other_trains
+            .iter()
+            .filter(
+                |(train_id, train_variant)|
+                train_variant.namespace == "esrc"
+                && train_id[5..10] == public_id
+            )
+            .map(|(_id, train)| train)
+            .cloned()
+            .collect()
+        )
+    }
+
+    pub async fn get_renfe_cercanias_duplicate_trains(
+        &self, train_variant: &train_variant::ModelEx
+    ) -> Result<HashSet<(String, String)>, Error> {
+        let public_id = &train_variant.train_id.as_ref().unwrap()[5..10];
+        Ok(self.get_train_ids_by_public_id(&public_id, "esrl").await?)
+    }
+
+    pub fn find_renfe_cercanias_duplicate_trains(
+        &self,
+        train_id: &str,
+        _train_variant: &train_variant::ModelEx,
+        other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        let public_id = &train_id[5..10];
+        Ok(other_trains
+            .iter()
+            .map(|(_id, train)| train)
+            .filter(
+                |train_variant|
+                train_variant.namespace == "esrl"
+                && train_variant.variable_train.as_ref().unwrap().public_id
+                    == Some(public_id.to_string())
+            )
+            .cloned()
+            .collect()
+        )
+    }
+
+    pub async fn get_euskotren_duplicate_trains(
+        &self, _train_variant: &train_variant::ModelEx
+    ) -> Result<HashSet<(String, String)>, Error> {
+        Ok(HashSet::new())
+    }
+
+    pub fn find_euskotren_duplicate_trains(
+        &self,
+        _train_id: &str,
+        _train_variant: &train_variant::ModelEx,
+        _other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        Ok(vec![])
+    }
+
+    pub async fn get_fgc_duplicate_trains(
+        &self, _train_variant: &train_variant::ModelEx
+    ) -> Result<HashSet<(String, String)>, Error> {
+        Ok(HashSet::new())
+    }
+
+    pub fn find_fgc_duplicate_trains(
+        &self,
+        _train_id: &str,
+        _train_variant: &train_variant::ModelEx,
+        _other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        Ok(vec![])
+    }
+
+    pub async fn get_mallorca_duplicate_trains(
+        &self, _train_variant: &train_variant::ModelEx
+    ) -> Result<HashSet<(String, String)>, Error> {
+        Ok(HashSet::new())
+    }
+
+    pub fn find_mallorca_duplicate_trains(
+        &self,
+        _train_id: &str,
+        _train_variant: &train_variant::ModelEx,
+        _other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        Ok(vec![])
+    }
+
+    pub async fn get_ouigo_es_duplicate_trains(
+        &self, _train_variant: &train_variant::ModelEx
+    ) -> Result<HashSet<(String, String)>, Error> {
+        Ok(HashSet::new())
+    }
+
+    pub fn find_ouigo_es_duplicate_trains(
+        &self,
+        _train_id: &str,
+        _train_variant: &train_variant::ModelEx,
+        _other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        Ok(vec![])
+    }
+
+    pub async fn get_fgv_duplicate_trains(
+        &self, _train_variant: &train_variant::ModelEx
+    ) -> Result<HashSet<(String, String)>, Error> {
+        Ok(HashSet::new())
+    }
+
+    pub fn find_fgv_duplicate_trains(
+        &self,
+        _train_id: &str,
+        _train_variant: &train_variant::ModelEx,
+        _other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        Ok(vec![])
+    }
+
+    pub async fn get_cp_duplicate_trains(
+        &self, _train_variant: &train_variant::ModelEx
+    ) -> Result<HashSet<(String, String)>, Error> {
+        Ok(HashSet::new())
+    }
+
+    pub fn find_cp_duplicate_trains(
+        &self,
+        _train_id: &str,
+        _train_variant: &train_variant::ModelEx,
+        _other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        Ok(vec![])
+    }
+
+    pub async fn get_fertagus_duplicate_trains(
+        &self, _train_variant: &train_variant::ModelEx
+    ) -> Result<HashSet<(String, String)>, Error> {
+        Ok(HashSet::new())
+    }
+
+    pub fn find_fertagus_duplicate_trains(
+        &self,
+        _train_id: &str,
+        _train_variant: &train_variant::ModelEx,
+        _other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        Ok(vec![])
+    }
+
+    pub async fn get_nmbs_sncb_duplicate_trains(
+        &self, train_variant: &train_variant::ModelEx
+    ) -> Result<HashSet<(String, String)>, Error> {
+        let public_id = match &train_variant.variable_train.as_ref().unwrap().public_id {
+            Some(public_id) => public_id.clone(),
+            None => return Ok(HashSet::new()),
+        };
+
+        let mut res
+            = &(&(&self.get_train_ids_by_public_id(&public_id, "zzes").await?
+            // 920 is NMBS-SNCB
+            | &self.get_train_ids_by_public_id_and_operator(
+                &format!("{:0>5}", public_id), "920", "nlns"
+            ).await?)
+            | &self.get_train_ids_by_public_id_and_brand_id(
+                &format!("{:0>5}", public_id), "ECC", "nlns"
+            ).await?)
+            // 500 is Arriva
+            | &self.get_train_ids_by_public_id_and_operator(
+                &format!("{:0>5}", public_id), "500", "nlns"
+            ).await?;
+
+        let public_id_int: u32 = match public_id.parse() {
+            Ok(x) => x,
+            Err(_) => return Ok(res),
+        };
+
+        if public_id_int < 100 || (public_id_int >= 19000 && public_id_int < 20000) {
+            res = &res | &self.get_train_ids_by_public_id(&public_id, "frsv").await?;
+        }
+
+        if !public_id.starts_with("9") {
+            return Ok(res);
+        };
+        let train_reporting_number = if public_id[1..2] == *"0" {
+            let mut train_reporting_number = public_id.clone();
+            train_reporting_number.replace_range(1..2, "O");
+            train_reporting_number
+        } else if public_id[1..2] == *"1" {
+            let mut train_reporting_number = public_id.clone();
+            train_reporting_number.replace_range(1..2, "I");
+            train_reporting_number
+        } else {
+            return Ok(res);
+        };
+        Ok(
+            &res
+            | &self
+            .get_train_ids_by_public_id_and_operator(&train_reporting_number, "ES", "gbnr")
+            .await?
+        )
+    }
+
+    pub fn find_nmbs_sncb_duplicate_trains(
+        &self,
+        _train_id: &str,
+        train_variant: &train_variant::ModelEx,
+        other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        let public_id = match &train_variant.variable_train.as_ref().unwrap().public_id {
+            Some(public_id) => public_id.clone(),
+            None => return Ok(vec![]),
+        };
+        let public_id_int: Option<u32> = public_id.parse().ok();
+        let train_ids_by_id: Vec<train_variant::ModelEx> = other_trains
+            .iter()
+            .map(|(_id, train)| train)
+            .filter(
+                |train_variant|
+                (
+                    (
+                        (
+                            train_variant.namespace == "frsv"
+                            && public_id_int.is_some()
+                            && (public_id_int.unwrap() < 100
+                                || (public_id_int.unwrap() >= 19000
+                                    && public_id_int.unwrap() < 20000))
+                        )
+                        || train_variant.namespace == "zzes"
+                    )
+                    && train_variant.variable_train.as_ref().unwrap().public_id
+                        == Some(public_id.clone())
+                ) || (
+                    train_variant.namespace == "nlns"
+                    && (
+                        train_variant.variable_train.as_ref().unwrap().operator_id
+                            == Some("500".to_string())
+                        || train_variant.variable_train.as_ref().unwrap().operator_id
+                            == Some("920".to_string())
+                        || train_variant.variable_train.as_ref().unwrap().brand_id
+                            == Some("ECC".to_string())
+                    )
+                    && train_variant.variable_train.as_ref().unwrap().public_id
+                        == Some(format!("{:0>5}", public_id))
+                )
+            )
+            .cloned()
+            .collect();
+        if !public_id.starts_with("9") {
+            return Ok(train_ids_by_id);
+        };
+        let train_reporting_number = if public_id[1..2] == *"0" {
+            let mut train_reporting_number = public_id.clone();
+            train_reporting_number.replace_range(1..2, "O");
+            train_reporting_number
+        } else if public_id[1..2] == *"1" {
+            let mut train_reporting_number = public_id.clone();
+            train_reporting_number.replace_range(1..2, "I");
+            train_reporting_number
+        } else {
+            return Ok(train_ids_by_id);
+        };
+        let mut res: Vec<train_variant::ModelEx> = other_trains
+            .iter()
+            .map(|(_id, train)| train)
+            .filter(
+                |train_variant|
+                train_variant.namespace == "gbnr"
+                && train_variant.variable_train.as_ref().unwrap().operator_id
+                    == Some("ES".to_string())
+                && train_variant.variable_train.as_ref().unwrap().public_id
+                    == Some(train_reporting_number.clone())
+            )
+            .cloned()
+            .collect();
+        res.extend(train_ids_by_id);
+        Ok(res)
+    }
+
+    pub async fn get_ns_duplicate_trains(
+        &self, train_variant: &train_variant::ModelEx
+    ) -> Result<HashSet<(String, String)>, Error> {
+        let public_id = match &train_variant.variable_train.as_ref().unwrap().public_id {
+            Some(public_id) => public_id.clone(),
+            None => return Ok(HashSet::new()),
+        }.trim_start_matches("0").to_string();
+
+        if
+            train_variant.variable_train.as_ref().unwrap().operator_id
+                != Some("920".to_string())
+            && train_variant.variable_train.as_ref().unwrap().operator_id
+                != Some("500".to_string())
+            && train_variant.variable_train.as_ref().unwrap().brand_id
+                != Some("EST".to_string())
+            && train_variant.variable_train.as_ref().unwrap().brand_id
+                != Some("ECC".to_string()) {
+            return Ok(HashSet::new())
+        }
+
+        let res
+            = &self.get_train_ids_by_public_id(&public_id, "zzes").await?
+            | &self.get_train_ids_by_public_id(&public_id, "benb").await?;
+
+        if !public_id.starts_with("9") {
+            return Ok(res);
+        };
+        let train_reporting_number = if public_id[1..2] == *"0" {
+            let mut train_reporting_number = public_id.clone();
+            train_reporting_number.replace_range(1..2, "O");
+            train_reporting_number
+        } else if public_id[1..2] == *"1" {
+            let mut train_reporting_number = public_id.clone();
+            train_reporting_number.replace_range(1..2, "I");
+            train_reporting_number
+        } else {
+            return Ok(res);
+        };
+        Ok(
+            &res
+            | &self
+            .get_train_ids_by_public_id_and_operator(&train_reporting_number, "ES", "gbnr")
+            .await?
+        )
+    }
+
+    pub fn find_ns_duplicate_trains(
+        &self,
+        _train_id: &str,
+        train_variant: &train_variant::ModelEx,
+        other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        let public_id = match &train_variant.variable_train.as_ref().unwrap().public_id {
+            Some(public_id) => public_id.clone(),
+            None => return Ok(vec![]),
+        }.trim_start_matches("0").to_string();
+
+        if
+            train_variant.variable_train.as_ref().unwrap().operator_id
+                != Some("920".to_string())
+            && train_variant.variable_train.as_ref().unwrap().operator_id
+                != Some("500".to_string())
+            && train_variant.variable_train.as_ref().unwrap().brand_id
+                != Some("EST".to_string())
+            && train_variant.variable_train.as_ref().unwrap().brand_id
+                != Some("ECC".to_string()) {
+            return Ok(vec![])
+        }
+
+        let train_ids_by_id: Vec<train_variant::ModelEx> = other_trains
+            .iter()
+            .map(|(_id, train)| train)
+            .filter(
+                |train_variant|
+                (train_variant.namespace == "zzes" || train_variant.namespace == "benb")
+                && train_variant.variable_train.as_ref().unwrap().public_id
+                    == Some(public_id.clone())
+            )
+            .cloned()
+            .collect();
+        if !public_id.starts_with("9") {
+            return Ok(train_ids_by_id);
+        };
+        let train_reporting_number = if public_id[1..2] == *"0" {
+            let mut train_reporting_number = public_id.clone();
+            train_reporting_number.replace_range(1..2, "O");
+            train_reporting_number
+        } else if public_id[1..2] == *"1" {
+            let mut train_reporting_number = public_id.clone();
+            train_reporting_number.replace_range(1..2, "I");
+            train_reporting_number
+        } else {
+            return Ok(train_ids_by_id);
+        };
+        let mut res: Vec<train_variant::ModelEx> = other_trains
+            .iter()
+            .map(|(_id, train)| train)
+            .filter(
+                |train_variant|
+                train_variant.namespace == "gbnr"
+                && train_variant.variable_train.as_ref().unwrap().operator_id
+                    == Some("ES".to_string())
+                && train_variant.variable_train.as_ref().unwrap().public_id
+                    == Some(train_reporting_number.clone())
+            )
+            .cloned()
+            .collect();
+        res.extend(train_ids_by_id);
+        Ok(res)
     }
 
     pub async fn get_duplicate_trains(
         &self, namespace: &str, train_variant: &train_variant::ModelEx
     ) -> Result<HashSet<(String, String)>, Error> {
         match namespace {
-            "ieir" => Ok(self.get_irish_duplicate_trains(train_variant, "gbni").await?),
-            "gbni" => Ok(self.get_irish_duplicate_trains(train_variant, "ieir").await?),
+            "ieir" => Ok(self.get_ir_duplicate_trains(train_variant).await?),
+            "gbni" => Ok(self.get_nir_duplicate_trains(train_variant).await?),
             "gbnr" => Ok(self.get_network_rail_duplicate_trains(train_variant).await?),
             "zzes" => Ok(self.get_eurostar_duplicate_trains(train_variant).await?),
             "frsv" => Ok(self.get_sncf_voyageurs_duplicate_trains(train_variant).await?),
+            "frts" => Ok(self.get_transdev_rail_sud_duplicate_trains(train_variant).await?),
+            "frtr" => Ok(self.get_transilien_duplicate_trains(train_variant).await?),
+            "frco" => Ok(self.get_corse_duplicate_trains(train_variant).await?),
+            "esrl" => Ok(self.get_renfe_av_ld_duplicate_trains(train_variant).await?),
+            "esrc" => Ok(self.get_renfe_cercanias_duplicate_trains(train_variant).await?),
+            "eset" => Ok(self.get_euskotren_duplicate_trains(train_variant).await?),
+            "esfc" => Ok(self.get_fgc_duplicate_trains(train_variant).await?),
+            "escm" => Ok(self.get_mallorca_duplicate_trains(train_variant).await?),
+            "esoe" => Ok(self.get_ouigo_es_duplicate_trains(train_variant).await?),
+            "esfv" => Ok(self.get_fgv_duplicate_trains(train_variant).await?),
+            "ptcp" => Ok(self.get_cp_duplicate_trains(train_variant).await?),
+            "ptft" => Ok(self.get_fertagus_duplicate_trains(train_variant).await?),
+            "benb" => Ok(self.get_nmbs_sncb_duplicate_trains(train_variant).await?),
+            "nlns" => Ok(self.get_ns_duplicate_trains(train_variant).await?),
+            _ => {
+                println!("WARNING: Unmatched namespace when getting duplicate trains");
+                Ok(HashSet::new())
+            },
+        }
+    }
+
+    pub fn find_duplicate_trains(
+        &self,
+        train_id: &str,
+        train_variant: &train_variant::ModelEx,
+        namespace: &str,
+        other_trains: &Vec<(String, train_variant::ModelEx)>,
+    ) -> Result<Vec<train_variant::ModelEx>, Error> {
+        match namespace {
+            "ieir" => Ok(self.find_ir_duplicate_trains(train_id, train_variant, other_trains)?),
+            "gbni" => Ok(self.find_nir_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
+            "gbnr" => Ok(self.find_network_rail_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
+            "zzes" => Ok(self.find_eurostar_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
+            "frsv" => Ok(self.find_sncf_voyageurs_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
+            "frts" => Ok(self.find_transdev_rail_sud_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
+            "frtr" => Ok(self.find_transilien_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
+            "frco" => Ok(self.find_corse_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
+            "esrl" => Ok(self.find_renfe_av_ld_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
+            "esrc" => Ok(self.find_renfe_cercanias_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
+            "eset" => Ok(self.find_euskotren_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
+            "esfc" => Ok(self.find_fgc_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
+            "escm" => Ok(self.find_mallorca_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
+            "esoe" => Ok(self.find_ouigo_es_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
+            "esfv" => Ok(self.find_fgv_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
+            "ptcp" => Ok(self.find_cp_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
+            "ptft" => Ok(self.find_fertagus_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
+            "benb" => Ok(self.find_nmbs_sncb_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
+            "nlns" => Ok(self.find_ns_duplicate_trains(
+                    train_id, train_variant, other_trains
+                )?),
             _ => {
                 println!("WARNING: Unmatched namespace when finding duplicate trains");
-                Ok(HashSet::new())
+                Ok(vec![])
             },
         }
     }

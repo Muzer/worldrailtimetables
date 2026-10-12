@@ -5,6 +5,10 @@ use async_trait::async_trait;
 
 use gtfs_structures::{Gtfs, GtfsReader};
 
+use reqwest::{Client, retry};
+
+use std::io::Cursor;
+
 pub struct GtfsUrlFetcher {
     url: String,
     source: String,
@@ -25,10 +29,26 @@ impl GtfsUrlFetcher {
 impl GtfsFetcher for GtfsUrlFetcher {
     async fn fetch(&self) -> Result<Gtfs, Error> {
         println!("[{}] Fetching GTFS from {}", self.namespace, self.source);
-        Ok(GtfsReader::default()
-            .read_shapes(false)
-            .unkown_enum_as_default(false)
-            .read_from_url_async(self.url.clone())
-            .await?)
+        let client = Client::builder()
+            .retry(retry::for_host(self.url.clone()))
+            .user_agent("WorldRailTimetables/0.10.0")
+            .build()?;
+        let response = client
+            .get(self.url.clone())
+            .send()
+            .await?
+            .error_for_status()?;
+
+        // We have to read the whole thing as the result needs to be seekable
+        let reader = Cursor::new(response.bytes().await?);
+
+        Ok(Gtfs::try_from(
+            GtfsReader::default()
+                .read_shapes(false)
+                .unkown_enum_as_default(false)
+                .raw()
+                .read_from_reader(reader)?
+            )?
+        )
     }
 }

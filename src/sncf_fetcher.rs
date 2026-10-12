@@ -3,7 +3,7 @@ use crate::fetcher::StreamingFetcher;
 use async_trait::async_trait;
 use futures::stream::TryStreamExt;
 use rc_zip_tokio::ReadZipStreaming;
-use reqwest::Client;
+use reqwest::{Client, retry};
 use tokio::io;
 use tokio::io::{AsyncBufRead, BufReader};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
@@ -39,7 +39,7 @@ impl fmt::Display for SncfFetcherError {
 impl StreamingFetcher for SncfFetcher {
     async fn fetch(&self) -> Result<Box<dyn AsyncBufRead + Unpin + Send>, Error> {
         println!("[frsv] Fetching SNCF Voyageurs TGV/Intercités/TER data from {}", self.source);
-        let client = Client::new();
+        let client = Client::builder().retry(retry::for_host(self.url.clone())).build()?;
         let response = client.get(self.url.clone()).send().await?.error_for_status()?;
         let mut reader = response
             .bytes_stream()

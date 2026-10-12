@@ -1,8 +1,10 @@
 use crate::error::Error;
-use crate::fetcher::GtfsFetcher;
+use crate::fetcher::{GtfsFetcher, StreamingFetcher};
 use crate::gtfs_importer::GtfsImporter;
+use crate::gtfs_rt_fetcher::GtfsRtFetcher;
+use crate::gtfs_rt_importer::GtfsRtImporter;
 use crate::gtfs_url_fetcher::GtfsUrlFetcher;
-use crate::importer::SlowGtfsImporter;
+use crate::importer::{FastImporter, MainScheduleStatus, SlowGtfsImporter};
 use crate::manager::Manager;
 use crate::schedule::schedule;
 use crate::schedule_manager::ScheduleManager;
@@ -11,10 +13,11 @@ use chrono::offset::Utc;
 use chrono::{Days, NaiveTime, TimeZone};
 use chrono_tz::Europe::Paris;
 
-use sea_orm::EntityTrait;
+use sea_orm::{EntityTrait, QueryFilter};
 use sea_orm::entity::ActiveValue;
 
 use tokio::time;
+use tokio::io::AsyncReadExt;
 use tokio::time::Duration;
 
 use async_trait::async_trait;
@@ -33,7 +36,7 @@ impl EurostarManager {
     async fn reload_gtfs(
         &self,
         gtfs_fetcher: &GtfsUrlFetcher,
-        gtfs_importer: &mut GtfsImporter,
+        gtfs_importer: &GtfsImporter,
     ) -> Result<(), Error> {
         {
             let transaction = self.schedule_manager.transactional_write().await?;
@@ -62,7 +65,7 @@ impl EurostarManager {
     async fn update_gtfs(
         &self,
         gtfs_fetcher: &GtfsUrlFetcher,
-        gtfs_importer: &mut GtfsImporter,
+        gtfs_importer: &GtfsImporter,
     ) -> Result<(), Error> {
         loop {
             let now = Paris.from_utc_datetime(&Utc::now().naive_utc());
@@ -89,6 +92,54 @@ impl EurostarManager {
             self.reload_gtfs(gtfs_fetcher, gtfs_importer).await?;
         }
     }
+
+    async fn update_gtfs_rt(
+        &self,
+        gtfs_rt_fetcher: &GtfsRtFetcher,
+        gtfs_rt_importer: &GtfsRtImporter,
+        gtfs_fetcher: &GtfsUrlFetcher,
+        gtfs_importer: &GtfsImporter,
+    ) -> Result<(), Error> {
+        loop {
+            let mut gtfs_rt_protobuf = gtfs_rt_fetcher.fetch().await?;
+
+            let mut buf = Vec::new();
+
+            gtfs_rt_protobuf.read_to_end(&mut buf).await?;
+
+            let main_schedule_status = {
+                let transaction = self.schedule_manager.transactional_write().await?;
+
+                let schedule = schedule::Entity::load()
+                    .filter(schedule::COLUMN.namespace.eq("zzes"))
+                    .one(&*transaction)
+                    .await?
+                    .unwrap();
+
+                let main_schedule_status
+                    = gtfs_rt_importer.overlay(buf, &schedule, &transaction).await?;
+
+                transaction.commit().await?;
+
+                main_schedule_status
+            };
+
+            match main_schedule_status {
+                MainScheduleStatus::UpToDate | MainScheduleStatus::NoData => (),
+                MainScheduleStatus::NeedsUpdate => {
+                    println!("[zzes] Reloading GTFS due to GTFS-RT indicating update");
+                    self.reload_gtfs(gtfs_fetcher, gtfs_importer).await?;
+                },
+            };
+
+            // Still wait the interval even after reloading, in case the new version isn't
+            // available.
+
+            let mut interval = time::interval(Duration::from_secs(60));
+            interval.tick().await;
+            interval.tick().await;
+        }
+    }
 }
 
 #[async_trait]
@@ -99,9 +150,16 @@ impl Manager for EurostarManager {
             "eurostar.com",
             "zzes",
         );
-        let mut gtfs_importer = GtfsImporter::new();
+        let gtfs_importer = GtfsImporter::new();
 
-        match self.reload_gtfs(&gtfs_fetcher, &mut gtfs_importer).await {
+        let gtfs_rt_fetcher = GtfsRtFetcher::new(
+            "https://integration-storage.dm.eurostar.com/gtfs-prod/gtfs_rt_v2.bin",
+            "eurostar.com",
+            "zzes",
+        );
+        let gtfs_rt_importer = GtfsRtImporter::new(true, false, vec![]);
+
+        match self.reload_gtfs(&gtfs_fetcher, &gtfs_importer).await {
             Ok(()) => (),
             Err(x) => {
                 println!("Startup error! {}", x);
@@ -109,9 +167,16 @@ impl Manager for EurostarManager {
             },
         };
 
-        tokio::try_join!(async {
-            return self.update_gtfs(&gtfs_fetcher, &mut gtfs_importer).await;
-        },)?;
+        tokio::try_join!(
+            async {
+                return self.update_gtfs(&gtfs_fetcher, &gtfs_importer).await;
+            },
+            async {
+                return self.update_gtfs_rt(
+                    &gtfs_rt_fetcher, &gtfs_rt_importer, &gtfs_fetcher, &gtfs_importer
+                ).await;
+            },
+        )?;
 
         Ok(())
     }

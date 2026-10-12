@@ -1,9 +1,9 @@
 use crate::error::Error;
-use crate::importer::{FastImporter, SlowStreamingImporter};
+use crate::importer::{FastImporter, MainScheduleStatus, SlowStreamingImporter};
 use crate::schedule::{
-    AccommodationClass, accommodation_types, association_cancellation, association_node,
-    AssociationType, line, location, ReservationField, schedule, train, train_allocation,
-    train_cancellation, train_location, train_operator, TrainPower, TrainSource, TrainType,
+    AccommodationClass, AssociationType, ReservationField, TrainPower, TrainSource, TrainType,
+    accommodation_types, association_cancellation, association_node, brand, line, location,
+    schedule, train, train_allocation, train_cancellation, train_location, train_operator,
     train_validity_period, train_variant, variable_train,
 };
 
@@ -54,6 +54,7 @@ pub struct CifImporter {
     cached_operator_ids: HashSet<String>,
     cached_line_ids: HashSet<String>,
     cached_allocation_ids: HashSet<String>,
+    cached_brand_ids: HashSet<String>,
     // This cache is persistent; it is populated at the start of a process and never cleared.
     cached_train_variant_ids: HashMap<String, HashSet<i64>>,
     config: CifImporterConfig,
@@ -1711,6 +1712,7 @@ where
                 ReservationField::NotApplicable
             },
             wheelchairs: ReservationField::Mandatory,
+            international: ReservationField::Unknown,
             supplement_charged: None,
         }),
         "E" => Ok(variable_train::Reservations {
@@ -1739,6 +1741,7 @@ where
             } else {
                 ReservationField::NotMandatory
             },
+            international: ReservationField::Unknown,
             supplement_charged: None,
         }),
         "R" => Ok(variable_train::Reservations {
@@ -1763,6 +1766,7 @@ where
                 ReservationField::NotApplicable
             },
             wheelchairs: ReservationField::Recommended,
+            international: ReservationField::Unknown,
             supplement_charged: None,
         }),
         "S" => Ok(variable_train::Reservations {
@@ -1787,6 +1791,7 @@ where
                 ReservationField::NotApplicable
             },
             wheelchairs: ReservationField::Possible,
+            international: ReservationField::Unknown,
             supplement_charged: None,
         }),
         "" => Ok(variable_train::Reservations {
@@ -1819,6 +1824,7 @@ where
                     ReservationField::NotApplicable
                 }
             },
+            international: ReservationField::Unknown,
             supplement_charged: None,
         }),
         x => Err(error_logic(CifErrorType::InvalidReservationType(
@@ -3117,7 +3123,7 @@ impl CifImporter {
         namespace: &str,
         number: u64,
         transaction: &DatabaseTransaction,
-    ) -> Result<(usize, usize, usize), Error> {
+    ) -> Result<(usize, usize, usize, usize), Error> {
         let modification_type =
             read_modification_type(&line[2..3], produce_cif_error_closure(number, 2))?;
         let (stp_modification_type, is_stp) =
@@ -3191,7 +3197,7 @@ impl CifImporter {
                         .await?;
                 },
             };
-            return Ok((0, 0, 0));
+            return Ok((0, 0, 0, 0));
         }
 
         let end = read_date(&line[15..21], produce_cif_error_closure(number, 15))?;
@@ -3231,7 +3237,7 @@ impl CifImporter {
                 train_variant.save(transaction).await?;
             }
 
-            return Ok((0, 0, 0));
+            return Ok((0, 0, 0, 0));
         }
 
         if modification_type == ModificationType::Amend
@@ -3259,7 +3265,7 @@ impl CifImporter {
                     }
                 }
             }
-            return Ok((0, 0, 0));
+            return Ok((0, 0, 0, 0));
         }
 
         let train_status = read_train_status(&line[29..30], produce_cif_error_closure(number, 29))?;
@@ -3338,10 +3344,36 @@ impl CifImporter {
             produce_cif_error_closure(number, 68),
         )?;
 
-        let brand = read_brand(&line[74..78], produce_cif_error_closure(number, 74))?;
+        let brand_id = &line[74..78];
+        let brand_name = read_brand(brand_id, produce_cif_error_closure(number, 74))?;
 
-        // From this point on we will need to ensure that the line and allocation are in the
+        // From this point on we will need to ensure that the brand, line, and allocation are in the
         // database, so fill them in here
+        let mut brands_written = 0;
+        match &brand_name {
+            Some(brand_name) => if !self.cached_brand_ids.contains(brand_id.trim()) {
+                let brand = brand::Entity::load()
+                    .filter(brand::COLUMN.id.eq(brand_id.trim()))
+                    .filter(brand::COLUMN.namespace.eq(namespace))
+                    .one(transaction)
+                    .await?;
+                if brand.is_none() {
+                    let brand = brand::ActiveModelEx {
+                        id: ActiveValue::Set(brand_id.trim().to_string()),
+                        namespace: ActiveValue::Set(namespace.to_string()),
+                        description: ActiveValue::Set(Some(brand_name.to_string())),
+                        ..Default::default()
+                    };
+
+                    brand.insert(transaction).await?;
+
+                    brands_written += 1;
+                }
+                self.cached_brand_ids.insert(brand_id.trim().to_string());
+            },
+            None => (),
+        }
+
         let mut allocations_written = 0;
         match &timing_load_str {
             Some(timing_load_str) => {
@@ -3469,18 +3501,25 @@ impl CifImporter {
                     ..Default::default()
                 },
             ]),
-            brand: ActiveValue::Set(brand),
+            brand_id: ActiveValue::Set(match &brand_name {
+                Some(_) => Some(brand_id.trim().to_string()),
+                None => None,
+            }),
             name: ActiveValue::Set(None),
             line_id: ActiveValue::Set(Some(service_group.to_string())),
             uic_code: ActiveValue::Set(None),
             operator_id: ActiveValue::Set(None),
             wheelchair_accessible: ActiveValue::Set(None),
+            direction: ActiveValue::Set(None),
             has_toilets: ActiveValue::Set(false),
             has_luggage: ActiveValue::Set(false),
             has_families: ActiveValue::Set(false),
             has_passenger_communications: ActiveValue::Set(false),
             has_assistance: ActiveValue::Set(false),
             has_passenger_information: ActiveValue::Set(false),
+            has_fares: ActiveValue::Set(false),
+            has_occupancy: ActiveValue::Set(false),
+            has_boarding_information: ActiveValue::Set(false),
             ..Default::default()
         };
         variable_train.populate_reservations(&reservations);
@@ -3531,7 +3570,12 @@ impl CifImporter {
                 }
                 else if stp_modification_type == ModificationType::Amend
                     && train_variant.validity[0].valid_begin == begin
-                    && train_variant.train_id.is_none()
+                    && (
+                        train_variant.train_id.is_none()
+                        // This was probably upgraded to a main train when writing orphaned
+                        // replacements
+                        || !train_variants.iter().any(|x| x.train_id.is_none())
+                    )
                 {
                     let mut train_variant: train_variant::ActiveModelEx
                         = train_variant.clone().into();
@@ -3540,7 +3584,7 @@ impl CifImporter {
                     self.last_train_id = Some(main_train_id.to_string());
                 }
             }
-            return Ok((0, lines_written, allocations_written));
+            return Ok((0, brands_written, lines_written, allocations_written));
         }
 
         if modification_type == ModificationType::Insert
@@ -3560,7 +3604,7 @@ impl CifImporter {
                 self.last_train = Some(LastTrain::DatabaseInsert(new_train_variant));
                 self.last_train_id = Some(main_train_id.to_string());
 
-                return Ok((1, lines_written, allocations_written));
+                return Ok((1, brands_written, lines_written, allocations_written));
             }
 
             new_train_variant.train_id = ActiveValue::Set(Some(main_train_id.to_string()));
@@ -3568,7 +3612,7 @@ impl CifImporter {
             self.last_train_id = Some(main_train_id.to_string());
 
             // A train variant is not a train, to be pedantic
-            return Ok((0, lines_written, allocations_written));
+            return Ok((0, brands_written, lines_written, allocations_written));
         }
 
         if stp_modification_type == ModificationType::Amend {
@@ -3607,7 +3651,7 @@ impl CifImporter {
             }
 
             // A train variant is not a train, to be pedantic
-            return Ok((0, lines_written, allocations_written));
+            return Ok((0, brands_written, lines_written, allocations_written));
         }
 
         panic!("Unreachable");
@@ -4006,7 +4050,7 @@ impl CifImporter {
         namespace: &str,
         number: u64,
         transaction: &DatabaseTransaction,
-    ) -> Result<(usize, usize), Error> {
+    ) -> Result<(usize, usize, usize), Error> {
         // at this stage we can only be in an insert or amend statement, for STP other than CAN. So
         // we find the train we are inserting or amending.
 
@@ -4091,12 +4135,38 @@ impl CifImporter {
             produce_cif_error_closure(number, 48),
         )?;
 
-        let brand = read_brand(&line[54..58], produce_cif_error_closure(number, 54))?;
+        let brand_id = &line[54..58];
+        let brand_name = read_brand(brand_id, produce_cif_error_closure(number, 54))?;
 
         let uic_code = read_optional_string(&line[62..67]);
 
-        // From this point on we will need to ensure that the line and allocation are in the
+        // From this point on we will need to ensure that the brand, line, and allocation are in the
         // database, so fill them in here
+        let mut brands_written = 0;
+        match &brand_name {
+            Some(brand_name) => if !self.cached_brand_ids.contains(brand_id.trim()) {
+                let brand = brand::Entity::load()
+                    .filter(brand::COLUMN.id.eq(brand_id.trim()))
+                    .filter(brand::COLUMN.namespace.eq(namespace))
+                    .one(transaction)
+                    .await?;
+                if brand.is_none() {
+                    let brand = brand::ActiveModelEx {
+                        id: ActiveValue::Set(brand_id.trim().to_string()),
+                        namespace: ActiveValue::Set(namespace.to_string()),
+                        description: ActiveValue::Set(Some(brand_name.to_string())),
+                        ..Default::default()
+                    };
+
+                    brand.insert(transaction).await?;
+
+                    brands_written += 1;
+                }
+                self.cached_brand_ids.insert(brand_id.trim().to_string());
+            },
+            None => (),
+        }
+
         let mut allocations_written = 0;
         match &timing_load_str {
             Some(timing_load_str) => {
@@ -4216,18 +4286,25 @@ impl CifImporter {
                     ..Default::default()
                 },
             ]),
-            brand: ActiveValue::Set(brand),
+            brand_id: ActiveValue::Set(match &brand_name {
+                Some(_) => Some(brand_id.trim().to_string()),
+                None => None,
+            }),
             name: ActiveValue::Set(None),
             line_id: ActiveValue::Set(Some(service_group.to_string())),
             uic_code: ActiveValue::Set(uic_code),
             operator_id: ActiveValue::Set(operator_id),
             wheelchair_accessible: ActiveValue::Set(None),
+            direction: ActiveValue::Set(None),
             has_toilets: ActiveValue::Set(false),
             has_luggage: ActiveValue::Set(false),
             has_families: ActiveValue::Set(false),
             has_passenger_communications: ActiveValue::Set(false),
             has_assistance: ActiveValue::Set(false),
             has_passenger_information: ActiveValue::Set(false),
+            has_fares: ActiveValue::Set(false),
+            has_occupancy: ActiveValue::Set(false),
+            has_boarding_information: ActiveValue::Set(false),
             ..Default::default()
         };
         change_en_route.populate_reservations(&reservations);
@@ -4235,7 +4312,7 @@ impl CifImporter {
         change_en_route.populate_operating_characteristics(&operating_characteristics);
         self.change_en_route = Some(Box::new(change_en_route));
 
-        Ok((lines_written, allocations_written))
+        Ok((brands_written, lines_written, allocations_written))
     }
 
     async fn read_tiploc(
@@ -4482,9 +4559,9 @@ impl CifImporter {
         schedule: &schedule::ModelEx,
         number: u64,
         transaction: &DatabaseTransaction,
-    ) -> Result<(usize, usize, usize, usize, usize), Error> {
+    ) -> Result<(usize, usize, usize, usize, usize, usize), Error> {
         if line.is_empty() {
-            return Ok((0, 0, 0, 0, 0));
+            return Ok((0, 0, 0, 0, 0, 0));
         }
         if line.len() != 80 {
             return Err(CifError {
@@ -4499,36 +4576,37 @@ impl CifImporter {
         match &line[..2] {
             "HD" => {
                 self.read_header(&line, schedule, number, transaction).await?;
-                Ok((0, 0, 0, 0, 0))
+                Ok((0, 0, 0, 0, 0, 0))
             },
             "TI" => {
                 Ok((self
                     .read_tiploc(&line, namespace, number, ModificationType::Insert, transaction)
                     .await?,
-                    0, 0, 0, 0))
+                    0, 0, 0, 0, 0))
             },
             "TA" => {
                 Ok((self
                     .read_tiploc(&line, namespace, number, ModificationType::Amend, transaction)
                     .await?,
-                    0, 0, 0, 0))
+                    0, 0, 0, 0, 0))
             },
             "TD" => {
                 Ok((self
                     .read_tiploc(&line, namespace, number, ModificationType::Delete, transaction)
                     .await?,
-                    0, 0, 0, 0))
+                    0, 0, 0, 0, 0))
             },
             "AA" => {
                 self.read_association(&line, namespace, number, transaction).await?;
-                Ok((0, 0, 0, 0, 0))
+                Ok((0, 0, 0, 0, 0, 0))
             },
             "BS" => {
-                let (train_count, line_count, allocation_count)
+                let (train_count, brand_count, line_count, allocation_count)
                     = self.read_basic_schedule(&line, namespace, number, transaction).await?;
-                Ok((0, line_count, allocation_count, 0, train_count))
+                Ok((0, brand_count, line_count, allocation_count, 0, train_count))
             },
             "BX" => Ok((
+                0,
                 0,
                 0,
                 0,
@@ -4537,22 +4615,23 @@ impl CifImporter {
             )),
             "LO" => {
                 self.read_location_origin(&line, namespace, number, transaction).await?;
-                Ok((0, 0, 0, 0, 0))
+                Ok((0, 0, 0, 0, 0, 0))
             },
             "LI" => {
                 self.read_location_intermediate(&line, namespace, number, transaction).await?;
-                Ok((0, 0, 0, 0, 0))
+                Ok((0, 0, 0, 0, 0, 0))
             },
             "LT" => {
                 self.read_location_terminating(&line, namespace, number, transaction).await?;
-                Ok((0, 0, 0, 0, 0))
+                Ok((0, 0, 0, 0, 0, 0))
             },
             "CR" => {
-                let (line_count, allocation_count)
+                let (brand_count, line_count, allocation_count)
                     = self.read_change_en_route(&line, namespace, number, transaction).await?;
-                Ok((0, line_count, allocation_count, 0, 0))
+                Ok((0, brand_count, line_count, allocation_count, 0, 0))
             },
-            "ZZ" => Ok((0, 0, 0, 0, self.finalise(&line, namespace, number, transaction).await?)),
+            "ZZ"
+                => Ok((0, 0, 0, 0, 0, self.finalise(&line, namespace, number, transaction).await?)),
             x => Err(CifError {
                 error_type: CifErrorType::InvalidRecordType(x.to_string()),
                 line: number,
@@ -4577,6 +4656,7 @@ impl SlowStreamingImporter for CifImporter {
         let namespace = schedule.namespace.clone();
 
         let mut location_count = 0;
+        let mut brand_count = 0;
         let mut line_count = 0;
         let mut allocation_count = 0;
         let mut operator_count = 0;
@@ -4590,9 +4670,10 @@ impl SlowStreamingImporter for CifImporter {
 
         while let Some(line) = lines.next_line().await? {
             i += 1;
-            let (new_locations, new_lines, new_allocations, new_operators, new_trains)
+            let (new_locations, new_brands, new_lines, new_allocations, new_operators, new_trains)
                 = self.read_record(line, schedule, i, transaction).await?;
             location_count += new_locations;
+            brand_count += new_brands;
             line_count += new_lines;
             allocation_count += new_allocations;
             operator_count += new_operators;
@@ -4600,10 +4681,12 @@ impl SlowStreamingImporter for CifImporter {
             if i % 1000 == 0 {
                 println!(
                     "[{}] After {} lines, \
-                    persisted {} locations, {} lines, {} operators, {} allocations, {} trains",
+                    persisted {} locations, {} brands, {} lines, {} operators, {} allocations, \
+                    {} trains",
                     namespace,
                     i,
                     location_count,
+                    brand_count,
                     line_count,
                     operator_count,
                     allocation_count,
@@ -4617,9 +4700,11 @@ impl SlowStreamingImporter for CifImporter {
         self.cached_operator_ids.clear();
 
         println!(
-            "[{}] Persisted {} locations, {} lines, {} operators, {} allocations, {} trains",
+            "[{}] Persisted {} locations, {} brands, {} lines, {} operators, {} allocations, \
+            {} trains",
             namespace,
             location_count,
+            brand_count,
             line_count,
             operator_count,
             allocation_count,
@@ -5149,7 +5234,8 @@ impl NrJsonImporter {
             produce_nr_json_error_closure("CIF_reservations".to_string()),
         )?;
 
-        let brand = match &schedule_segment.cif_service_branding {
+        let brand_id = &schedule_segment.cif_service_branding;
+        let brand_name = match &brand_id {
             Some(x) => read_brand(
                 x,
                 produce_nr_json_error_closure("CIF_service_branding".to_string()),
@@ -5219,6 +5305,27 @@ impl NrJsonImporter {
                     };
 
                     line.insert(transaction).await?;
+                }
+            },
+            None => (),
+        };
+
+        match &brand_id {
+            Some(brand_id) => {
+                let brand = brand::Entity::load()
+                    .filter(brand::COLUMN.id.eq(brand_id.trim()))
+                    .filter(brand::COLUMN.namespace.eq(namespace))
+                    .one(transaction)
+                    .await?;
+                if brand.is_none() {
+                    let brand = brand::ActiveModelEx {
+                        id: ActiveValue::Set(brand_id.trim().to_string()),
+                        namespace: ActiveValue::Set(namespace.to_string()),
+                        description: ActiveValue::Set(brand_name),
+                        ..Default::default()
+                    };
+
+                    brand.insert(transaction).await?;
                 }
             },
             None => (),
@@ -5305,18 +5412,22 @@ impl NrJsonImporter {
                     ..Default::default()
                 },
             ]),
-            brand: ActiveValue::Set(brand),
+            brand_id: ActiveValue::Set(brand_id.clone()),
             name: ActiveValue::Set(None),
             line_id: ActiveValue::Set(service_group.clone()),
             uic_code: ActiveValue::Set(uic_code),
             operator_id: ActiveValue::Set(Some(atoc_code.to_string())),
             wheelchair_accessible: ActiveValue::Set(None),
+            direction: ActiveValue::Set(None),
             has_toilets: ActiveValue::Set(false),
             has_luggage: ActiveValue::Set(false),
             has_families: ActiveValue::Set(false),
             has_passenger_communications: ActiveValue::Set(false),
             has_assistance: ActiveValue::Set(false),
             has_passenger_information: ActiveValue::Set(false),
+            has_fares: ActiveValue::Set(false),
+            has_occupancy: ActiveValue::Set(false),
+            has_boarding_information: ActiveValue::Set(false),
             ..Default::default()
         };
         variable_train.populate_reservations(&reservations);
@@ -5372,7 +5483,8 @@ impl NrJsonImporter {
         // check that our schedule is the correct one
         if begin > *schedule.valid_end.as_ref().unwrap() {
             println!(
-                "{} is later than {}, skipping...",
+                "[{}] {} is later than {}, skipping...",
+                namespace,
                 begin,
                 schedule.valid_end.as_ref().unwrap()
             );
@@ -5437,7 +5549,7 @@ impl NrJsonImporter {
                 },
             };
 
-            println!("Successfully deleted train {}", main_train_id);
+            println!("[{}] Successfully deleted train {}", namespace, main_train_id);
             return Ok(true);
         }
 
@@ -5449,7 +5561,8 @@ impl NrJsonImporter {
         // check that our schedule is the correct one
         if end < *schedule.valid_begin.as_ref().unwrap() {
             println!(
-                "{} is earlier than {}, skipping...",
+                "[{}] {} is earlier than {}, skipping...",
+                namespace,
                 begin,
                 schedule.valid_end.as_ref().unwrap()
             );
@@ -5496,7 +5609,7 @@ impl NrJsonImporter {
                 train_variant.save(transaction).await?;
             }
 
-            println!("Successfully cancelled train {}", main_train_id);
+            println!("[{}] Successfully cancelled train {}", namespace, main_train_id);
             return Ok(true);
         }
 
@@ -5527,7 +5640,7 @@ impl NrJsonImporter {
                 }
             }
 
-            println!("Successfully updated cancellation {}", main_train_id);
+            println!("[{}] Successfully updated cancellation {}", namespace, main_train_id);
 
             return Ok(true);
         }
@@ -5686,7 +5799,7 @@ impl NrJsonImporter {
                         = train_variant.clone().into();
                     amend_train(&mut train_variant, new_train_variant.clone());
                     train_variant.save(transaction).await?;
-                    println!("Successfully updated train {}", main_train_id);
+                    println!("[{}] Successfully updated train {}", namespace, main_train_id);
                 }
                 else if stp_modification_type == ModificationType::Amend
                     && train_variant.validity[0].valid_begin == begin
@@ -5696,7 +5809,7 @@ impl NrJsonImporter {
                         = train_variant.clone().into();
                     amend_train(&mut train_variant, new_train_variant.clone());
                     train_variant.save(transaction).await?;
-                    println!("Successfully updated train {}", main_train_id);
+                    println!("[{}] Successfully updated train {}", namespace, main_train_id);
                 }
             }
 
@@ -5724,7 +5837,7 @@ impl NrJsonImporter {
                 new_train_variant.parent_train_variant_id
                     = ActiveValue::Set(Some(train_variant.id));
                 new_train_variant.clone().insert(transaction).await?;
-                println!("Successfully replaced train {}", main_train_id);
+                println!("[{}] Successfully replaced train {}", namespace, main_train_id);
             }
 
             return Ok(true);
@@ -5738,10 +5851,11 @@ impl NrJsonImporter {
 impl FastImporter for NrJsonImporter {
     async fn overlay(
         &self, data: Vec<u8>, schedule: &schedule::ModelEx, transaction: &DatabaseTransaction
-    ) -> Result<(), Error> {
+    ) -> Result<MainScheduleStatus, Error> {
         let parsed_json = serde_json::from_slice::<NrJsonVstp>(&data)?;
+        println!("[{}] DEBUG Received {:?}", schedule.namespace, parsed_json);
         self.read_vstp_entry(&parsed_json, schedule, transaction).await?;
 
-        Ok(())
+        Ok(MainScheduleStatus::NoData)
     }
 }

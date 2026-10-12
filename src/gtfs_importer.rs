@@ -1,8 +1,9 @@
 use crate::error::Error;
 use crate::importer::SlowGtfsImporter;
 use crate::schedule::{
-    line, location, schedule, train, train_cancellation, train_location, train_operator,
-    TrainSource, TrainType, train_validity_period, train_variant, variable_train,
+    Direction, TrainSource, TrainType, line, location, schedule, sublocation, train,
+    train_cancellation, train_location, train_operator, train_validity_period, train_variant,
+    variable_train,
 };
 
 use async_trait::async_trait;
@@ -11,14 +12,15 @@ use chrono::{Datelike, NaiveTime};
 use chrono_tz::{ParseError, Tz};
 
 use gtfs_structures::{
-    Availability, BikesAllowedType, Calendar, CalendarDate, Exception, ExtendedRouteType, Gtfs,
-    LocationType, PickupDropOffType, RouteType, Stop, StopTime, TimepointType,
+    Availability, BikesAllowedType, Calendar, CalendarDate, DirectionType, Exception,
+    ExtendedRouteType, Gtfs, LocationType, PickupDropOffType, RouteType, Stop, StopTime,
+    TimepointType,
 };
 
 use rgb::RGB8;
 
-use sea_orm::DatabaseTransaction;
-use sea_orm::entity::{ActiveHasMany, ActiveHasOne, ActiveValue};
+use sea_orm::{DatabaseTransaction, EntityTrait};
+use sea_orm::entity::{ActiveBelongsTo, ActiveHasMany, ActiveHasOne, ActiveValue};
 
 use std::collections::{HashMap};
 use std::fmt;
@@ -26,7 +28,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 pub struct GtfsImporter {
-    base_gtfs: Option<Gtfs>,
 }
 
 #[derive(Clone, Debug)]
@@ -113,7 +114,9 @@ fn load_stop(
             }
         },
         public_id: ActiveValue::Set(match &stop.code {
-            Some(x) if x == "0" => None, // Irish Rail publishes many stops with stop code 0
+            // Irish Rail/NMBS-SNCB publishes many stops with stop code 0 or empty string
+            // respectively
+            Some(x) if x == "0" || x == "" => None,
             Some(x) => Some(x.clone()),
             None => None,
         }),
@@ -491,13 +494,82 @@ fn colour_to_u32(colour: RGB8) -> u32 {
     (u32::from(colour.r) << 16) + (u32::from(colour.g) << 8) + u32::from(colour.b)
 }
 
+fn get_train_type(route_type: RouteType) -> Result<TrainType, GtfsImportError> {
+    match route_type {
+        RouteType::Tramway => Ok(TrainType::Tram),
+        RouteType::Subway => Ok(TrainType::Metro),
+        RouteType::Rail => Ok(TrainType::Passenger),
+        RouteType::Bus => Ok(TrainType::Bus),
+        RouteType::Ferry => Ok(TrainType::Ship),
+        RouteType::CableCar => Ok(TrainType::CableTram),
+        RouteType::Gondola => Ok(TrainType::CableCar),
+        RouteType::Funicular => Ok(TrainType::Funicular),
+        RouteType::Extended(extended) => match extended {
+            ExtendedRouteType::Railway => Ok(TrainType::Passenger),
+            ExtendedRouteType::HighSpeedRail => Ok(TrainType::HighSpeedPassenger),
+            ExtendedRouteType::LongDistanceTrains => Ok(TrainType::LongDistancePassenger),
+            ExtendedRouteType::InterRegionalRail => Ok(TrainType::InterregionalPassenger),
+            ExtendedRouteType::CarTransportRail => Ok(TrainType::CarCarryingPassenger),
+            ExtendedRouteType::SleeperRail => Ok(TrainType::SleeperPassenger),
+            ExtendedRouteType::RegionalRail => Ok(TrainType::RegionalPassenger),
+            ExtendedRouteType::TouristRailway => Ok(TrainType::TouristPassenger),
+            ExtendedRouteType::RailShuttleWithinComplex => Ok(TrainType::ShuttlePassenger),
+            ExtendedRouteType::SuburbanRailway => Ok(TrainType::SuburbanPassenger),
+            ExtendedRouteType::ReplacementRail => Ok(TrainType::ReplacementPassenger),
+            ExtendedRouteType::SpecialRail => Ok(TrainType::SpecialPassenger),
+            ExtendedRouteType::LorryTransportRail => Ok(TrainType::LorryCarryingPassenger),
+            ExtendedRouteType::OtherRail => Ok(TrainType::Passenger),
+            ExtendedRouteType::CrossCountryRail => Ok(TrainType::CrossCountryPassenger),
+            ExtendedRouteType::VehicleTransportRail => Ok(TrainType::CarCarryingPassenger),
+            ExtendedRouteType::RackAndPinionRailway =>
+                Ok(TrainType::RackAndPinionPassenger),
+            ExtendedRouteType::AdditionalRail => Ok(TrainType::ReliefPassenger),
+            ExtendedRouteType::Coach => Ok(TrainType::Coach),
+            ExtendedRouteType::InternationalCoach => Ok(TrainType::InternationalCoach),
+            ExtendedRouteType::NationalCoach => Ok(TrainType::NationalCoach),
+            ExtendedRouteType::ShuttleCoach => Ok(TrainType::ShuttleCoach),
+            ExtendedRouteType::RegionalCoach => Ok(TrainType::RegionalCoach),
+            ExtendedRouteType::SpecialCoach => Ok(TrainType::SpecialCoach),
+            ExtendedRouteType::SightseeingCoach => Ok(TrainType::SightseeingCoach),
+            ExtendedRouteType::TouristCoach => Ok(TrainType::TouristCoach),
+            ExtendedRouteType::CommuterCoach => Ok(TrainType::CommuterCoach),
+            ExtendedRouteType::OtherCoach => Ok(TrainType::Coach),
+            ExtendedRouteType::UrbanRailway => Ok(TrainType::UrbanPassenger),
+            ExtendedRouteType::Metro => Ok(TrainType::Metro),
+            ExtendedRouteType::Underground => Ok(TrainType::Metro),
+            ExtendedRouteType::UrbanRailwayServiceDetail => Ok(TrainType::UrbanPassenger),
+            ExtendedRouteType::OtherUrbanRailway => Ok(TrainType::UrbanPassenger),
+            ExtendedRouteType::Monorail => Ok(TrainType::Monorail),
+            ExtendedRouteType::Bus => Ok(TrainType::Bus),
+            ExtendedRouteType::DemandAndResponseBus => Ok(TrainType::OnDemandBus),
+            // TODO other bus types not yet supported
+            ExtendedRouteType::Tram => Ok(TrainType::Tram),
+            // TODO other tram types not yet supported
+            ExtendedRouteType::Air => Ok(TrainType::Air),
+            ExtendedRouteType::Ferry => Ok(TrainType::Ship),
+            ExtendedRouteType::CableCar => Ok(TrainType::CableCar),
+            ExtendedRouteType::Funicular => Ok(TrainType::Funicular),
+            ExtendedRouteType::Taxi => Ok(TrainType::Taxi),
+            // TODO there's a few more here, panic for now
+            x => Err(GtfsImportError {
+                error_type: GtfsErrorType::UnknownExtendedRouteType(x),
+                file: "routes".to_string(),
+            }.into()),
+        },
+        x => Err(GtfsImportError {
+            error_type: GtfsErrorType::UnknownRouteType(x),
+            file: "routes".to_string(),
+        }.into()),
+    }
+}
+
 impl GtfsImporter {
     pub fn new() -> GtfsImporter {
-        GtfsImporter { base_gtfs: None }
+        GtfsImporter {}
     }
 
     async fn overlay_worker(
-        &mut self,
+        &self,
         gtfs: Gtfs,
         schedule: &schedule::ModelEx,
         transaction: &DatabaseTransaction,
@@ -509,6 +581,7 @@ impl GtfsImporter {
             }.into());
         }
 
+        // TODO this is a hack, this will be an issue if agencies end up with different TZs
         let default_timezone = gtfs.agencies[0].timezone.clone();
 
         let default_timezone = match Tz::from_str(&default_timezone) {
@@ -525,6 +598,8 @@ impl GtfsImporter {
 
         let mut active_schedule: schedule::ActiveModelEx = schedule.clone().into();
 
+        active_schedule.timezone = ActiveValue::Set(Some(default_timezone.to_owned()));
+
         for feed_info in &gtfs.feed_info {
             active_schedule.their_id = ActiveValue::Set(feed_info.version.clone());
             active_schedule.valid_begin = ActiveValue::Set(feed_info.start_date.map(
@@ -533,7 +608,6 @@ impl GtfsImporter {
             active_schedule.valid_end = ActiveValue::Set(feed_info.end_date.map(
                 |x| x.and_hms_opt(0, 0, 0).unwrap()
             ));
-            active_schedule.timezone = ActiveValue::Set(Some(default_timezone.to_owned()));
         }
 
         // We can't use the relationships of this to add things, as we can't use `save` due to our
@@ -544,20 +618,51 @@ impl GtfsImporter {
 
         let mut location_count: usize = 0;
         println!("[{}] Loading locations...", namespace);
+        // Write sublocations at the end to ensure we comply with FK constraints
+        let mut pending_sublocations = vec![];
         for (_, stop) in &gtfs.stops {
             match stop.location_type {
-                LocationType::StopPoint => {
-                    if stop.parent_station.is_none() {
+                LocationType::StopPoint => match &stop.parent_station {
+                    None => {
                         let location = load_stop(stop, &default_timezone, &namespace)?;
                         location.insert(transaction).await?;
                         location_count += 1;
-                    }
-                }
+                    },
+                    Some(parent_station_id) => {
+                        let parent_station = &gtfs.stops.get(parent_station_id).unwrap();
+                        match &parent_station.parent_station {
+                            Some(parent_parent_station_id) => {
+                                let sublocation = sublocation::ActiveModelEx {
+                                    id: ActiveValue::Set(stop.id.clone()),
+                                    namespace: ActiveValue::Set(namespace.clone()),
+                                    location_id:
+                                        ActiveValue::Set(parent_parent_station_id.clone()),
+                                    platform:
+                                        ActiveValue::Set(parent_station.platform_code.clone()),
+                                    platform_zone: ActiveValue::Set(stop.name.clone()),
+                                    ..Default::default()
+                                };
+                                pending_sublocations.push(sublocation);
+                            },
+                            None => {
+                                let sublocation = sublocation::ActiveModelEx {
+                                    id: ActiveValue::Set(stop.id.clone()),
+                                    namespace: ActiveValue::Set(namespace.clone()),
+                                    location_id: ActiveValue::Set(parent_station_id.clone()),
+                                    platform: ActiveValue::Set(stop.platform_code.clone()),
+                                    platform_zone: ActiveValue::Set(None),
+                                    ..Default::default()
+                                };
+                                pending_sublocations.push(sublocation);
+                            },
+                        }
+                    },
+                },
                 LocationType::StopArea => {
                     let location = load_stop(stop, &default_timezone, &namespace)?;
                     location.insert(transaction).await?;
                     location_count += 1;
-                }
+                },
                 LocationType::StationEntrance => (), // don't care
                 LocationType::GenericNode => (),     // also don't care
                 LocationType::BoardingArea => (), // also don't care, will be looked up later if needed
@@ -569,28 +674,8 @@ impl GtfsImporter {
                 }
             }
         }
+        sublocation::Entity::insert_many(pending_sublocations).exec(transaction).await?;
         println!("[{}] Persisted {} locations", namespace, location_count);
-
-        let mut line_count: usize = 0;
-        println!("[{}] Loading lines...", namespace);
-        for (route_id, route) in &gtfs.routes {
-            let line = line::ActiveModelEx {
-                id: ActiveValue::Set(route_id.clone()),
-                namespace: ActiveValue::Set(namespace.to_owned()),
-                public_id: ActiveValue::Set(route.short_name.clone()),
-                name: ActiveValue::Set(route.long_name.clone()),
-                description: ActiveValue::Set(route.desc.clone()),
-                url: ActiveValue::Set(route.url.clone()),
-                foreground_colour: ActiveValue::Set(route.text_color.map(|x| colour_to_u32(x))),
-                background_colour: ActiveValue::Set(route.color.map(|x| colour_to_u32(x))),
-                ..Default::default()
-            };
-
-            line.insert(transaction).await?;
-            line_count += 1;
-        }
-
-        println!("[{}] Persisted {} lines", namespace, line_count);
 
         let mut operator_count: usize = 0;
         println!("[{}] Loading operators...", namespace);
@@ -611,6 +696,30 @@ impl GtfsImporter {
         }
 
         println!("[{}] Persisted {} operators", namespace, operator_count);
+
+        let mut line_count: usize = 0;
+        println!("[{}] Loading lines...", namespace);
+        for (route_id, route) in &gtfs.routes {
+            let train_type = get_train_type(route.route_type)?;
+            let line = line::ActiveModelEx {
+                id: ActiveValue::Set(route_id.clone()),
+                namespace: ActiveValue::Set(namespace.to_owned()),
+                operator_id: ActiveValue::Set(route.agency_id.clone()),
+                public_id: ActiveValue::Set(route.short_name.clone()),
+                name: ActiveValue::Set(route.long_name.clone()),
+                description: ActiveValue::Set(route.desc.clone()),
+                url: ActiveValue::Set(route.url.clone()),
+                foreground_colour: ActiveValue::Set(route.text_color.map(|x| colour_to_u32(x))),
+                background_colour: ActiveValue::Set(route.color.map(|x| colour_to_u32(x))),
+                train_type: ActiveValue::Set(Some(train_type)),
+                ..Default::default()
+            };
+
+            line.insert(transaction).await?;
+            line_count += 1;
+        }
+
+        println!("[{}] Persisted {} lines", namespace, line_count);
 
         let mut train_count: usize = 0;
         println!("[{}] Loading trains...", namespace);
@@ -638,84 +747,18 @@ impl GtfsImporter {
                 None => gtfs.agencies[0].clone(),
             };
 
+            let train_type = get_train_type(route.route_type)?;
+
             let variable_train = variable_train::ActiveModelEx {
                 namespace: ActiveValue::Set(namespace.to_owned()),
-                train_type: ActiveValue::Set(match route.route_type {
-                    RouteType::Tramway => TrainType::Tram,
-                    RouteType::Subway => TrainType::Metro,
-                    RouteType::Rail => TrainType::Passenger,
-                    RouteType::Bus => TrainType::Bus,
-                    RouteType::Ferry => TrainType::Ship,
-                    RouteType::CableCar => TrainType::CableTram,
-                    RouteType::Gondola => TrainType::CableCar,
-                    RouteType::Funicular => TrainType::Funicular,
-                    RouteType::Extended(extended) => match extended {
-                        ExtendedRouteType::Railway => TrainType::Passenger,
-                        ExtendedRouteType::HighSpeedRail => TrainType::HighSpeedPassenger,
-                        ExtendedRouteType::LongDistanceTrains => TrainType::LongDistancePassenger,
-                        ExtendedRouteType::InterRegionalRail => TrainType::InterregionalPassenger,
-                        ExtendedRouteType::CarTransportRail => TrainType::CarCarryingPassenger,
-                        ExtendedRouteType::SleeperRail => TrainType::SleeperPassenger,
-                        ExtendedRouteType::RegionalRail => TrainType::RegionalPassenger,
-                        ExtendedRouteType::TouristRailway => TrainType::TouristPassenger,
-                        ExtendedRouteType::RailShuttleWithinComplex => TrainType::ShuttlePassenger,
-                        ExtendedRouteType::SuburbanRailway => TrainType::SuburbanPassenger,
-                        ExtendedRouteType::ReplacementRail => TrainType::ReplacementPassenger,
-                        ExtendedRouteType::SpecialRail => TrainType::SpecialPassenger,
-                        ExtendedRouteType::LorryTransportRail => TrainType::LorryCarryingPassenger,
-                        ExtendedRouteType::OtherRail => TrainType::Passenger,
-                        ExtendedRouteType::CrossCountryRail => TrainType::CrossCountryPassenger,
-                        ExtendedRouteType::VehicleTransportRail => TrainType::CarCarryingPassenger,
-                        ExtendedRouteType::RackAndPinionRailway =>
-                            TrainType::RackAndPinionPassenger,
-                        ExtendedRouteType::AdditionalRail => TrainType::ReliefPassenger,
-                        ExtendedRouteType::Coach => TrainType::Coach,
-                        ExtendedRouteType::InternationalCoach => TrainType::InternationalCoach,
-                        ExtendedRouteType::NationalCoach => TrainType::NationalCoach,
-                        ExtendedRouteType::ShuttleCoach => TrainType::ShuttleCoach,
-                        ExtendedRouteType::RegionalCoach => TrainType::RegionalCoach,
-                        ExtendedRouteType::SpecialCoach => TrainType::SpecialCoach,
-                        ExtendedRouteType::SightseeingCoach => TrainType::SightseeingCoach,
-                        ExtendedRouteType::TouristCoach => TrainType::TouristCoach,
-                        ExtendedRouteType::CommuterCoach => TrainType::CommuterCoach,
-                        ExtendedRouteType::OtherCoach => TrainType::Coach,
-                        ExtendedRouteType::UrbanRailway => TrainType::UrbanPassenger,
-                        ExtendedRouteType::Metro => TrainType::Metro,
-                        ExtendedRouteType::Underground => TrainType::Metro,
-                        ExtendedRouteType::UrbanRailwayServiceDetail => TrainType::UrbanPassenger,
-                        ExtendedRouteType::OtherUrbanRailway => TrainType::UrbanPassenger,
-                        ExtendedRouteType::Monorail => TrainType::Monorail,
-                        ExtendedRouteType::Bus => TrainType::Bus,
-                        // TODO other bus types not yet supported
-                        ExtendedRouteType::Tram => TrainType::Tram,
-                        // TODO other tram types not yet supported
-                        ExtendedRouteType::Air => TrainType::Air,
-                        ExtendedRouteType::Ferry => TrainType::Ship,
-                        ExtendedRouteType::CableCar => TrainType::CableCar,
-                        ExtendedRouteType::Funicular => TrainType::Funicular,
-                        ExtendedRouteType::Taxi => TrainType::Taxi,
-                        // TODO there's a few more here, panic for now
-                        x => {
-                            return Err(GtfsImportError {
-                                error_type: GtfsErrorType::UnknownExtendedRouteType(x),
-                                file: "routes".to_string(),
-                            }.into())
-                        }
-                    },
-                    x => {
-                        return Err(GtfsImportError {
-                            error_type: GtfsErrorType::UnknownRouteType(x),
-                            file: "routes".to_string(),
-                        }.into())
-                    }
-                }),
+                train_type: ActiveValue::Set(train_type),
                 public_id: ActiveValue::Set(trip.trip_short_name.clone()),
                 operator_id: ActiveValue::Set(agency.id.clone()),
                 line_id: ActiveValue::Set(Some(route.id.clone())),
                 headcode: ActiveValue::Set(trip.trip_headsign.clone()),
                 power_type: ActiveValue::Set(None),
                 timing_speed_m_per_s: ActiveValue::Set(None),
-                brand: ActiveValue::Set(None),
+                brand_id: ActiveValue::Set(None),
                 name: ActiveValue::Set(None),
                 uic_code: ActiveValue::Set(None),
                 wheelchair_accessible: ActiveValue::Set(match trip.wheelchair_accessible {
@@ -729,6 +772,10 @@ impl GtfsImporter {
                         }.into())
                     }
                 }),
+                direction: ActiveValue::Set(trip.direction_id.map(|direction| match direction {
+                    DirectionType::Outbound => Direction::Outbound,
+                    DirectionType::Inbound => Direction::Inbound,
+                })),
                 has_luggage: ActiveValue::Set(true),
                 luggage_bicycles: ActiveValue::Set(match trip.bikes_allowed {
                     BikesAllowedType::NoBikeInfo => None,
@@ -749,7 +796,28 @@ impl GtfsImporter {
                 has_passenger_communications: ActiveValue::Set(false),
                 has_assistance: ActiveValue::Set(false),
                 has_passenger_information: ActiveValue::Set(false),
+                has_fares: ActiveValue::Set(false),
+                has_occupancy: ActiveValue::Set(false),
+                has_boarding_information: ActiveValue::Set(false),
                 ..Default::default()
+            };
+
+            let mut route = match calculate_route(
+                &trip.stop_times,
+                &variable_train,
+                &default_timezone,
+                &gtfs.stops,
+                &namespace,
+            ) {
+                Ok(x) => x,
+                Err(x) => match &x.error_type {
+                    GtfsErrorType::NotEnoughStops => {
+                        // This has been known to occur in Renfe Cercanías
+                        println!("[{}] WARNING: {}", namespace, x);
+                        continue
+                    },
+                    _ => return Err(x.into()),
+                },
             };
 
             let train_variant = train_variant::ActiveModelEx {
@@ -767,29 +835,52 @@ impl GtfsImporter {
                 source: ActiveValue::Set(Some(TrainSource::LongTerm)),
                 runs_as_required: ActiveValue::Set(false),
                 performance_monitoring: ActiveValue::Set(None),
-                route: ActiveHasMany::Append(calculate_route(
-                    &trip.stop_times,
-                    &variable_train,
-                    &default_timezone,
-                    &gtfs.stops,
-                    &namespace,
-                )?),
+                route: ActiveHasMany::NotSet,
+                train: ActiveBelongsTo::Set(Some(Box::new(train::ActiveModelEx {
+                    id: ActiveValue::Set(trip_id.clone()),
+                    namespace: ActiveValue::Set(namespace.clone()),
+                    ..Default::default()
+                }))),
                 ..Default::default()
             };
 
-            let train = train::ActiveModelEx {
-                id: ActiveValue::Set(trip_id.clone()),
-                namespace: ActiveValue::Set(namespace.clone()),
-                train_variants: ActiveHasMany::Append(vec![train_variant]),
-                ..Default::default()
-            };
+            let inserted = train_variant.insert(transaction).await?;
+            let mut changes_en_route: HashMap<i64, Option<variable_train::ActiveModelEx>>
+                = HashMap::new();
+            for train_location in route.iter_mut() {
+                train_location.train_variant_id = ActiveValue::Set(inserted.id);
+                changes_en_route.insert(
+                    train_location.index.clone().unwrap(),
+                    train_location.change_en_route.clone().into_option(),
+                );
+                train_location.change_en_route = ActiveHasOne::NotSet;
+            }
+            let inserted_ids =
+                train_location::Entity
+                ::insert_many(
+                    route.into_iter().map(|x| Into::<train_location::ActiveModel>::into(x))
+                )
+                .exec_with_returning_keys(transaction)
+                .await?;
+            for (index, mut change_en_route) in changes_en_route {
+                // We could try to be fancy here, but these could be fairly complex models in
+                // theory, and they're likely rare enough we can just push them manually
+                match &mut change_en_route {
+                    Some(change_en_route) => {
+                        change_en_route.train_location_id
+                            = ActiveValue::Set(
+                                Some(inserted_ids[usize::try_from(index).unwrap()])
+                            );
+                        change_en_route.clone().insert(transaction).await?;
+                    },
+                    None => (),
+                };
+            }
 
-            train.insert(transaction).await?;
             train_count += 1;
         }
 
         println!("[{}] Persisted {} trains", namespace, train_count);
-        self.base_gtfs = Some(gtfs);
         Ok(())
     }
 }
@@ -797,7 +888,7 @@ impl GtfsImporter {
 #[async_trait]
 impl SlowGtfsImporter for GtfsImporter {
     async fn overlay(
-        &mut self, gtfs: Gtfs, schedule: &schedule::ModelEx, transaction: &DatabaseTransaction
+        &self, gtfs: Gtfs, schedule: &schedule::ModelEx, transaction: &DatabaseTransaction
     ) -> Result<(), Error> {
         let namespace = schedule.namespace.clone();
         self.overlay_worker(gtfs, schedule, transaction).await?;

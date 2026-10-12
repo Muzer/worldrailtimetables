@@ -3,7 +3,7 @@ use crate::fetcher::StreamingFetcher;
 use async_compression::tokio::bufread::GzipDecoder;
 use async_trait::async_trait;
 use futures::stream::TryStreamExt;
-use reqwest::Client;
+use reqwest::{Client, retry};
 use serde::Deserialize;
 
 use tokio::io::AsyncBufRead;
@@ -34,7 +34,7 @@ impl NrFetcher {
 impl StreamingFetcher for NrFetcher {
     async fn fetch(&self) -> Result<Box<dyn AsyncBufRead + Unpin + Send>, Error> {
         println!("[gbnr] Fetching SCHEDULE from Network Rail");
-        let client = Client::new();
+        let client = Client::builder().retry(retry::for_host(self.url.clone())).build()?;
         let response = client
             .get(self.url.clone())
             .basic_auth(
